@@ -1,0 +1,26 @@
+{
+  "name": "dmokong-plugins",
+  "owner": {
+    "name": "Dustin Cheng"
+  },
+  "metadata": {
+    "description": "Dustin Cheng's Claude Code plugins",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "agentic-sdlc",
+      "source": {
+        "source": "github",
+        "repo": "DMokong/agentic-sdlc"
+      },
+      "description": "Agentic SDLC quality gates — 4-gate pipeline with LLM-as-judge scoring, git worktree isolation, and beads issue tracking.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Dustin Cheng"
+      },
+      "license": "MIT",
+      "keywords": ["sdlc", "quality-gates", "worktrees", "beads"]
+    }
+  ]
+}
