@@ -9,18 +9,18 @@
   },
   "plugins": [
     {
-      "name": "agentic-sdlc",
+      "name": "speculator",
       "source": {
         "source": "github",
-        "repo": "DMokong/agentic-sdlc"
+        "repo": "DMokong/speculator"
       },
-      "description": "Agentic SDLC quality gates — 4-gate pipeline with LLM-as-judge scoring, git worktree isolation, and beads issue tracking.",
-      "version": "1.3.0",
+      "description": "Speculator — spec quality scoring and 4-gate pipeline with LLM-as-judge evaluation, git worktree isolation, and beads issue tracking. Quality In, Quality Out.",
+      "version": "2.0.0",
       "author": {
         "name": "Dustin Cheng"
       },
       "license": "MIT",
-      "keywords": ["sdlc", "quality-gates", "worktrees", "beads"]
+      "keywords": ["speculator", "sdlc", "quality-gates", "spec-quality", "worktrees", "beads"]
     }
   ]
 }
