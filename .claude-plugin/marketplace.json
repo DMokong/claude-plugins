@@ -11,8 +11,9 @@
     {
       "name": "speculator",
       "source": {
-        "source": "github",
-        "repo": "DMokong/speculator"
+        "source": "url",
+        "url": "https://github.com/DMokong/speculator.git",
+        "sha": "74eb2714692477149c2241f6943b17b3f63c0791"
       },
       "description": "Speculator — spec quality scoring and 4-gate pipeline with LLM-as-judge evaluation, git worktree isolation, and beads issue tracking. Quality In, Quality Out.",
       "version": "2.5.0",
