@@ -14,13 +14,20 @@
         "source": "url",
         "url": "https://github.com/DMokong/speculator.git"
       },
-      "description": "Speculator — spec quality scoring and 4-gate pipeline with LLM-as-judge evaluation, git worktree isolation, and beads issue tracking. Quality In, Quality Out.",
-      "version": "2.7.0",
+      "description": "Speculator \u2014 spec quality scoring and 4-gate pipeline with LLM-as-judge evaluation, git worktree isolation, and beads issue tracking. Quality In, Quality Out.",
+      "version": "2.8.0",
       "author": {
         "name": "Dustin Cheng"
       },
       "license": "MIT",
-      "keywords": ["speculator", "sdlc", "quality-gates", "spec-quality", "worktrees", "beads"]
+      "keywords": [
+        "speculator",
+        "sdlc",
+        "quality-gates",
+        "spec-quality",
+        "worktrees",
+        "beads"
+      ]
     }
   ]
 }
