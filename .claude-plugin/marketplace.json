@@ -14,8 +14,8 @@
         "source": "url",
         "url": "https://github.com/DMokong/speculator.git"
       },
-      "description": "Speculator \u2014 spec quality scoring and a 7-gate pipeline (4 required + 3 opt-in: eval intent, eval quality, comprehension) with LLM-as-judge evaluation, git worktree isolation, and beads issue tracking. Quality In, Quality Out.",
-      "version": "2.17.1",
+      "description": "Speculator \u2014 spec quality scoring and a 7-gate pipeline (4 required + 3 opt-in: eval intent, eval quality, comprehension \u2014 each bindable to spec risk levels) with LLM-as-judge evaluation, git worktree isolation, and beads issue tracking. Quality In, Quality Out.",
+      "version": "2.18.0",
       "author": {
         "name": "Dustin Cheng"
       },
