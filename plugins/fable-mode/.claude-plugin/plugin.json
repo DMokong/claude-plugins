@@ -1,0 +1,9 @@
+{
+  "name": "fable-mode",
+  "description": "Fable 5's working discipline as a skill — a five-gate task loop (scope, evidence, adversarial reasoning, verification, calibrated reporting) for complex, multi-step, or uncertain work.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Dustin Cheng"
+  },
+  "license": "MIT"
+}
