@@ -15,7 +15,7 @@
         "url": "https://github.com/DMokong/speculator.git"
       },
       "description": "Speculator — spec quality scoring and a 7-gate pipeline (4 required + 3 opt-in: eval intent, eval quality, comprehension — each bindable to spec risk levels) with LLM-as-judge evaluation, git worktree isolation, and beads issue tracking. Includes asbuilt-quiz: a human-facing comprehension quiz generator built on the As-Built knowledge system. Quality In, Quality Out.",
-      "version": "2.19.0",
+      "version": "2.20.0",
       "author": {
         "name": "Dustin Cheng"
       },
