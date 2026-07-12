@@ -31,11 +31,11 @@ YAML frontmatter — exactly these fields:
 | `stream` | the `<YYYY-MM-DD-slug>` id |
 | `phase` | one of `route \| shape \| spec \| plan \| execute \| finalize \| done` |
 | `entry` | detected entry point: `idea \| spec \| plan` |
-| `conductor_model` | the model the session runs (normally `fable`) |
+| `conductor_model` | the model(s) that conducted — extend on cross-session handoff, never overwrite (e.g. `sonnet (phases 1-4), fable (phase 5)`) |
 | `weave` | map of capability → binding (e.g. `speculator: <spec-id>`, `beads: <epic-id>`, `superpowers: loaded`) |
 | `target_repo` | absolute path to the repo the stream mutates |
 
-Body — the **task ledger**, a single table, the stream's source of truth for progress:
+Body — the **task ledger**, a single table, the stream's source of truth for progress — plus, optionally, one `## Handoff` section (a single paragraph written at a finalize handoff: what's done, what's parked as deferred, where the evidence lives). No other body content is permitted:
 
 ```
 | Task | Wave | Status | Fix rounds | Notes |
@@ -68,7 +68,7 @@ Flags — set in frontmatter or inline, exactly these:
 
 Append-only. Each agent appends **exactly one** stamped section per round, headed literally `## <role> — round <N>` — an H2 at column 0, with an em dash between role and round.
 
-`role` ∈ `implementer | verifier | adversarial-reviewer | test-author | test-breaker | spec-auditor | fable`. `N` is the fix-loop round (starts at 1).
+`role` ∈ `implementer | verifier | adversarial-reviewer | test-author | test-breaker | spec-auditor | fable`. `N` is the fix-loop round (starts at 1). `fable` is the CONDUCTOR's fixed adjudication-stamp token regardless of the conductor's actual tier — tier truth lives in `stream.md`'s `conductor_model` and the Gate-5 report's mandatory disclosure, never in the stamp.
 
 - Every claim MUST sit adjacent to the command output that supports it.
 - Evidence is command-output **tails** — at most 30 lines per command, never full logs.
@@ -104,8 +104,8 @@ Append-only log. One entry per escalation, exactly these fields:
 | task id | the `NN-slug` that escalated |
 | trigger | one of the five trigger enum values |
 | evidence pointer | `report.md` path + the section header that holds the evidence (not an inline copy) |
-| Fable adjudication | the adjudication move Fable chose |
-| outcome | what happened after adjudication (resumed, replanned, pulled into session, closed) |
+| adjudication | the playbook move the conductor chose (recorded whatever the conductor's tier) |
+| outcome | what happened after adjudication (resumed, replanned, pulled into session, closed, deferred (awaiting fable-tier conductor)) |
 
 Entries are never edited; a superseded adjudication is a new appended entry.
 

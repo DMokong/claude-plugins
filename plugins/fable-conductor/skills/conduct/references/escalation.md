@@ -1,18 +1,20 @@
 # Escalation protocol (normative)
 
 File formats — brief, report, ledger, evidence-tail rules — live in [`contracts.md`](contracts.md); this
-document defines only *when* to escalate, *who* fires it, *what* it carries, and *how* Fable adjudicates.
+document defines only *when* to escalate, *who* fires it, *what* it carries, and *how* the conductor adjudicates.
 
 ## Principle
 
-Escalation is the designed path back to Fable — the seam where a cheap, stateless model hands judgment
-up the ladder, not a failure mode. A haiku verifier or sonnet reviewer that escalates early, with
+Escalation is the designed path back to the conductor — the seam where a cheap, stateless model hands
+judgment up the ladder, not a failure mode. (The playbook below is written for a Fable conductor; per
+the SKILL's Conductor tiers section it applies verbatim to emulating conductors, who additionally get
+move 3.) A haiku verifier or sonnet reviewer that escalates early, with
 evidence, beats one that guesses to look unstuck. The tiering (fable → opus → sonnet → haiku) only pays
 off if cheap tiers stop the instant they hit something needing judgment, not manufacture an answer.
 
 But escalation is cheap only if *self-contained*. Every escalation must carry enough file context —
-brief, report, rounds already run — that Fable adjudicates **without re-deriving the task**: read two or
-three files and rule, not reconstruct what the task was. The unit of context is the *path*, not a
+brief, report, rounds already run — that the conductor adjudicates **without re-deriving the task**: read
+two or three files and rule, not reconstruct what the task was. The unit of context is the *path*, not a
 paraphrase — point at the files, never restate them into `detail`.
 
 ## Triggers
@@ -45,8 +47,8 @@ The bar is *material* contradiction over the same claim, not two agents disagree
 evidence returns `escalate` with this trigger rather than looping) and, script-side, a pragmatic v1
 heuristic: `execute-wave.js` fires this trigger when an identical finding summary survives from the
 immediately prior round after a fix attempt. The script does NOT itself compare verifier tails against
-reviewer verdicts — a material verifier-vs-reviewer contradiction reaches Fable via the reviewer's
-self-declaration or via Fable reading both evidence sets at adjudication, not via script parsing.
+reviewer verdicts — a material verifier-vs-reviewer contradiction reaches the conductor via the reviewer's
+self-declaration or via the conductor reading both evidence sets at adjudication, not via script parsing.
 
 ### plan_invalidating_discovery
 
@@ -87,66 +89,82 @@ A single escalation is:
 - `taskId` — the ledger id of the escalating task.
 - `trigger` — one of the five ids above, verbatim.
 - `detail` — one or two sentences: what fired, pointing at evidence by path/section, not a restatement.
-- `reportPath`, `briefPath` — the two files Fable reads to adjudicate; they make it self-contained.
-- `roundsCompleted` — fix rounds already run, so Fable knows how much budget is spent.
+- `reportPath`, `briefPath` — the two files the conductor reads to adjudicate; they make it self-contained.
+- `roundsCompleted` — fix rounds already run, so the conductor knows how much budget is spent.
 
 The workflow returns a wave's escalations in `escalations[]`. Tasks that **depend on** an escalated task
 move to `blocked[]`; **independent** tasks continue and complete. The wave never blocks globally on one.
 
-## Fable adjudication playbook
+## Conductor adjudication playbook
 
-Fable works these moves **in order**, taking the first that fits — cheapest resolution first, own hands last.
+The conductor works these moves **in order**, taking the first that fits — cheapest resolution first, own hands last.
 
 ### 1. Amend the brief
 
-Most common, and the default suspicion. The brief was wrong, incomplete, or ambiguous → Fable edits it
+Most common, and the default suspicion. The brief was wrong, incomplete, or ambiguous → the conductor edits it
 to fix the real defect, resets the fix counter, and redispatches next wave. Covers `scope_breach` (widen
 the scope), one-brief `plan_invalidating_discovery`, and `fix_exhaustion` where the reviewer was right
 and the brief under-specified the target.
 
 ### 2. Adjudicate the deadlock
 
-For `evidence_deadlock` and stubborn `fix_exhaustion`: Fable reads **both** evidence sets — the
+For `evidence_deadlock` and stubborn `fix_exhaustion`: the conductor reads **both** evidence sets — the
 verifier's tails and the reviewer's cited evidence — and rules which is correct, appending a `## fable —
 round <N>` ruling to the report (per `contracts.md`), then redispatching with the ruling embedded so the
 next round inherits it as settled fact.
 
-### 3. Pull into session
+### 3. Defer to Fable (non-Fable conductors only)
 
-The expensive last resort for one task: Fable implements it directly in the conductor session. Reserved
-for work needing Fable's judgment to produce at all, not merely adjudicate. Fable **records why** (report
-and `escalations.md`) so the audit trail shows a deliberate escalation of *tier*, not a silent takeover.
+When the conductor session runs below fable tier (opus emulation or sonnet structure-only mode — see
+the SKILL's Conductor tiers section) and moves 1–2 haven't resolved it, **park the escalation instead of
+forcing a weak ruling**: append it to `escalations.md` with outcome `deferred (awaiting fable-tier
+conductor)`, leave the task `escalated` in the ledger, and continue with unaffected work. Deferred
+entries are adjudicated FIRST by the next fable-tier session that resumes the stream (typically at the
+finalize handoff). A wrong ruling at a weaker tier costs more rounds than an honest deferral — this is
+the same escalating-early principle the agents follow, applied to the conductor itself. A fable-tier
+conductor never uses this move.
 
-### 4. Replan the subgraph
+### 4. Pull into session
+
+The expensive last resort for one task: the conductor implements it directly in-session. Reserved
+for work needing the conductor's judgment to produce at all, not merely adjudicate. The conductor
+**records why** (report and `escalations.md`) so the audit trail shows a deliberate escalation of
+*tier*, not a silent takeover. Non-Fable conductors should reach for move 3 before this one — pulling a
+judgment-hard task into a sonnet session solves nothing.
+
+### 5. Replan the subgraph
 
 When a `plan_invalidating_discovery` invalidates more than one brief — the graph's shape is wrong —
-Fable returns to Phase 3 for the **affected subgraph only**; untouched tasks keep their state and
+the conductor returns to Phase 3 for the **affected subgraph only**; untouched tasks keep their state and
 evidence, and only the invalidated region is re-briefed.
 
-### 5. Bundle a human question
+### 6. Bundle a human question
 
 **Only** for decisions the human genuinely owns — product scope, irreversible external actions, anything
-Fable cannot legitimately decide alone. Fable **batches every pending human question into one
-interaction** and never drips them. A trigger Fable can resolve with moves 1–4 never becomes one.
+the conductor cannot legitimately decide alone. The conductor **batches every pending human question into one
+interaction** and never drips them. A trigger the conductor can resolve with moves 1–5 never becomes one.
 
 ## Resume semantics
 
 - Every adjudication is appended to `escalations.md` (append-only; the conductor supplies timestamps —
-  agents and Fable do not stamp their own). It is the history the Phase 5 report cites.
+  agents and the adjudicator do not stamp their own). It is the history the Phase 5 report cites.
 - The next wave's `args` carry **only unfinished tasks**; blocked dependents re-enter once their blocker
   is adjudicated.
 - **Fix counters reset only on brief amendment (move 1) or an embedded ruling (move 2).** A simple retry
   does **not** reset the counter — that would let a task loop forever.
+- **Deferred entries (move 3) are adjudicated first on resume by a fable-tier conductor** — before any
+  new wave is dispatched. A deferral is never silently dropped: it either gets a recorded adjudication
+  or an explicit close in `escalations.md`.
 - Ledger statuses in `stream.md` are updated to reflect the adjudication **before** redispatch, so the
   wave's view of task state is current when it fans out.
 
 ## Anti-patterns
 
 - **Escalating without reading your own report first.** An agent firing an escalation must first read
-  the report it points Fable at; a dangling `reportPath` is worse than no escalation.
+  the report it points the conductor at; a dangling `reportPath` is worse than no escalation.
 - **Retrying the identical dispatch hoping for different output.** The same brief + diff + findings
   yields the same result. Change the inputs (amend brief, embed ruling) or the tier — never re-roll.
-- **Fable silently fixing without recording the adjudication.** Ruling a deadlock or pulling a task in
+- **The conductor silently fixing without recording the adjudication.** Ruling a deadlock or pulling a task in
   without an `escalations.md` entry and report section breaks the audit trail — the final report can no
   longer distinguish verified from adjudicated.
 - **Treating `escalate` as shameful.** It is the protocol working as designed. A wave that never

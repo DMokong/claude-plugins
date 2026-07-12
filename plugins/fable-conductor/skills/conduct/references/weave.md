@@ -30,7 +30,10 @@ Probe: is `Workflow` present in the session's tool list? This is a session-level
 
 ### fable-mode
 
-Probe: is the skill `fable-mode:fable-mode` present in the available-skills list? Note this is orthogonal to "is this session Fable" — fable-mode being installed doesn't mean the conductor session invoked it, only that its gate vocabulary is available to cite by name.
+Probe: is the skill `fable-mode:fable-mode` present in the available-skills list? For non-Fable
+conductors (emulation / structure-only modes per the SKILL's Conductor tiers section) fable-mode is
+REQUIRED, not optional — a missing probe there means warn the user and inline the gate rules before
+conducting. Note this is orthogonal to "is this session Fable" — fable-mode being installed doesn't mean the conductor session invoked it, only that its gate vocabulary is available to cite by name.
 
 ### Probe summary
 

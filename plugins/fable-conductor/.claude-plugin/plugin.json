@@ -1,7 +1,9 @@
 {
   "name": "fable-conductor",
   "description": "Fable-maximised orchestration of entire work streams — Fable owns brainstorm/spec/plan, escalations, and final review; autonomous opus/sonnet/haiku adversarial workflows (implement, review, test) execute everything mechanical in between, coordinated through durable file contracts.",
-  "version": "1.0.0",
-  "author": { "name": "Dustin Cheng" },
+  "version": "1.1.0",
+  "author": {
+    "name": "Dustin Cheng"
+  },
   "license": "MIT"
 }

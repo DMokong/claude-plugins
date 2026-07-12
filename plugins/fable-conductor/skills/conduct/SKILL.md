@@ -4,11 +4,12 @@ description: >-
   This skill should be used when the user says "/conduct", "conduct this", "run a work stream",
   "orchestrate this feature end to end", "fable conductor", "build this with agent workflows",
   or "take this from idea to shipped" — and PROACTIVELY when a request describes a multi-task
-  feature arc (idea to spec to plan to implement to test to review to ship) AND the session runs
-  a frontier/judgment-tier model whose time is best spent shaping and reviewing. Runs a full work
-  stream with Fable judgment at shape/spec/plan/escalations/final-review and autonomous
-  opus/sonnet/haiku adversarial waves for everything mechanical in between. fable-mode disciplines
-  a single session; this skill orchestrates many — they stack.
+  feature arc (idea to spec to plan to implement to test to review to ship), especially on a
+  frontier/judgment-tier session. Runs a full work stream with conductor judgment at
+  shape/spec/plan/escalations/final-review and autonomous opus/sonnet/haiku adversarial waves for
+  everything mechanical in between. Non-Fable sessions conduct too: opus in emulation mode, sonnet
+  in structure-only mode, either handing Phase 5 to a Fable session (see Conductor tiers).
+  fable-mode disciplines a single session; this skill orchestrates many — they stack.
 ---
 
 # Conduct — the fable-conductor operating manual
@@ -17,13 +18,25 @@ You are the conductor session. This is the manual you follow to run one work str
 
 ## What this is
 
-Maximise the expensive model where judgment actually lives — shaping, spec, planning, escalation adjudication, and the final whole-branch review — and spend it nowhere else. Everything mechanical between plan approval and final review runs on sonnet/haiku agents dispatched through Workflow templates, coordinated entirely through durable file contracts, never through agent memory. Every dispatched agent reads its own brief and appends its own evidence; you read the ledger and the escalations, not the transcripts. The waves are adversarial by construction: an implementer produces, a verifier runs the checks verbatim, a reviewer tries to refute "done," and fix loops are fresh dispatches carrying brief + diff + findings. You re-enter at exactly two seams — escalations and final review. Relationship to fable-mode: fable-mode disciplines how a *single* session works; this skill orchestrates *many* sessions across the model ladder. They stack — run this on a Fable session that also honours the fable-mode gates.
+Maximise the expensive model where judgment actually lives — shaping, spec, planning, escalation adjudication, and the final whole-branch review — and spend it nowhere else. Everything mechanical between plan approval and final review runs on opus/sonnet/haiku agents dispatched through Workflow templates, coordinated entirely through durable file contracts, never through agent memory. Every dispatched agent reads its own brief and appends its own evidence; you read the ledger and the escalations, not the transcripts. The waves are adversarial by construction: an implementer produces, a verifier runs the checks verbatim, a reviewer tries to refute "done," and fix loops are fresh dispatches carrying brief + diff + findings. You re-enter at exactly two seams — escalations and final review. Relationship to fable-mode: fable-mode disciplines how a *single* session works; this skill orchestrates *many* sessions across the model ladder. They stack — run this on a Fable session that also honours the fable-mode gates.
 
 ## When NOT to use
 
 - **Single-task work** — one file, one change, one review. Use `fable-mode` alone; the orchestration overhead buys nothing when there is no dependency graph to slice.
 - **Trivial edits** — a rename, a typo, a config bump. Just do it; do not spin up a stream directory for a two-minute change.
-- **Sessions already running a cheap model** — the entire premise is that your tokens are expensive and the workflow tokens are cheap. On a sonnet or haiku session the leverage math inverts: you would be delegating to peers or betters at no saving and paying the coordination tax on top. Do the work directly, or ask the user to relaunch on a frontier model if the arc genuinely warrants conducting.
+- **Haiku sessions** — no leverage over any worker tier and thin judgment for adjudication. Do the work directly, or ask the user to relaunch on a stronger model if the arc genuinely warrants conducting.
+
+A non-Fable session is NOT automatically disqualified — see **Conductor tiers** below. Opus conducts in emulation mode; sonnet conducts in structure-only mode; both can hand Phase 5 to a Fable session.
+
+## Conductor tiers — emulation and handoff
+
+The conductor role transfers to weaker models; Fable's judgment does not. Detect which model this session runs, record it as `conductor_model` in `stream.md` at Phase R, and apply the matching mode:
+
+- **Fable** — full protocol as written. Everything below is inapplicable.
+- **Opus — emulation mode.** The five-gate discipline is the prosthetic that closes part of the judgment gap: invoke `fable-mode` before conducting (in emulation it is REQUIRED, not recommended — if it is not installed, warn the user and inline its gate rules from `references/weave.md` before proceeding). Compensate at the weak seams: raise `final-audit.js`'s `panelSize` to 5, and prefer the **defer-to-Fable** escalation move (see `references/escalation.md`) over ruling a hard deadlock at opus tier. The Gate-5 report MUST disclose the conductor tier ("adjudicated and reviewed at opus tier") — never let the report imply Fable-grade review it didn't get.
+- **Sonnet — structure-only mode.** The model-leverage premise inverts (workers are peers), but the structure still pays: adversarial two-stage review, file contracts, fresh-context workers, and parallel fan-out are model-independent wins. State this trade-off to the user in one line before Phase 1. Judgment-tier tasks still map to opus — dispatching workers ABOVE the conductor's tier is correct and encouraged. Treat defer-to-Fable as the default for any non-trivial escalation, raise `panelSize` to 5, and strongly prefer the finalize handoff below over conducting Phase 5 yourself. Disclose the tier in every report.
+
+**Finalize handoff (cross-session tiering).** Any conductor may run Phases 1–4 and hand the judgment seams to a Fable session: finish the last wave, park unresolved escalations in `escalations.md` with outcome `deferred (awaiting fable-tier conductor)`, set `phase: finalize` in `stream.md`, append a `## Handoff` section to its body (one paragraph per `references/contracts.md`: what's done, what's parked, where the evidence lives), and tell the user to resume with `/conduct` on a Fable session. The resuming Fable conductor re-probes capabilities (per `references/weave.md`), adjudicates the deferred escalations first, then runs Phase 5 as written. The file contracts make this free — everything Fable needs is already in the stream directory. When a stream changes conductors, extend `conductor_model` rather than overwriting it (e.g. `sonnet (phases 1-4), fable (phase 5)`).
 
 ## Phase R — Route
 
@@ -98,7 +111,7 @@ args = {
 
 ## Escalation loop
 
-An escalation is the designed path back to you, not a failure. Read `references/escalation.md` and adjudicate per its playbook — work the moves in order, cheapest first, your own hands last: **amend the brief** → **adjudicate the deadlock** from both evidence sets → **pull the task into session** (last resort) → **replan the affected subgraph** → **bundle a genuine product decision for the human** (only decisions the human owns; batched, never dripped one at a time).
+An escalation is the designed path back to you, not a failure. Read `references/escalation.md` and adjudicate per its playbook — work the moves in order, cheapest first, your own hands last: **amend the brief** → **adjudicate the deadlock** from both evidence sets → **defer to Fable** (non-Fable conductors: park it rather than force a weak ruling) → **pull the task into session** (last resort) → **replan the affected subgraph** → **bundle a genuine product decision for the human** (only decisions the human owns; batched, never dripped one at a time).
 
 Each escalation object carries `{ taskId, trigger, detail, reportPath, briefPath, roundsCompleted }` — read the two files it points at and rule without re-deriving the task. Record every adjudication in `escalations.md` (you supply the timestamp — no agent stamps its own) *and* append a `## fable — round <N>` section to the task's `report.md` when your ruling becomes settled fact the next round must inherit. Update ledger statuses **before** redispatch. Redispatch via a new wave carrying **only unfinished tasks**; blocked dependents re-enter once their blocker is cleared. Fix counters reset only on brief amendment or an embedded ruling — never on a bare retry. **Never pull a task into the session without recording why** — a silent takeover breaks the audit trail that lets the final report separate verified from adjudicated.
 
@@ -114,7 +127,7 @@ args = {
   acs: [{ id, text }],   // the numbered ACs you extracted
   auditReportPath,  // append-only audit evidence file
   agentTypes: { specAuditor },  // 'specAuditor' -> spec-auditor agent
-  panelSize         // haiku voters per AC; default 3
+  panelSize         // haiku voters per AC; default 3 (5 for non-Fable conductors — see Conductor tiers)
 }
 ```
 
@@ -122,7 +135,7 @@ It returns `{ acVerdicts, findings, surplus, deficit, auditReportPath }`. **This
 
 Then do the whole-branch final review yourself with Gate 3 + Gate 4 discipline: refute-then-steelman the *branch*, verify each claim at the layer of the claim (if the claim is "output correct," look at the output — exit code 0 only proves the layer below). Audit findings get first attention, but your review is not limited to them — surplus/deficit flags and anything the audit missed are still yours to catch.
 
-Delivery weave per `references/weave.md`: speculator-bound stream → `/sdlc gate` + `/sdlc close`; else present `finishing-a-development-branch`-style options (merge / PR / keep). Close with a Gate-5 calibrated report: verified vs assumed with evidence citations (file paths, commands, numbers you actually saw), the escalation history, what the audit found vs what *you* found, and the stream directory itself as the standing audit trail. Set `stream.md` `phase: done`.
+Delivery weave per `references/weave.md`: speculator-bound stream → `/sdlc gate` + `/sdlc close`; else present `finishing-a-development-branch`-style options (merge / PR / keep). Close with a Gate-5 calibrated report: verified vs assumed with evidence citations (file paths, commands, numbers you actually saw), the escalation history (including any deferred adjudications and who ultimately ruled them), the conductor tier(s) that reviewed the work (mandatory disclosure for non-Fable conductors), what the audit found vs what *you* found, and the stream directory itself as the standing audit trail. Set `stream.md` `phase: done`.
 
 ## Contracts quick-card
 
