@@ -9,6 +9,29 @@
   },
   "plugins": [
     {
+      "name": "lego-plan-builder",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/DMokong/lego-plan-builder.git"
+      },
+      "description": "Generate official-manual-style LEGO build instructions from an idea or image — Claude composes a stud-grid model, a deterministic pipeline validates physics/legality, sequences kid-appropriate steps, renders via LDraw/LeoCAD, and assembles a printable booklet whose bill of materials carries real LEGO element IDs with Pick a Brick ordering links. Includes lego-mosaic: deterministic photo → stud-grid wall art.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Dustin Cheng"
+      },
+      "license": "MIT",
+      "keywords": [
+        "lego",
+        "instructions",
+        "kids",
+        "ldraw",
+        "rebrickable",
+        "mosaic",
+        "booklet",
+        "generative-design"
+      ]
+    },
+    {
       "name": "speculator",
       "source": {
         "source": "url",
