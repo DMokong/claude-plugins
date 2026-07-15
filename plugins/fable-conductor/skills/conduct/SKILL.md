@@ -67,7 +67,7 @@ ACs are load-bearing: every later adversarial stage keys off them — the review
 
 Weave the plan *doc* per `references/weave.md` (`superpowers:writing-plans` if present, else built-in dependency-sliced decomposition). Then discharge the conductor's **own non-delegable duty** — no weave target ever produces these:
 
-- **Per-task briefs.** For each task write `tasks/NN-slug/brief.md` in the exact format `references/contracts.md` fixes (H2 sections: Goal, Done-check, File scope, Required content, Inputs, Verification commands, Report obligation, Out of scope). The Done-check must be a runnable check, not a vibe.
+- **Per-task briefs.** For each task write `tasks/NN-slug/brief.md` in the exact format `references/contracts.md` fixes (H2 sections: Goal, Done-check, File scope, Required content, Inputs, Verification commands, Report obligation, Out of scope). The Done-check must be a runnable check, not a vibe. Every File scope opens with the **working-directory contract** — the absolute target-checkout path (worktree when used), expected branch, and the cd + `git rev-parse` guard (see `references/contracts.md`). Workers inherit YOUR session's cwd; a brief that says "the repo you are in" dispatches work into the wrong checkout.
 - **Dependency-sliced waves.** Slice by dependency, not by category — each wave is a dependency-free batch. Later waves consume earlier waves' outputs.
 - **`parallel_safe`** — set `true` only when a task's file scope is *provably disjoint* from every wave sibling's. v1 has no worktree-merge machinery; disjoint scopes are what make concurrency safe. When in doubt, `false`.
 - **`testable`** — set `true` for tasks with a behavioral surface; it triggers the test-author dispatch inside the wave.
@@ -92,12 +92,16 @@ Run the plan wave by wave. You own the dependency graph; the workflow template o
 
 ```
 args = {
-  streamDir,   // absolute path to the stream directory
-  repoRoot,    // absolute path to the target repo
-  specPath,    // absolute path to the spec (reviewer reads it for AC checks)
+  streamDir,      // absolute path to the stream directory
+  repoRoot,       // REQUIRED: absolute path to the target repo CHECKOUT (the worktree when
+                  // the stream uses one) — injected into every worker prompt as the
+                  // working-directory contract; the template throws without it
+  expectedBranch, // optional but pass it for any branch/worktree stream: workers verify
+                  // `git rev-parse --abbrev-ref HEAD` matches before writing
+  specPath,       // absolute path to the spec (reviewer reads it for AC checks)
   agentTypes: { implementer, verifier, reviewer, testAuthor }, // runtime-resolved registry names
   tasks: [{ id, briefPath, reportPath, parallelSafe, testable, tier }], // this wave only
-  maxFixLoops  // ADDITIONAL rounds after round 1; default 2 (3 rounds total)
+  maxFixLoops     // ADDITIONAL rounds after round 1; default 2 (3 rounds total)
 }
 ```
 
@@ -105,7 +109,7 @@ args = {
 
 **On completion:** update the `stream.md` ledger (status + fix rounds per task). Route every entry in `escalations[]` to the **Escalation loop** below and move that task's dependents to `blocked`. Then compose the next dependency-free wave from remaining tasks and dispatch again.
 
-**Test-adversary** — if the spec carries a test-suite AC, run `test-adversary.js` after the wave that lands the suite. Invoke `Workflow` with `scriptPath = ${CLAUDE_PLUGIN_ROOT}/skills/conduct/references/workflows/test-adversary.js` and `args = { specPath, briefPath, reportPath, scratchDir, suiteCommand, breakers, agentTypes: { testBreaker, testAuthor } }` (`testBreaker` → `test-breaker` agent, `testAuthor` → `test-author` agent; `breakers` defaults to 3). It returns `{ gaps, hardened, residue }`; **non-empty `residue` is yours to escalate** — the template does not construct the escalation object.
+**Test-adversary** — if the spec carries a test-suite AC, run `test-adversary.js` after the wave that lands the suite. Invoke `Workflow` with `scriptPath = ${CLAUDE_PLUGIN_ROOT}/skills/conduct/references/workflows/test-adversary.js` and `args = { repoRoot, expectedBranch, specPath, briefPath, reportPath, scratchDir, suiteCommand, breakers, agentTypes: { testBreaker, testAuthor } }` (`repoRoot` REQUIRED — same working-directory contract as execute-wave) (`testBreaker` → `test-breaker` agent, `testAuthor` → `test-author` agent; `breakers` defaults to 3). It returns `{ gaps, hardened, residue }`; **non-empty `residue` is yours to escalate** — the template does not construct the escalation object.
 
 **Workflow tool absent** → degrade per `references/weave.md`: run each wave as Agent-tool parallel batches — same briefs, same contracts, same fix-loop rules, orchestrated via direct Agent-tool dispatch — and note the degradation in `stream.md` and the affected reports.
 

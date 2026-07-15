@@ -23,7 +23,14 @@ const A = typeof args === 'string' ? JSON.parse(args) : args
 // CONTRACT: args shape (consumed verbatim — never mutated, never re-derived)
 //   args = {
 //     streamDir,      // absolute path to the stream directory (reserved; unused in v1)
-//     repoRoot,       // absolute path to the target repo (reserved; unused in v1)
+//     repoRoot,       // REQUIRED: absolute path to the target repo CHECKOUT (the
+//                     // worktree when the stream uses one). Injected into every
+//                     // worker prompt as the working-directory contract — workers
+//                     // inherit the conductor session's cwd, which is often a
+//                     // DIFFERENT repo (field defect 2026-07-16: wave-1 work
+//                     // committed to the target's main checkout, not its worktree).
+//     expectedBranch, // optional: branch name workers must verify before writing
+//                     // (pass it whenever the stream works on a branch/worktree)
 //     specPath,       // absolute path to spec (reviewer reads this for AC checks)
 //     agentTypes: { implementer, verifier, reviewer, testAuthor }, // registry
 //                     // names resolved by the CALLER — never hardcode plugin-
@@ -34,6 +41,19 @@ const A = typeof args === 'string' ? JSON.parse(args) : args
 //   }
 // tier is 'standard' | 'judgment' (default 'standard'); only feeds modelFor().
 const maxLoops = A.maxFixLoops ?? 2
+
+// Working-directory contract — prepended to EVERY worker prompt. Workers are
+// fresh subagents that inherit the conductor session's cwd; without this,
+// "the repo you are dispatched in" resolves to the wrong checkout.
+if (!A.repoRoot) throw new Error('args.repoRoot is required: every worker prompt carries the working-directory contract')
+const CWD_CONTRACT = [
+  `WORKING-DIRECTORY CONTRACT: all repo work happens in ${A.repoRoot} — cd there before anything else.`,
+  `You inherit the dispatching session's cwd, which may be a different repo or the wrong checkout of this one; never trust it.`,
+  `After cd, and before ANY file write or git commit, verify: \`git rev-parse --show-toplevel\` prints ${A.repoRoot}` +
+    (A.expectedBranch ? ` AND \`git rev-parse --abbrev-ref HEAD\` prints ${A.expectedBranch}` : '') + `.`,
+  `On any mismatch: STOP, write nothing, and record a broken_harness escalation in your report section.`,
+  `Only the report file (at its absolute path) may be written outside ${A.repoRoot}.`
+].join(' ')
 
 // Model mapping — defined once. judgment tier gets opus where judgment
 // matters (implementer, reviewer); test-author is always sonnet; verifier
@@ -64,6 +84,7 @@ const VERDICT = {
 function testAuthorPrompt(task) {
   return [
     `You are the TEST-AUTHOR for task ${task.id} (pre-implementation, round 1).`,
+    CWD_CONTRACT,
     `Read FIRST: the brief at ${task.briefPath} (your contract) and the spec at ${A.specPath} (acceptance criteria).`,
     `Write failing-first tests that encode the brief's acceptance criteria, per your role's conventions.`,
     `Append a "## test-author — round 1" section to ${task.reportPath} (create if missing): what you wrote and why, evidence tails <=30 lines.`,
@@ -74,6 +95,7 @@ function testAuthorPrompt(task) {
 function implementerPrompt(task, round, findings) {
   const lines = [
     `You are the IMPLEMENTER for task ${task.id}, round ${round}.`,
+    CWD_CONTRACT,
     `Read FIRST: the brief at ${task.briefPath} — it is your contract.`,
     `Also read ${task.reportPath} if it exists, for context from prior rounds.`
   ]
@@ -92,6 +114,7 @@ function implementerPrompt(task, round, findings) {
 function verifierPrompt(task, round) {
   return [
     `You are the VERIFIER for task ${task.id}, round ${round}.`,
+    CWD_CONTRACT,
     `Read FIRST: the brief at ${task.briefPath} for its Verification commands, and ${task.reportPath} for the implementer's claims.`,
     `Run the brief's verification commands VERBATIM — do not invent new checks.`,
     `Append a "## verifier — round ${round}" section to ${task.reportPath}: command tails <=30 lines, plain pass/fail per command.`,
@@ -102,7 +125,9 @@ function verifierPrompt(task, round) {
 function reviewerPrompt(task, round) {
   return [
     `You are the ADVERSARIAL REVIEWER for task ${task.id}, round ${round}.`,
+    CWD_CONTRACT,
     `Read FIRST: the brief at ${task.briefPath}, the full report at ${task.reportPath}, the spec at ${A.specPath} (acceptance criteria), and the changed files inside the brief's File scope.`,
+    `Part of your review: confirm the work actually landed in ${A.repoRoot}${A.expectedBranch ? ` on branch ${A.expectedBranch}` : ''} — work committed to any other checkout is a broken_harness finding regardless of content quality.`,
     `Refute-then-steelman: try hard to break the implementer's claim first, then judge fairly.`,
     `Finding nothing wrong is a legitimate result — never manufacture findings.`,
     `Append a "## adversarial-reviewer — round ${round}" section to ${task.reportPath}: verdict and evidence tails <=30 lines.`,

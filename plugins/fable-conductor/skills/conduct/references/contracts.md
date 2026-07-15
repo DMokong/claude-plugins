@@ -51,7 +51,7 @@ A brief is the complete, self-contained contract for one task. Required H2 secti
 
 - **Goal** — one paragraph: what artifact this task produces and why.
 - **Done-check** — a runnable check (a command or grep), never a vibe. If it passes, the task is done.
-- **File scope** — explicit create/modify paths or globs. Scope is a HARD boundary: an agent that cannot finish inside it MUST escalate `scope_breach`, never widen the scope.
+- **File scope** — explicit create/modify paths or globs. Scope is a HARD boundary: an agent that cannot finish inside it MUST escalate `scope_breach`, never widen the scope. The section MUST open with the **working-directory contract**: the absolute target-checkout path (the worktree, when the stream uses one), the expected branch, and the guard a worker runs before any write (`cd <checkout>` then `git rev-parse --show-toplevel` / `--abbrev-ref HEAD` matching, else stop and escalate `broken_harness`). Never write "the repo root you are dispatched in" — workers inherit the conductor session's cwd, which is routinely a different repo (field defect, 2026-07-16: wave-1 work landed in the target's main checkout instead of its worktree).
 - **Required content** — the exact structure the artifact MUST have (sections, fields, ordering).
 - **Inputs** — paths the agent MUST Read before acting.
 - **Verification commands** — copy-paste runnable; the verifier runs these verbatim.

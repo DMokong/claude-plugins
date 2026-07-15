@@ -18,6 +18,12 @@ export const meta = {
 // args may arrive as a JSON-encoded string depending on caller encoding — normalize before use.
 const A = typeof args === 'string' ? JSON.parse(args) : args
 
+// Working-directory contract — workers inherit the conductor session's cwd,
+// which is often a different repo; every prompt names the target checkout.
+// (Same fix family as execute-wave.js; field defect 2026-07-16.)
+if (!A.repoRoot) throw new Error('args.repoRoot is required: every worker prompt carries the working-directory contract')
+const CWD_CONTRACT = `WORKING-DIRECTORY CONTRACT: the target repo checkout is ${A.repoRoot} — cd there first and run ${'`git rev-parse --show-toplevel`'} to confirm it prints ${A.repoRoot}${A.expectedBranch ? ` and \`git rev-parse --abbrev-ref HEAD\` prints ${A.expectedBranch}` : ''} before any write. You inherit the dispatching session's cwd — never trust it. Run the suite command FROM ${A.repoRoot}. On mismatch: stop, write nothing, record a broken_harness note in your report section.`
+
 // Breaker structured-output schema — required by the brief (per-breaker call).
 const BREAKER_SCHEMA = {
   type: 'object',
@@ -57,7 +63,8 @@ log(`Break phase: fanning out ${breakers} test-breaker(s) against ${A.specPath}`
 
 const breakResults = await parallel(
   Array.from({ length: breakers }, (_, i) => async () => {
-    const prompt = `Read FIRST: ${A.briefPath}, then ${A.reportPath} if it exists, then ${A.specPath} and the test suite it targets.
+    const prompt = `${CWD_CONTRACT}
+Read FIRST: ${A.briefPath}, then ${A.reportPath} if it exists, then ${A.specPath} and the test suite it targets.
 You are test-breaker #${i} of ${breakers}. Diversity heuristic: focus on acceptance criteria where
 (acceptance-criterion index) % ${breakers} === ${i} — this spreads coverage across breakers instead of
 duplicating effort on the same ACs. Craft deliberately-wrong implementations that violate your targeted
@@ -102,7 +109,8 @@ if (survivors.length === 0) {
 
 phase('Harden')
 
-const hardenPrompt = `Read FIRST: ${A.briefPath}, then ${A.reportPath}, then ${A.specPath} and the current test suite.
+const hardenPrompt = `${CWD_CONTRACT}
+Read FIRST: ${A.briefPath}, then ${A.reportPath}, then ${A.specPath} and the current test suite.
 The following wrong-implementation variants survived the suite unexpectedly (JSON below). Harden the
 suite so each survivor is addressed BY NAME: add or strengthen assertions so the suite would now catch
 that specific variant's wrongness. Show failing-first evidence per survivor before your fix, matching
@@ -124,7 +132,8 @@ if (!hardenResult) {
   return { gaps: survivors, hardened: false, residue: survivors }
 }
 
-const recheckPrompt = `Read FIRST: ${A.briefPath}, then ${A.reportPath} (see the "## test-author — round 2" section
+const recheckPrompt = `${CWD_CONTRACT}
+Read FIRST: ${A.briefPath}, then ${A.reportPath} (see the "## test-author — round 2" section
 just appended) and the now-hardened test suite. Rebuild ONLY the previously-surviving variants listed
 below under ${A.scratchDir}/recheck/, run the hardened suite (${A.suiteCommand}) against each, and
 report which still pass (residue) vs are now caught. Previously-surviving variants JSON:
