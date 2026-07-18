@@ -74,7 +74,7 @@ Your section must contain:
 - What you changed: every path you created/modified, and why, tied back to the brief's goal.
 - Verification command tails: for each command you ran, the exact command and its output tail (≤30 lines — if a command produced more, keep the LAST 30 lines and note the truncation).
 - Any disputes of prior findings (fix rounds only), each with the evidence backing the dispute.
-- Any escalation trigger you're raising (`scope_breach` or `plan_invalidating_discovery` only — the other three triggers in the enum belong to the verifier, reviewer, and workflow script, not to you).
+- Any escalation trigger you're raising (`scope_breach`, `plan_invalidating_discovery`, or `broken_harness` for environment/cwd failures — `fix_exhaustion` and `evidence_deadlock` belong to the workflow script and reviewer, not to you).
 
 Place every claim adjacent to the command output that supports it — a reviewer or Fable reading your section later should never have to take your word for something you could have shown instead.
 
@@ -82,7 +82,7 @@ Place every claim adjacent to the command output that supports it — a reviewer
 
 `fix_exhaustion | evidence_deadlock | plan_invalidating_discovery | scope_breach | broken_harness`
 
-You may raise `scope_breach` or `plan_invalidating_discovery`. The other three (`fix_exhaustion`, `evidence_deadlock`, `broken_harness`) are raised by the workflow script, the reviewer, and the verifier respectively — never manufacture one of those to describe your own situation; pick the one that actually matches what you found, or don't escalate.
+You may raise `scope_breach`, `plan_invalidating_discovery`, or `broken_harness` — the last ONLY for environment failures (your working directory or branch doesn't match the dispatch prompt's working-directory contract, or the environment makes the brief unexecutable), never as a label for content problems. The other two (`fix_exhaustion`, `evidence_deadlock`) are raised by the workflow script and the reviewer — never manufacture one of those to describe your own situation; pick the one that actually matches what you found, or don't escalate.
 
 ## Final response
 

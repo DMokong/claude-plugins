@@ -22,7 +22,7 @@ const A = typeof args === 'string' ? JSON.parse(args) : args
 // which is often a different repo; every prompt names the target checkout.
 // (Same fix family as execute-wave.js; field defect 2026-07-16.)
 if (!A.repoRoot) throw new Error('args.repoRoot is required: every worker prompt carries the working-directory contract')
-const CWD_CONTRACT = `WORKING-DIRECTORY CONTRACT: the target repo checkout is ${A.repoRoot} — cd there first and run ${'`git rev-parse --show-toplevel`'} to confirm it prints ${A.repoRoot}${A.expectedBranch ? ` and \`git rev-parse --abbrev-ref HEAD\` prints ${A.expectedBranch}` : ''} before any write. You inherit the dispatching session's cwd — never trust it. Run the suite command FROM ${A.repoRoot}. On mismatch: stop, write nothing, record a broken_harness note in your report section.`
+const CWD_CONTRACT = `WORKING-DIRECTORY CONTRACT: the target repo checkout is ${A.repoRoot} — cd there first and run ${'`git rev-parse --show-toplevel`'} to confirm it resolves to the same directory as ${A.repoRoot} (compare after resolving symlinks and ignoring trailing slashes)${A.expectedBranch ? `, and \`git rev-parse --abbrev-ref HEAD\` prints ${A.expectedBranch}` : ''}, before any write. You inherit the dispatching session's cwd — never trust it. Run the suite command FROM ${A.repoRoot}. Writes are allowed in exactly two places OUTSIDE ${A.repoRoot}: your assigned scratch area${A.scratchDir ? ` (${A.scratchDir})` : ''} and the report file at its absolute path — nothing else. On mismatch: stop, write nothing, record a broken_harness note in your report section.`
 
 // Breaker structured-output schema — required by the brief (per-breaker call).
 const BREAKER_SCHEMA = {

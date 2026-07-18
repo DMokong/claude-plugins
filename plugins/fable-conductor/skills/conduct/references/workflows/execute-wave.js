@@ -49,7 +49,7 @@ if (!A.repoRoot) throw new Error('args.repoRoot is required: every worker prompt
 const CWD_CONTRACT = [
   `WORKING-DIRECTORY CONTRACT: all repo work happens in ${A.repoRoot} — cd there before anything else.`,
   `You inherit the dispatching session's cwd, which may be a different repo or the wrong checkout of this one; never trust it.`,
-  `After cd, and before ANY file write or git commit, verify: \`git rev-parse --show-toplevel\` prints ${A.repoRoot}` +
+  `After cd, and before ANY file write or git commit, verify: \`git rev-parse --show-toplevel\` resolves to the same directory as ${A.repoRoot} (compare after resolving symlinks and ignoring trailing slashes — a cosmetic path difference is NOT a mismatch)` +
     (A.expectedBranch ? ` AND \`git rev-parse --abbrev-ref HEAD\` prints ${A.expectedBranch}` : '') + `.`,
   `On any mismatch: STOP, write nothing, and record a broken_harness escalation in your report section.`,
   `Only the report file (at its absolute path) may be written outside ${A.repoRoot}.`

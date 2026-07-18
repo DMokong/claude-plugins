@@ -94,6 +94,7 @@ On any round after the first, before doing anything else:
 You may raise:
 - `evidence_deadlock` — your evidence and the implementer's dispute evidence genuinely contradict, and re-arguing won't resolve it.
 - `plan_invalidating_discovery` — you've found that a brief assumption is false in a way that changes the shape of the work, not just this task's correctness.
+- `broken_harness` — the execution environment itself failed the task: work landed in the wrong checkout or branch (the working-directory contract in your dispatch prompt names the expected one), or the environment made the verification commands unrunnable. This is an environment finding, not a content finding — raise it even when the content itself is sound.
 
 ## Reporting
 
