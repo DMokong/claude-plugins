@@ -111,8 +111,9 @@ Entries are never edited; a superseded adjudication is a new appended entry.
 
 ## Evidence rules
 
-Three laws, in force everywhere:
+Four laws, in force everywhere:
 
 1. **Adjacency.** Every claim sits next to the command output that supports it. A claim with no adjacent evidence is unsupported and MUST be treated as false.
 2. **Tails, not logs.** Evidence is output tails (≤30 lines per command). Never paste a full log; excerpt the load-bearing tail.
 3. **Provenance wins.** Evidence you did not generate beats evidence you did. When a verifier's tails contradict an implementer's self-report, the verifier tails are authoritative.
+4. **Escalation over rank.** Disagreement between any cross-checking pair — the reviewer's own re-run vs the verifier's recorded tails, a resident conductor vs a peer session's ruling — resolves by escalation, never by rank. A reviewer whose re-run contradicts the verifier's record raises `evidence_deadlock`; a resident who disagrees with a peer's adjudication opens a new deadlock. Never a silent override, never silent adoption.

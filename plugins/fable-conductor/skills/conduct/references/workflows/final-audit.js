@@ -30,6 +30,20 @@ const A = typeof args === 'string' ? JSON.parse(args) : args
 const panelSize = A.panelSize ?? 3
 const majorityThreshold = Math.ceil(panelSize / 2)
 
+// Lens-diverse panel (v1.1.3): identical prompts sampled N times measure
+// sampling variance, not independent judgment — and better-calibrated models
+// make identical votes MORE correlated, so a same-prompt panel degrades as
+// models improve. Each voter judges through a distinct lens; the lens is
+// attached to the vote script-side (VOTER_SCHEMA stays {refuted, reason}).
+// Ordering rationale: at panelSize 5 the i % 3 assignment (2/2/1) deliberately
+// favours the two evidence-grounded lenses — independent samples genuinely
+// differ there, while counterexample construction is the most deterministic.
+const LENSES = [
+  'Re-derive the cited evidence from the files yourself — does it actually hold?',
+  'Trace the code path — does the code actually behave as the verdict claims?',
+  'Construct a concrete counterexample input that would falsify the verdict.'
+]
+
 // CONTRACT: auditor structured-output schema (brief step 2, verbatim).
 const AUDITOR_SCHEMA = {
   type: 'object',
@@ -103,9 +117,11 @@ const panelResults = acs.length
 
       const voterOutcomes = await parallel(
         Array.from({ length: panelSize }, (_, i) => async () => {
-          const voterPrompt = `AC ${ac.id}: ${ac.text}. The auditor judged it ${verdict.verdict} because ${verdict.evidence}. Try to REFUTE that judgment using the repo at ${A.repoRoot} (read files, run read-only commands). Return {refuted: boolean, reason}. Default to refuted=false only when the evidence actually holds.`
+          const lens = LENSES[i % LENSES.length]
+          const voterPrompt = `AC ${ac.id}: ${ac.text}. The auditor judged it ${verdict.verdict} because ${verdict.evidence}. Try to REFUTE that judgment using the repo at ${A.repoRoot} (read files, run read-only commands). Your lens: ${lens} Return {refuted: boolean, reason}. Default to refuted=false only when the evidence actually holds.`
           // No agentType — plain subagent per the brief; prompt is self-contained.
-          return agent(voterPrompt, { label: `refute-voter:${ac.id}:${i}`, phase: 'Refute panel', model: 'haiku', effort: 'low', schema: VOTER_SCHEMA })
+          const vote = await agent(voterPrompt, { label: `refute-voter:${ac.id}:${i}`, phase: 'Refute panel', model: 'haiku', effort: 'low', schema: VOTER_SCHEMA })
+          return vote && { ...vote, lens }
         })
       )
 
@@ -137,14 +153,25 @@ panelResults.forEach((result, i) => {
     findings.push({
       acId: ac.id,
       refutedBy: `${liveVotes.length}/${panelSize} live`,
-      reasons: [`insufficient live votes (${liveVotes.length} of ${panelSize}) to trust a refute-panel majority; auditor verdict was ${verdict.verdict}`]
+      reasons: [`insufficient live votes (${liveVotes.length} of ${panelSize}) to trust a refute-panel majority; auditor verdict was ${verdict.verdict}`],
+      votes: liveVotes.map((v) => ({ lens: v.lens, refuted: v.refuted, reason: v.reason }))
     })
     return
   }
 
   const refuters = liveVotes.filter((v) => v.refuted)
   if (refuters.length >= majorityThreshold) {
-    findings.push({ acId: ac.id, refutedBy: `${refuters.length}/${panelSize}`, reasons: refuters.map((v) => v.reason) })
+    // De-aggregated readout: heterogeneous lenses make votes non-interchangeable,
+    // so the finding carries every live vote with its lens — the conductor reads
+    // the distribution (unanimity across lenses >> clustering within one), not
+    // just the tally.
+    log(`[AC ${ac.id}] refuted ${refuters.length}/${liveVotes.length} — by lens: ${refuters.map((v) => `"${v.lens.split(' — ')[0]}"`).join(', ')}`)
+    findings.push({
+      acId: ac.id,
+      refutedBy: `${refuters.length}/${panelSize}`,
+      reasons: refuters.map((v) => v.reason),
+      votes: liveVotes.map((v) => ({ lens: v.lens, refuted: v.refuted, reason: v.reason }))
+    })
   }
 })
 

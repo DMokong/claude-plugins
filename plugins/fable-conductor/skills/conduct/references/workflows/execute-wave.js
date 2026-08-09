@@ -42,10 +42,16 @@ const A = typeof args === 'string' ? JSON.parse(args) : args
 // tier is 'standard' | 'judgment' (default 'standard'); only feeds modelFor().
 const maxLoops = A.maxFixLoops ?? 2
 
-// Working-directory contract — prepended to EVERY worker prompt. Workers are
-// fresh subagents that inherit the conductor session's cwd; without this,
-// "the repo you are dispatched in" resolves to the wrong checkout.
+// Working-directory contract (v1.1.3): the full rule text lives in each
+// agent's role definition — slim dispatch prompts carry only the values plus
+// a one-line imperative (CWD_LINE). Exception: test-author keeps the long
+// form (claw-6smt micro-test: 5-dispatch parity runs per seat shipped slim
+// prompts for implementer/verifier/reviewer at 5/5 on stamp/commands/
+// exit-codes/append-only; the test-author seat missed the report-write
+// criterion under BOTH arms in the test rig, so per the any-miss rule that
+// seat keeps its long-form builder verbatim).
 if (!A.repoRoot) throw new Error('args.repoRoot is required: every worker prompt carries the working-directory contract')
+const CWD_LINE = `Working directory: ${A.repoRoot}${A.expectedBranch ? ` (expected branch: ${A.expectedBranch})` : ''} — cd there and verify per your working-directory contract before any write.`
 const CWD_CONTRACT = [
   `WORKING-DIRECTORY CONTRACT: all repo work happens in ${A.repoRoot} — cd there before anything else.`,
   `You inherit the dispatching session's cwd, which may be a different repo or the wrong checkout of this one; never trust it.`,
@@ -77,9 +83,13 @@ const VERDICT = {
 }
 
 // ---- prompt builders ----
-// Every prompt: (1) names files to Read first, (2) states the append-to-
-// report obligation with a stamped "## <role> — round <N>" section and
-// <=30-line evidence tails, (3) states file-scope bounds.
+// Slim builders (v1.1.3): each worker is dispatched with agentType, so the
+// agent file's full role rules (read order, report stamp, append-only,
+// <=30-line tails, scope bounds, escalation enum) are ALWAYS in its context.
+// The dispatch prompt carries per-dispatch data only: role+task+round, the
+// working-directory values, file paths, and (fix rounds) the findings JSON.
+// Restating role rules here was a paid second copy and a live drift surface.
+// test-author is the exception — long form kept per the micro-test record.
 
 function testAuthorPrompt(task) {
   return [
@@ -94,44 +104,31 @@ function testAuthorPrompt(task) {
 
 function implementerPrompt(task, round, findings) {
   const lines = [
-    `You are the IMPLEMENTER for task ${task.id}, round ${round}.`,
-    CWD_CONTRACT,
-    `Read FIRST: the brief at ${task.briefPath} — it is your contract.`,
-    `Also read ${task.reportPath} if it exists, for context from prior rounds.`
+    `IMPLEMENTER dispatch — task ${task.id}, round ${round}.`,
+    CWD_LINE,
+    `Brief: ${task.briefPath}. Report: ${task.reportPath}.`
   ]
-  if (round === 1) {
-    lines.push(`Execute the brief exactly. Its File scope is a HARD boundary.`)
-  } else {
-    lines.push(`This is a FIX round (fresh dispatch — get full context from the files above). The reviewer raised these findings last round; address them:`)
+  if (round > 1) {
+    lines.push(`FIX round. Reviewer findings to address or dispute:`)
     lines.push(JSON.stringify(findings, null, 2))
-    lines.push(`Stay inside the brief's File scope while fixing.`)
   }
-  lines.push(`Run the brief's Verification commands yourself before declaring done.`)
-  lines.push(`Append a "## implementer — round ${round}" section to ${task.reportPath} (create if missing): what you changed and why, verification tails <=30 lines.`)
   return lines.join('\n')
 }
 
 function verifierPrompt(task, round) {
   return [
-    `You are the VERIFIER for task ${task.id}, round ${round}.`,
-    CWD_CONTRACT,
-    `Read FIRST: the brief at ${task.briefPath} for its Verification commands, and ${task.reportPath} for the implementer's claims.`,
-    `Run the brief's verification commands VERBATIM — do not invent new checks.`,
-    `Append a "## verifier — round ${round}" section to ${task.reportPath}: command tails <=30 lines, plain pass/fail per command.`,
-    `File scope: read-only except for the report append — do not modify source files.`
+    `VERIFIER dispatch — task ${task.id}, round ${round}.`,
+    CWD_LINE,
+    `Brief: ${task.briefPath}. Report: ${task.reportPath}.`
   ].join('\n')
 }
 
 function reviewerPrompt(task, round) {
   return [
-    `You are the ADVERSARIAL REVIEWER for task ${task.id}, round ${round}.`,
-    CWD_CONTRACT,
-    `Read FIRST: the brief at ${task.briefPath}, the full report at ${task.reportPath}, the spec at ${A.specPath} (acceptance criteria), and the changed files inside the brief's File scope.`,
-    `Part of your review: confirm the work actually landed in ${A.repoRoot}${A.expectedBranch ? ` on branch ${A.expectedBranch}` : ''} — work committed to any other checkout is a broken_harness finding regardless of content quality.`,
-    `Refute-then-steelman: try hard to break the implementer's claim first, then judge fairly.`,
-    `Finding nothing wrong is a legitimate result — never manufacture findings.`,
-    `Append a "## adversarial-reviewer — round ${round}" section to ${task.reportPath}: verdict and evidence tails <=30 lines.`,
-    `Return ONLY the structured verdict via the provided schema.`
+    `ADVERSARIAL-REVIEWER dispatch — task ${task.id}, round ${round}.`,
+    CWD_LINE,
+    `Brief: ${task.briefPath}. Report: ${task.reportPath}. Spec: ${A.specPath}.`,
+    `Changed files: inside the brief's File scope at ${A.repoRoot}.`
   ].join('\n')
 }
 

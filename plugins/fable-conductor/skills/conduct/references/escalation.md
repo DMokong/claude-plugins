@@ -116,12 +116,36 @@ next round inherits it as settled fact.
 ### 3. Defer to Fable (non-Fable conductors only)
 
 When the conductor session runs below fable tier (opus emulation or sonnet structure-only mode — see
-the SKILL's Conductor tiers section) and moves 1–2 haven't resolved it, **park the escalation instead of
-forcing a weak ruling**: append it to `escalations.md` with outcome `deferred (awaiting fable-tier
-conductor)`, leave the task `escalated` in the ledger, and continue with unaffected work. Deferred
-entries are adjudicated FIRST by the next fable-tier session that resumes the stream (typically at the
-finalize handoff). A wrong ruling at a weaker tier costs more rounds than an honest deferral — this is
-the same escalating-early principle the agents follow, applied to the conductor itself. A fable-tier
+the SKILL's Conductor tiers section) and moves 1–2 haven't resolved it, apply the **entry test**:
+
+- **Defer** when the ruling would set precedent beyond this task, or when both evidence sets are
+  internally coherent and the disagreement is about design *intent* rather than fact.
+- **Rule** fact disputes yourself — an opus conductor rules those, and discloses the tier that ruled.
+
+To defer, try the socket first, then park:
+
+1. **Socket-first.** Probe for a live fable-tier peer session *at defer time* (e.g. `ListAgents`).
+   Peer presence is volatile — probe at use, never bind it at Phase R or record it in the weave map.
+   If a peer is present, send it the *pointer* — stream dir + the escalation's brief/report paths —
+   and let it adjudicate move-2-style. **Single-writer rule:** the peer writes ONLY the escalated
+   task's `report.md` (appending its `## fable — round <N>` ruling — safe because the task is
+   `escalated` and its dependents `blocked`, so no live wave touches it), then signals back. The
+   RESIDENT conductor writes the `escalations.md` entry with its own timestamp, updates the ledger,
+   and extends `conductor_model` — the peer never touches a shared file. Peer tier is self-reported
+   and unverifiable (`ListAgents` exposes names, not models): record it as `ruled via peer <name>
+   (tier self-reported: fable, unverified)`, never a bare tier claim. **Evaluate the ruling, not the
+   badge:** before adopting, the resident checks the peer's reasoning against both evidence sets —
+   checking a proposed ruling is strictly easier than producing one. If the resident disagrees, that
+   is a new conductor-level deadlock: move 6, or leave it deferred — never silent override, never
+   silent adoption.
+2. **Park** when no peer answers: append to `escalations.md` with outcome `deferred (awaiting
+   fable-tier conductor)`, leave the task `escalated` in the ledger, and continue with unaffected
+   work. Re-check for a fable-tier peer at every wave boundary while deferrals are open. Deferred
+   entries are adjudicated FIRST by the next fable-tier session that resumes the stream (typically at
+   the finalize handoff).
+
+A wrong ruling at a weaker tier costs more rounds than an honest deferral — this is the same
+escalating-early principle the agents follow, applied to the conductor itself. A fable-tier
 conductor never uses this move.
 
 ### 4. Pull into session
@@ -155,6 +179,10 @@ interaction** and never drips them. A trigger the conductor can resolve with mov
 - **Deferred entries (move 3) are adjudicated first on resume by a fable-tier conductor** — before any
   new wave is dispatched. A deferral is never silently dropped: it either gets a recorded adjudication
   or an explicit close in `escalations.md`.
+- **The promise above is a phase-machine invariant, not aspiration:** a conductor with open deferrals
+  re-checks for a live fable-tier peer at every wave boundary (socket-first, move 3), and `phase: done`
+  is unreachable while any entry remains `deferred` — Phase 5 adjudicates it, hands it to a live peer,
+  or closes it explicitly with recorded rationale.
 - Ledger statuses in `stream.md` are updated to reflect the adjudication **before** redispatch, so the
   wave's view of task state is current when it fans out.
 

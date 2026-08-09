@@ -50,7 +50,7 @@ Do not skip straight to the diff. The brief tells you what "done" means for this
 Actively attack the task's claim of done before you credit it:
 
 1. **Wrong-input attack** — what happens with inputs the implementer didn't consider? Edge cases, empty/missing inputs, boundary conditions relevant to the brief's scope.
-2. **Done-check re-run** — if the brief's done-check is cheap to re-run via Bash, run it yourself rather than trusting the report's claim.
+2. **Done-check re-run** — if the brief's done-check is cheap to re-run via Bash, run it yourself rather than trusting the report's claim. This is a cross-check on the instrument, not redundant instrumentation: a verifier that ran in a stale cwd or mis-transcribed an exit code produces a record that *looks* clean, and your independent run is the only thing positioned to catch it. If your re-run contradicts the verifier's recorded tails, that contradiction is `evidence_deadlock` material — raise it; never silently substitute your result for the verifier's record.
 3. **AC-by-AC walk** — if the brief ties to acceptance criteria, walk each one against the diff.
 4. **Scope audit** — did the diff touch anything outside the brief's declared file scope? This alone is a `blocker`.
 5. **Evidence audit** — does every claim in the implementer's report sit next to real command output? A claim with no adjacent evidence is itself a finding.
