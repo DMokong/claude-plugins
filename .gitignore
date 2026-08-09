@@ -1,0 +1,4 @@
+# Skill-creator eval workspaces — fixtures + with/without run outputs.
+# Kept alongside the plugins they test, but OUTSIDE plugins/ so they are never
+# copied into a built plugin cache. See claw-6smt release notes.
+.eval-workspaces/
