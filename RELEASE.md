@@ -15,6 +15,11 @@ jq '.version = "X.Y.Z"' plugins/<name>/.claude-plugin/plugin.json   | sponge …
 jq '(.plugins[] | select(.name == "<name>") | .version) = "X.Y.Z"' \
    .claude-plugin/marketplace.json | sponge …
 
+#    Then update the plugin table in README.md — same version, same commit.
+#    It duplicates marketplace.json and will silently drift otherwise.
+#    Drift check:
+jq -r '.plugins[] | "\(.name) \(.version)"' .claude-plugin/marketplace.json
+
 claude plugin validate plugins/<name>      # manifest sanity
 
 # 2. Commit and push.
