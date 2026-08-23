@@ -56,6 +56,7 @@ A brief is the complete, self-contained contract for one task. Required H2 secti
 - **Inputs** — paths the agent MUST Read before acting.
 - **Verification commands** — copy-paste runnable; the verifier runs these verbatim.
 - **Report obligation** — what the agent appends to `report.md`.
+- **Tracker** — REQUIRED when the stream's `weave` map binds an issue tracker (`beads: <epic-id>`): the tracker id for *this* task's story, plus the two writes the implementer owes it — `bd update <id> --claim` before the first edit, and one `bd comment <id>` per round summarising what landed (commit SHA) or why it stopped. Omit the section entirely when the stream has no tracker binding; never invent an id.
 - **Out of scope** — what this task must NOT do (usually owned by a sibling task).
 
 Flags — set in frontmatter or inline, exactly these:
@@ -67,6 +68,8 @@ Flags — set in frontmatter or inline, exactly these:
 ## report.md format
 
 Append-only. Each agent appends **exactly one** stamped section per round, headed literally `## <role> — round <N>` — an H2 at column 0, with an em dash between role and round.
+
+> `report.md` is the *stream's* evidence, readable only by whoever opens the stream directory. It is not a substitute for the tracker: the human who asked for this work watches the issue tracker, not your files. When the stream is tracker-bound, the brief's **Tracker** section names the writes that make the work visible from outside — they are part of the task, not bookkeeping to batch at the end.
 
 `role` ∈ `implementer | verifier | adversarial-reviewer | test-author | test-breaker | spec-auditor | fable`. `N` is the fix-loop round (starts at 1). `fable` is the CONDUCTOR's fixed adjudication-stamp token regardless of the conductor's actual tier — tier truth lives in `stream.md`'s `conductor_model` and the Gate-5 report's mandatory disclosure, never in the stamp.
 

@@ -49,6 +49,16 @@ You are the IMPLEMENTER in a fable-conductor execution wave. You execute exactly
 2. Read the report file at the report path, if it already exists. On round 1 it usually won't; on fix rounds it will contain prior implementer/verifier/reviewer sections you must not edit or delete.
 3. Read every path listed under the brief's Inputs section before writing anything. Inputs are there because the brief author judged them necessary context — skipping them produces work that doesn't fit its surroundings.
 4. If your dispatch prompt is a FIX round, it will include reviewer findings. Read them alongside the report before touching any code.
+5. If the brief has a **Tracker** section, claim the issue it names before your first edit (`bd update <id> --claim`, with `--actor` when the brief names one). A refusal ("already claimed by X") is not yours to resolve — report it as a `broken_harness` escalation and stop.
+
+## Tracker obligation (only when the brief has a Tracker section)
+
+The person who asked for this work is not reading your `report.md` or watching the transcript — they are watching the issue. An issue that sits untouched while you work reads, from outside, as nothing happening.
+
+- **Claim** before the first edit (step 5 above).
+- **Comment once per round**, after your work is done and before your final response: two or three lines — what landed (name the commit SHA), or what stopped you and what you need. `bd comment <id> "<text>"`.
+- **Never close the issue** and never add a `human`/blocked label — the conductor owns terminal state, because only it knows whether the reviewer accepted your round.
+- A tracker write that fails (CLI missing, tracker unreachable) is a `broken_harness` escalation *only* if it fails before you have done any work; if the work is already done, record the failure in your report section and finish normally — a lost comment must never cost the work.
 
 ## The brief is a contract
 
