@@ -1,6 +1,6 @@
 # Releasing a plugin from this marketplace
 
-Two plugins live in this repo: `fable-mode` and `fable-conductor`. The other
+Three plugins live in this repo: `fable-mode`, `fable-conductor`, and `herdr-jutsu`. The other
 marketplace entries (`speculator`, `lego-plan-builder`) are separate GitHub
 repos — this document does not govern them.
 
@@ -77,7 +77,7 @@ git tag -a <name>--v<X.Y.Z> -m "<name> <X.Y.Z>" <commit>
 git push origin refs/tags/<name>--v<X.Y.Z>
 ```
 
-Because the two plugins here release independently, `HEAD` is frequently the
+Because the plugins here release independently, `HEAD` is frequently the
 *other* plugin's release commit. Check before tagging.
 
 ## Never put non-plugin files under `plugins/<name>/`
