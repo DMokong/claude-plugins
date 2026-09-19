@@ -2,6 +2,30 @@
   "name": "dmokong-plugins",
   "plugins": [
     {
+      "name": "lego-plan-builder",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/DMokong/lego-plan-builder.git"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Developer Tools"
+    },
+    {
+      "name": "speculator",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/DMokong/speculator.git"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Developer Tools"
+    },
+    {
       "name": "fable-mode",
       "source": {
         "source": "local",

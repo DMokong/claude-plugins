@@ -1,16 +1,18 @@
 # Codex packaging findings (Phase 0 install spike)
 
 This is the recorded result of installing this repo's plugins into the Codex CLI, not a reading of
-documentation. Every claim below is followed by the command that produced it. The spike answers the
-five Phase 0 questions: where the Codex plugin manifest goes, what it must contain, how the catalog
-name behaves on collision, whether the Claude and Codex packaging disturb each other, and what
-sequence actually refreshes an installed plugin after a version bump.
+documentation. The spike and follow-up experiments answer where the optional Codex plugin manifest
+goes, how Claude and Codex catalogs interact, which external-source shape works, how the catalog
+name behaves on collision, whether the packaging trees disturb each other, and what sequence
+refreshes an installed plugin after a version bump.
 
 Headline: `.codex-plugin/plugin.json` is the location to use — both locations install, but the
 Codex-shipped validator only accepts `.codex-plugin/`, and when both exist `.codex-plugin/` wins.
-The `interface` block is required by that validator but **not** by `codex plugin add`. A local
-marketplace needs no cachebuster: a bare `codex plugin add <plugin>@<catalog>` re-copies the source
-every time. `fable-mode` installs from this repo and its skill reaches the model-visible prompt.
+Neither that manifest nor `.agents/plugins/marketplace.json` is required to install: Codex natively
+reads `.claude-plugin/marketplace.json`, including external URL entries. The `interface` block is
+required by the validator but **not** by `codex plugin add`. When the Codex catalog does exist it
+takes precedence, so it must list every Claude-catalog plugin. A local marketplace needs no
+cachebuster: a bare `codex plugin add <plugin>@<catalog>` re-copies the source every time.
 
 Versions tested:
 
@@ -31,7 +33,7 @@ in the output below are shortened to `$SCRATCH` and `$CODEX_HOME`.
 
 None. No plan Fact was contradicted in a way that changes what tasks A1–A4 must build.
 
-Three refinements worth carrying forward, none of which invalidate the plan:
+Four refinements worth carrying forward, none of which invalidate the plan:
 
 1. The plan recorded the root-vs-`.codex-plugin` manifest question as *unsettled*. It is now
    settled in favour of `.codex-plugin/plugin.json` (Experiment 1).
@@ -44,6 +46,9 @@ Three refinements worth carrying forward, none of which invalidate the plan:
 3. Catalog entries carry no version (plan fact confirmed), but `policy.authentication` is a closed
    enum: only `ON_INSTALL` and `ON_USE` are accepted. `NONE` is rejected at `marketplace add`
    (Experiment 3).
+4. A Claude catalog is already a native Codex marketplace. The Codex catalog and manifests are
+   optional metadata surfaces, not installation prerequisites; if the Codex catalog is present,
+   its precedence makes complete name parity mandatory (Experiment 6).
 
 ## Facts table
 
@@ -52,11 +57,11 @@ One row per bullet under the plan's "Facts" heading.
 | Plan fact | confirmed / contradicted / not tested | evidence (section ref) |
 | --- | --- | --- |
 | Codex has `plugin marketplace add\|list\|upgrade\|remove` and `plugin add\|list\|remove`; no `install`/`update` verbs | confirmed | Experiment 5, help output |
-| Catalog lives at `<repo>/.agents/plugins/marketplace.json`; entries are `{name, source:{source:"local", path}, policy:{installation, authentication}, category}`; entries carry no version | confirmed, with one refinement | Experiment 3 — shape accepted verbatim; `authentication` rejects values outside `ON_INSTALL`/`ON_USE` |
-| Codex plugin manifest lives at `plugins/<n>/.codex-plugin/plugin.json`; root `plugin.json` is the unsettled alternative; manifests carry `name`, semver `version`, `description`, `author.name`, `skills`, full `interface` | confirmed as the right choice; the field list is convention, not enforcement | Experiment 1 (location, precedence), Experiment 2 (field removal matrix) |
+| Optional Codex catalog lives at `<repo>/.agents/plugins/marketplace.json`; entries carry no version and override the native Claude catalog | confirmed, with two refinements | Experiment 3 — policy shape; Experiment 6 — optionality and precedence |
+| Optional Codex plugin manifest lives at `plugins/<n>/.codex-plugin/plugin.json`; manifests conventionally carry `name`, semver `version`, description, author, skills, and interface | confirmed as the right metadata location, not an install requirement | Experiment 1 (location, precedence), Experiment 2 (field removal matrix), Experiment 6 (Claude-only install) |
 | `.claude-plugin/` and `.codex-plugin/` can coexist per plugin and share one `skills/` tree; no fork, no sync script | confirmed | Experiment 4 |
 | Codex discovers skills from plugin caches, `~/.agents/skills`, and repo-ancestor `.agents/skills`; `name` + `description` drive loading | confirmed, with one refinement | Experiment 4 — the repo-ancestor root is only offered when the ancestor is a Git repository |
-| `${CLAUDE_PLUGIN_ROOT}` is not set for skills; `commands/*.md` is not a Codex surface | not tested | needs an authenticated `codex exec`; see Still unverified |
+| `${CLAUDE_PLUGIN_ROOT}` is not set for skills; `commands/*.md` is not a Codex surface | partially tested | environment-variable claim not tested; command-surface claim verified in Additional verified finding |
 | Codex has no Workflow tool and no AskUserQuestion; its subagent tools are scoped to its own tree; `codex agents` / `codex queue` delivery semantics unverified | not tested | out of scope for a packaging spike; belongs to Stream B |
 | Three version fields can drift (Claude manifest, Claude catalog, Codex manifest) plus the README table | confirmed, and the coupling is tighter than assumed | Experiment 2 — with no Codex manifest, Codex reads the version straight out of `.claude-plugin/plugin.json` |
 
@@ -346,19 +351,161 @@ cache after remove: [ls: …/cache/dmokong-plugins/fable-mode: No such file or d
 config plugins block after remove: 0
 ```
 
-**Conclusion (verified for a local marketplace; unverified for Git):** the shortest refresh sequence
-is one command — `codex plugin add <plugin>@dmokong-plugins` — with no `remove` and no
-`marketplace upgrade`. Per the Codex-shipped `plugin-creator` reference, a new thread is still
-needed for the session to pick up the refreshed skills. Whether `--ref` pins the whole repo for a
-Git marketplace is **unverified**; `codex plugin marketplace add --help` documents `--ref <REF>`
-("Git ref to fetch for Git marketplace sources") and `--sparse <PATH>` as repository-level options,
-which reads as whole-repo pinning, but no Git source could be exercised (Experiment 3).
+**Conclusion:** for a local marketplace, the shortest refresh sequence is one command — `codex
+plugin add <plugin>@dmokong-plugins` — with no `remove` and no `marketplace upgrade`. Per the
+Codex-shipped `plugin-creator` reference, a new thread is still needed for the session to pick up
+the refreshed skills. The Git cases later verified that `marketplace upgrade <name>` works for a
+Git-sourced marketplace and that `marketplace add <owner>/<repo> --ref <ref>` pins the whole repo
+snapshot (Experiment 6).
+
+## Experiment 6 — native Claude catalog and Git marketplace follow-up
+
+The repository owner ran every case on Codex CLI 0.153.4 through
+`scripts/codex-disposable.sh`, with a fresh disposable `CODEX_HOME` for each case.
+
+### E6a — Claude-catalog compatibility and `--ref` pinning
+
+The public `herdr-jutsu--v0.1.0` tag predates this repo's Codex catalog and Codex manifests:
+
+```text
+$ scripts/codex-disposable.sh plugin marketplace add DMokong/claude-plugins --ref herdr-jutsu--v0.1.0
+Added marketplace `dmokong-plugins` from https://github.com/DMokong/claude-plugins.git#herdr-jutsu--v0.1.0.
+
+snapshot top level:
+.claude-plugin  .git  .gitignore  plugins  README.md  RELEASE.md
+snapshot HEAD:
+9646a7e
+```
+
+Commit `9646a7e` is the commit that tag points at. The snapshot had no `.agents/` tree and no
+`.codex-plugin/` directory under any plugin, so `--ref` pinned the whole repository snapshot and
+Codex read the Claude catalog directly:
+
+```text
+$ scripts/codex-disposable.sh plugin list -m dmokong-plugins
+
+lego-plan-builder  not installed  https://github.com/DMokong/lego-plan-builder.git
+speculator         not installed  https://github.com/DMokong/speculator.git
+fable-mode         not installed  plugins/fable-mode
+fable-conductor    not installed  plugins/fable-conductor
+herdr-jutsu        not installed  plugins/herdr-jutsu
+```
+
+All five plugins were offered, including both external Git URL entries. Installing an in-repo
+plugin also succeeded:
+
+```text
+$ scripts/codex-disposable.sh plugin add herdr-jutsu@dmokong-plugins
+Installed plugin root: …
+
+cached skill:
+dmokong-plugins/herdr-jutsu/0.1.0/skills/herdr-jutsu/SKILL.md
+```
+
+### E6b — Codex catalog wins when present
+
+In a fresh disposable home, the same marketplace was added at public `main` commit `eee4149`, whose
+Codex catalog listed three plugins:
+
+```text
+$ scripts/codex-disposable.sh plugin marketplace add DMokong/claude-plugins
+$ scripts/codex-disposable.sh plugin list -m dmokong-plugins
+
+fable-mode       1.1.1  not installed
+fable-conductor  1.2.1  not installed
+herdr-jutsu      0.2.0  not installed
+```
+
+Those were exactly the three rows offered. `speculator` and `lego-plan-builder` were absent,
+showing that `.agents/plugins/marketplace.json` takes precedence when present.
+
+### E6c — external source shapes inside a Codex catalog
+
+Each run used a fresh disposable home and a fresh local copy with one extra `speculator` entry.
+Scratch paths below follow this document's `$SCRATCH` abbreviation.
+
+The accepted URL form:
+
+```text
+$ entry = {"source":"url","url":"https://github.com/DMokong/speculator.git"}
+$ scripts/codex-disposable.sh plugin marketplace add $SCRATCH/e6c-url
+$ scripts/codex-disposable.sh plugin list -m dmokong-plugins
+speculator  not installed
+$ scripts/codex-disposable.sh plugin add speculator@dmokong-plugins
+Installed plugin root: …
+```
+
+The plausible `git` form was silently dropped:
+
+```text
+$ entry = {"source":"git","url":"https://github.com/DMokong/speculator.git"}
+$ scripts/codex-disposable.sh plugin marketplace add $SCRATCH/e6c-git
+$ scripts/codex-disposable.sh plugin list -m dmokong-plugins
+# no speculator row
+$ scripts/codex-disposable.sh plugin add speculator@dmokong-plugins
+Error: plugin `speculator` was not found in marketplace `dmokong-plugins`
+```
+
+The plausible `github` form was also silently dropped:
+
+```text
+$ entry = {"source":"github","repo":"DMokong/speculator"}
+$ scripts/codex-disposable.sh plugin marketplace add $SCRATCH/e6c-github
+$ scripts/codex-disposable.sh plugin list -m dmokong-plugins
+# no speculator row
+$ scripts/codex-disposable.sh plugin add speculator@dmokong-plugins
+Error: plugin `speculator` was not found in marketplace `dmokong-plugins`
+```
+
+### E6d — Git-marketplace upgrade
+
+After adding the Git marketplace in a fresh disposable home:
+
+```text
+$ scripts/codex-disposable.sh plugin marketplace add DMokong/claude-plugins
+$ scripts/codex-disposable.sh plugin marketplace upgrade dmokong-plugins
+Upgraded marketplace `dmokong-plugins` to the latest configured revision.
+```
+
+This verifies the upgrade verb for a Git-sourced marketplace. Experiment 5 already records that
+the same verb is a no-op or an error for a local marketplace.
+
+### E6e — all five fixed-catalog entries install
+
+A local tree carrying the fixed five-entry Codex catalog was added in a fresh disposable home, then
+each plugin was installed:
+
+```text
+$ scripts/codex-disposable.sh plugin marketplace add $SCRATCH/e6e-fixed
+$ scripts/codex-disposable.sh plugin add lego-plan-builder@dmokong-plugins
+$ scripts/codex-disposable.sh plugin add speculator@dmokong-plugins
+$ scripts/codex-disposable.sh plugin add fable-mode@dmokong-plugins
+$ scripts/codex-disposable.sh plugin add fable-conductor@dmokong-plugins
+$ scripts/codex-disposable.sh plugin add herdr-jutsu@dmokong-plugins
+
+cache directories:
+fable-conductor/1.2.1
+fable-mode/1.1.1
+herdr-jutsu/0.2.1
+lego-plan-builder/0.1.0
+speculator/2.21.1
+```
+
+All five plugin cache directories were present.
+
+**Conclusion (verified):** the Claude catalog is sufficient for Codex installation. This repo keeps
+the optional Codex catalog and manifests for intentional policy/category and interface/listing
+metadata, including honest Codex limitations. Because the Codex catalog takes precedence, it must
+have exact plugin-name parity with the Claude catalog. External entries must use the `url` shape;
+the `git` and `github` variants fail silently.
 
 ## What later tasks should do
 
 Copy-pasteable facts for tasks A1–A4.
 
-**Manifest location.** `plugins/<name>/.codex-plugin/plugin.json`. Do not add a root `plugin.json`.
+**Manifest location when supplying Codex metadata.** Use
+`plugins/<name>/.codex-plugin/plugin.json`; do not add a root `plugin.json`. Codex can install from
+the Claude catalog without any Codex manifest.
 
 **Minimum manifest** that both installs and passes the Codex-shipped validator — `name` (must equal
 the catalog entry name), strict-semver `version` (must equal `plugins/<name>/.claude-plugin/plugin.json`
@@ -369,8 +516,9 @@ version), `description`, `author.name`, and an `interface` block whose `displayN
 `version`, `description`, `skills`, `apps`, `mcpServers`, `interface`, `author`, `homepage`,
 `repository`, `license`, `keywords` — any other key fails validation.
 
-**Catalog entry shape** in `.agents/plugins/marketplace.json` (catalog `name` is `dmokong-plugins`;
-entries carry no version):
+**Optional Codex catalog entry shape** in `.agents/plugins/marketplace.json` (catalog `name` is
+`dmokong-plugins`; entries carry no version). If this catalog exists, it must name every plugin in
+the Claude catalog:
 
 ```json
 {
@@ -382,6 +530,9 @@ entries carry no version):
 ```
 
 `policy.authentication` must be `ON_USE` or `ON_INSTALL` — nothing else parses.
+For an external plugin, replace the local source with
+`{"source":"url","url":"https://github.com/<owner>/<repo>.git"}`. Do not use `source: "git"`
+or `source: "github"`; Codex silently drops those entries.
 
 **Cache path pattern.** `$CODEX_HOME/plugins/cache/<catalog>/<plugin>/<version>/`, holding a verbatim
 copy of the plugin directory. For this repo that is
@@ -389,8 +540,10 @@ copy of the plugin directory. For this repo that is
 cache root is offered to the model as a skill root, and skills appear namespaced as
 `<plugin>:<skill>`.
 
-**Refresh sequence.** `codex plugin add <plugin>@dmokong-plugins`, then start a new Codex thread.
-No `marketplace upgrade` (Git-only), no `plugin remove`, no version cachebuster.
+**Refresh sequence.** For a local marketplace, run `codex plugin add
+<plugin>@dmokong-plugins`, then start a new Codex thread; no remove or cachebuster is needed. For a
+Git marketplace, only `codex plugin marketplace upgrade dmokong-plugins` updating the registered
+source is verified; how that affects an already-installed plugin is still unverified.
 
 **Validator to run.** `python3 "$CODEX_HOME_OR_REAL/skills/.system/plugin-creator/scripts/validate_plugin.py" plugins/<plugin>`
 — ships with Codex 0.153.4, needs no auth. Note it is stricter than the CLI: a manifest it rejects
@@ -402,24 +555,18 @@ in a disposable home and prints `PASS <plugin> <version>`; it also fails if the 
 
 ## Still unverified
 
-- **Git marketplace source of any kind.** Codex rejects `file://`, `git+file://` and `git://`; only
-  `owner/repo`, `https://` and `ssh://` reach `git clone`, and Remote Login is off on this machine.
-  Closes with: `scripts/codex-disposable.sh plugin marketplace add <owner>/<repo> --ref main` once
-  the catalog exists on a reachable remote.
-- **Catalog-name collision between a local source and a Git source.** Same command as above, run in
-  a `CODEX_HOME` that already has `dmokong-plugins` registered from a local path.
-- **Whether `--ref` pins the whole repo for a Git marketplace.** Closes with
-  `plugin marketplace add <owner>/<repo> --ref <tag>` followed by `plugin marketplace upgrade` and a
-  diff of the cached snapshot.
-- **`${CLAUDE_PLUGIN_ROOT}` being unset for Codex skills, and relative reference resolution inside a
-  skill.** Needs an authenticated run: `scripts/codex-disposable.sh exec "use the fable-mode skill
-  and read its references"` — **unverified — needs auth**, not attempted.
+- **What Git `marketplace upgrade` does to an already-installed plugin when the newer catalog no
+  longer lists it.** E6d verified the marketplace update, not installed-plugin reconciliation.
 - **That the skill actually triggers on a user prompt** (as opposed to being listed in the prompt,
-  which Experiment 2 proves). Same command, same reason — **unverified — needs auth**.
-- ~~**`commands/*.md` not being a Codex surface.**~~ **Closed — verified false-not-a-surface, i.e.
-  confirmed not a surface, at least at the prompt-rendering layer (0.153.4).** Installed
-  `fable-conductor@dmokong-plugins` (which ships `commands/conduct.md` and six `agents/*.md` files)
-  into a fresh disposable `CODEX_HOME` and inspected both the cache and the model-visible prompt:
+  which Experiment 2 proves). This needs an authenticated `codex exec` run and was not attempted.
+
+## Additional verified finding — `commands/` and `agents/`
+
+**Closed — verified false-not-a-surface:** `commands/*.md` and `agents/*.md` are not first-class
+Codex surfaces. They are copied into the cache, but do not appear in the model-visible prompt.
+This was established by installing `fable-conductor@dmokong-plugins` (which ships
+`commands/conduct.md` and six `agents/*.md` files) into a fresh disposable `CODEX_HOME`, then
+inspecting both the cache and the model-visible prompt:
 
   ```
   $ find $CODEX_HOME/plugins/cache/dmokong-plugins/fable-conductor/1.2.0 | sort
