@@ -1,6 +1,6 @@
 {
   "name": "herdr-jutsu",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Raise and run a crew inside Herdr — spawn Claude/Codex sessions and CLI panes into panes, tabs, workspaces or git worktrees under one naming convention that joins herdr agents to ListAgents/SendMessage, drive Codex over herdr, handle blocked members, and hand long jobs to a fresh session.",
   "author": {
     "name": "Dustin Cheng"

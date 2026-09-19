@@ -55,8 +55,14 @@ Prerequisites, the literal-id rule and the manual placement route: `references/p
    `--worktree`. A fresh worktree is a clean checkout of a commit: **no gitignored state**
    (`logs/`, `.env`, `node_modules/`) and **none of your uncommitted changes** — point
    tooling at the main checkout by absolute path, and commit (or name in the brief) anything
-   a member must see. A writer spawned into a **different repo** does not inherit this
-   repo's guardrails either (hooks, instruction file, project MCP): carry what matters.
+   a member must see. Before spawning a writer into a **different repo**, compare its
+   guardrails with yours: git hooks (especially secret scanning), its instruction file, and
+   project MCP servers. State the delta in the brief and close safety gaps first, especially
+   for a public repo or a broad permission mode.
+
+   Inspect a member's live checkout with **read-only git only**: `git show`, `git log`,
+   commit-to-commit `git diff`, `git ls-remote`, or a `git archive` export into scratch space.
+   Never `stash`, `checkout`, `switch`, `reset`, or `clean` a checkout a member is writing in.
 3. **Preflight when in doubt** — new machine, sandboxed parent, first spawn of a session.
    With `J="<skill base directory>/scripts/jutsu-spawn.sh"` (your parent file says how to
    find it): `$J --preflight --name inbox-impl --kind claude --cwd "$PWD"`. It checks
