@@ -3,9 +3,10 @@
 #
 # Plain bash, no framework; stays inside the bash 3.2 subset (indexed-style usage
 # only, no bash-4-only builtins). Each case copies the repo's manifest/catalog/
-# README surface into its own `mktemp -d` root, mutates exactly one thing (two,
-# for the "two simultaneous mutations" case), runs check-manifests.sh against
-# that root via its documented root-override first argument, and asserts:
+# README surface into its own `mktemp -d` root, normally mutates one thing
+# (named aggregation/empty-loop cases intentionally mutate two), runs
+# check-manifests.sh against that root via its documented root-override first
+# argument, and asserts:
 #   - non-zero exit for every mutated case, exit 0 for the unmutated baseline;
 #   - the MISMATCH output names the mutated plugin;
 #   - the MISMATCH output's field text is consistent with what was mutated
@@ -13,7 +14,7 @@
 #     `MISMATCH <name>: <field> is <x>, expected <y>` but not exact field-label
 #     strings, so each case accepts any of a small set of reasonable keywords).
 #
-# Proves that scripts/check-manifests.sh fails on every single-field disagreement.
+# Proves that scripts/check-manifests.sh fails on structural and field-level drift.
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -295,6 +296,345 @@ test_ac25_codex_catalog_entry_removed() {
 }
 
 # =========================================================================================
+# Catalog parity — a URL-sourced Claude entry removed from the Codex catalog.
+# =========================================================================================
+
+test_catalog_parity_codex_entry_removed() {
+  CURRENT_TEST="catalog_parity_codex_entry_removed"
+  setup_case
+  jq_set_file "$ROOT/.agents/plugins/marketplace.json" \
+    'del(.plugins[] | select(.name=="speculator"))'
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit when speculator is absent from the Codex catalog, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "speculator" "codex-catalog-missing" "missing" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+# =========================================================================================
+# Catalog parity — a URL-sourced Codex entry removed from the Claude catalog.
+# =========================================================================================
+
+test_catalog_parity_claude_entry_removed() {
+  CURRENT_TEST="catalog_parity_claude_entry_removed"
+  setup_case
+  jq_set_file "$ROOT/.claude-plugin/marketplace.json" \
+    'del(.plugins[] | select(.name=="speculator"))'
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit when speculator is absent from the Claude catalog, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "speculator" "codex-catalog-orphan" "orphan" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+# =========================================================================================
+# Codex catalog source shape — only local/path and url/url are accepted.
+# =========================================================================================
+
+test_codex_catalog_invalid_source_shape() {
+  CURRENT_TEST="codex_catalog_invalid_source_shape"
+  setup_case
+  jq_set_file "$ROOT/.agents/plugins/marketplace.json" \
+    '(.plugins[] | select(.name=="speculator") | .source) = {"source":"git","url":"https://github.com/DMokong/speculator.git"}'
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit for a Codex catalog source:git entry, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "speculator" "source" "shape" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+# =========================================================================================
+# URL-sourced entries must use the same URL in both catalogs.
+# =========================================================================================
+
+test_url_sourced_catalog_url_mismatch() {
+  CURRENT_TEST="url_sourced_catalog_url_mismatch"
+  setup_case
+  jq_set_file "$ROOT/.agents/plugins/marketplace.json" \
+    '(.plugins[] | select(.name=="speculator") | .source.url) = "https://github.com/example/not-speculator.git"'
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit when the two speculator URLs differ, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "speculator" "url" "source" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+# =========================================================================================
+# Claude catalog source validation — local paths and external URL shapes.
+# =========================================================================================
+
+test_claude_catalog_local_source_path_mismatch() {
+  CURRENT_TEST="claude_catalog_local_source_path_mismatch"
+  setup_case
+  jq_set_file "$ROOT/.claude-plugin/marketplace.json" \
+    '(.plugins[] | select(.name=="fable-mode") | .source) = "./plugins/wrong"'
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit for a wrong in-repo Claude catalog path, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "fable-mode" "source" "path" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_claude_catalog_external_source_shape_mismatch() {
+  CURRENT_TEST="claude_catalog_external_source_shape_mismatch"
+  setup_case
+  jq_set_file "$ROOT/.claude-plugin/marketplace.json" \
+    '(.plugins[] | select(.name=="speculator") | .source.source) = "git"'
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit for a source:git Claude catalog entry, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "speculator" "source" "shape" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+# =========================================================================================
+# A broken plugin must not suppress ok lines for later clean plugins.
+# =========================================================================================
+
+test_clean_plugins_report_ok_after_earlier_mismatch() {
+  CURRENT_TEST="clean_plugins_report_ok_after_earlier_mismatch"
+  setup_case
+  jq_set_file "$ROOT/.claude-plugin/marketplace.json" \
+    '(.plugins[] | select(.name=="lego-plan-builder") | .version) = "9.9.9"'
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit for the deliberately broken lego-plan-builder version, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "lego-plan-builder" "version" || { teardown_case; return; }
+  local expected
+  for expected in \
+    "ok speculator 2.21.1" \
+    "ok fable-mode 1.1.1" \
+    "ok fable-conductor 1.2.1" \
+    "ok herdr-jutsu 0.2.1"; do
+    grep -qxF "$expected" "$OUT_FILE" \
+      || { fail_case "missing clean-plugin line '$expected'. Full output:$(all_output)"; teardown_case; return; }
+  done
+  if grep -q '^ok lego-plan-builder ' "$OUT_FILE"; then
+    fail_case "the broken plugin must not receive an ok line: $(cat "$OUT_FILE")"
+    teardown_case
+    return
+  fi
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+# =========================================================================================
+# Catalog structure — each plugins array must be non-empty before iteration.
+# =========================================================================================
+
+test_claude_catalog_empty_plugins_rejected_explicitly() {
+  CURRENT_TEST="claude_catalog_empty_plugins_rejected_explicitly"
+  setup_case
+  jq_set_file "$ROOT/.claude-plugin/marketplace.json" '.plugins = []'
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit for an empty Claude plugins array, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "claude-catalog" "shape" "plugins" "non-empty" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_codex_catalog_empty_plugins_rejected_explicitly() {
+  CURRENT_TEST="codex_catalog_empty_plugins_rejected_explicitly"
+  setup_case
+  jq_set_file "$ROOT/.agents/plugins/marketplace.json" '.plugins = []'
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit for an empty Codex plugins array, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "codex-catalog" "shape" "plugins" "non-empty" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_both_catalogs_empty_plugins_rejected() {
+  CURRENT_TEST="both_catalogs_empty_plugins_rejected"
+  setup_case
+  jq_set_file "$ROOT/.claude-plugin/marketplace.json" '.plugins = []'
+  jq_set_file "$ROOT/.agents/plugins/marketplace.json" '.plugins = []'
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit when both plugins arrays are empty, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "claude-catalog" "shape" "plugins" "non-empty" || { teardown_case; return; }
+  assert_named_mismatch "codex-catalog" "shape" "plugins" "non-empty" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+# =========================================================================================
+# Catalog structure — every entry name must be a non-empty string.
+# =========================================================================================
+
+test_claude_catalog_empty_name_rejected_explicitly() {
+  CURRENT_TEST="claude_catalog_empty_name_rejected_explicitly"
+  setup_case
+  jq_set_file "$ROOT/.claude-plugin/marketplace.json" \
+    '(.plugins[] | select(.name=="speculator") | .name) = ""'
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit for an empty Claude catalog name, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "claude-catalog" "shape" "name" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_codex_catalog_non_string_name_rejected_explicitly() {
+  CURRENT_TEST="codex_catalog_non_string_name_rejected_explicitly"
+  setup_case
+  jq_set_file "$ROOT/.agents/plugins/marketplace.json" \
+    '(.plugins[] | select(.name=="speculator") | .name) = 7'
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit for a non-string Codex catalog name, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "codex-catalog" "shape" "name" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+# =========================================================================================
+# Duplicate names are rejected independently in each catalog.
+# =========================================================================================
+
+test_claude_catalog_duplicate_name_rejected() {
+  CURRENT_TEST="claude_catalog_duplicate_name_rejected"
+  setup_case
+  jq_set_file "$ROOT/.claude-plugin/marketplace.json" \
+    '.plugins += [.plugins[] | select(.name=="speculator")]'
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit for a duplicate Claude catalog name, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "speculator" "duplicate" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_codex_catalog_duplicate_name_rejected() {
+  CURRENT_TEST="codex_catalog_duplicate_name_rejected"
+  setup_case
+  jq_set_file "$ROOT/.agents/plugins/marketplace.json" \
+    '.plugins += [.plugins[] | select(.name=="speculator")]'
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit for a duplicate Codex catalog name, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "speculator" "duplicate" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+# =========================================================================================
+# Parse/missing-file failures remain non-zero before semantic checks.
+# =========================================================================================
+
+test_malformed_catalog_rejected() {
+  CURRENT_TEST="malformed_catalog_rejected"
+  local expected
+  setup_case
+  printf '{not-json\n' >"$ROOT/.claude-plugin/marketplace.json"
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit for malformed Claude catalog JSON, got 0"
+    teardown_case
+    return
+  fi
+  expected="check-manifests: malformed $ROOT/.claude-plugin/marketplace.json"
+  if [ "$(cat "$ERR_FILE")" != "$expected" ]; then
+    fail_case "expected exact stderr '$expected', got '$(cat "$ERR_FILE")'"
+    teardown_case
+    return
+  fi
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_missing_catalog_rejected() {
+  CURRENT_TEST="missing_catalog_rejected"
+  local expected
+  setup_case
+  rm -f "$ROOT/.agents/plugins/marketplace.json"
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit for a missing Codex catalog, got 0"
+    teardown_case
+    return
+  fi
+  expected="check-manifests: missing $ROOT/.agents/plugins/marketplace.json"
+  if [ "$(cat "$ERR_FILE")" != "$expected" ]; then
+    fail_case "expected exact stderr '$expected', got '$(cat "$ERR_FILE")'"
+    teardown_case
+    return
+  fi
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+# =========================================================================================
+# Every Codex catalog entry is versionless, including URL-sourced entries.
+# =========================================================================================
+
+test_url_sourced_codex_catalog_version_key_added() {
+  CURRENT_TEST="url_sourced_codex_catalog_version_key_added"
+  setup_case
+  jq_set_file "$ROOT/.agents/plugins/marketplace.json" \
+    '(.plugins[] | select(.name=="speculator")) += {version: "2.21.1"}'
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit when a URL-sourced Codex entry carries a version key, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "speculator" "version" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+# =========================================================================================
 # AC-25 — a `version` key added to a Codex catalog entry (versionless-surface drift).
 # =========================================================================================
 
@@ -405,6 +745,23 @@ test_ac25_readme_row_version_mismatch
 test_ac25_codex_manifest_name_mismatch
 test_ac25_codex_manifest_deleted
 test_ac25_codex_catalog_entry_removed
+test_catalog_parity_codex_entry_removed
+test_catalog_parity_claude_entry_removed
+test_codex_catalog_invalid_source_shape
+test_url_sourced_catalog_url_mismatch
+test_claude_catalog_local_source_path_mismatch
+test_claude_catalog_external_source_shape_mismatch
+test_clean_plugins_report_ok_after_earlier_mismatch
+test_claude_catalog_empty_plugins_rejected_explicitly
+test_codex_catalog_empty_plugins_rejected_explicitly
+test_both_catalogs_empty_plugins_rejected
+test_claude_catalog_empty_name_rejected_explicitly
+test_codex_catalog_non_string_name_rejected_explicitly
+test_claude_catalog_duplicate_name_rejected
+test_codex_catalog_duplicate_name_rejected
+test_malformed_catalog_rejected
+test_missing_catalog_rejected
+test_url_sourced_codex_catalog_version_key_added
 test_ac25_codex_catalog_version_key_added
 test_ac25_orphan_codex_catalog_entry
 test_ac25_two_simultaneous_mutations_both_reported
