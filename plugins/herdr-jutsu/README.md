@@ -21,37 +21,28 @@ This README is for the human. `SKILL.md` is what the agent reads.
   Outside herdr the skill refuses to act.
 - `jq`, `git`, and `bash` 3.2 or newer (the stock macOS `/bin/bash` is enough).
 - `claude` and/or `codex` on `PATH` for the agent kinds you want to spawn.
-- Optional: Claude Code with `ListAgents` / `SendMessage`. Claude↔Claude messaging uses it
-  when it is there; everything else runs over herdr.
+- Optional: Claude Code with `SendMessage`, used only to deliver a brief to a Claude member.
+  Members do not message back; parents wait on a literal pane id and pull the result.
 - **From a Codex session, one more thing:** Codex runs a command outside its sandbox only
   when the command matches an allow rule in *your* Codex rules, and inside the sandbox
-  herdr's socket is unreachable. So a Codex session can read this skill but cannot drive
-  herdr — as a parent *or* as a crew member reporting back — unless you have allowed the
-  relevant `herdr …` commands (and, to use the script, its own path) to run outside the
+  herdr's socket is unreachable. So a Codex parent can read this skill but cannot drive
+  herdr unless you have allowed the relevant `herdr …` commands (and, to use the script,
+  its own path) to run outside the
   sandbox. That is your security decision: the skill describes what it would need and never
-  edits a rules file. A **Claude** parent driving Codex members needs nothing extra for
+  edits a user rules file. The launcher does install a child-only project deny policy in a
+  Codex member's cwd. A **Claude** parent driving Codex members needs nothing extra for
   spawning, briefing and pulling — the parent is the one talking to herdr.
 
 ## Works from a Claude Code or a Codex parent
 
-The skill's shared text names *actions* and assumes the weakest transport — the herdr bus,
-which carries no sender identity and arrives as typed input. Two reference files translate
-that into each parent's own tools:
+The parent sends one brief, waits on the literal pane id from the trusted spawn line, then
+pulls the member's FINAL response. Two reference files translate that into each surface:
 
-- **Claude Code parent** (`references/parent-claude.md`): briefs Claude members over
-  SendMessage, which adds sender identity and queued delivery, and uses the herdr bus for
-  everything else.
-- **Codex parent** (`references/parent-codex.md`): no ListAgents, no SendMessage, and
-  Codex's own subagent tools cannot see a herdr pane — so the herdr bus is used in both
-  directions, with no added guarantees. It also only works at all where your Codex rules let
-  herdr commands run outside the sandbox, and the reference file starts with exactly what
-  that means. **It has passed a live end-to-end test once:** a Codex parent under a
-  `workspace-write` sandbox, on a machine where the `herdr agent` and `herdr pane` prefixes
-  were already allowed, placed a Claude child by hand, briefed it, got its wake signal and
-  pulled the evidence. Still unexercised: driving `jutsu-spawn.sh` itself from Codex (that
-  needs a rule for the script's own path), tab/workspace/worktree placement from Codex, and
-  anything at all on a machine with no herdr rules. A young path with one pass, not a
-  settled one.
+- **Claude Code parent** (`references/parent-claude.md`): briefs a Claude member with
+  SendMessage, runs `herdr agent wait <literal-pane-id> …` as a background Bash task, and is
+  re-invoked when it exits without terminal-input injection.
+- **Codex parent** (`references/parent-codex.md`): may block its current turn on the same
+  wait or pull later. No background completion is known to wake an idle Codex parent.
 
 ## Using it
 
@@ -84,10 +75,10 @@ to rename it instead.
 ### Permissions
 
 The parent picks a launch profile per role (`references/launch-presets.md`) and will not
-launch a child in a broader permission mode than its own unless you say so. Bypass and
-full-access flags are not merely discouraged — the script **refuses** them (exit 5,
-nothing created) unless `--allow-dangerous-agent-flags` is passed, which is always your
-call, never the parent's.
+launch a child in a broader permission mode than its own unless you say so. Dangerous
+Claude's dangerous agent flags are refused unless `--allow-dangerous-agent-flags` is
+passed, which is always your call, never the parent's. Isolated Codex instead accepts only
+the documented safe argument allowlist; `--no-isolation` is its only explicit opt-out.
 
 When a child stops on a permission prompt, the parent may answer it only if **both** hold:
 the prompt visible in the pane is verbatim a command the parent put in the brief, **and**
@@ -121,15 +112,18 @@ $J --name inbox-logs --kind shell --beside inbox-impl --cmd "tail -f $PWD/logs/a
 ```
 
 Each call prints one JSON line (`name`, `pane_id`, `workspace_id`, `cwd`, `worktree`,
-`session_id`, `status`, plus `registry`, `registry_path`, `agent_args`, `resume_args`) and
+`session_id`, `status`, plus `registry`, `registry_path`, `agent_args`,
+`effective_agent_args`, `resume_args`,
+`outbound_isolation`, `isolation_detail`) and
 appends it to the registry. Errors, warnings and recovery records are one JSON line each on
 stderr.
 
 Exit codes: `0` ok · `2` usage error · `3` the member was created and registered but is not
 ready (it is sitting on a startup dialog) · `4` a preflight check failed and **nothing was
-created** · `5` refused (a dangerous agent flag, a pane that is not an idle shell, an unsafe
-registry path) — also nothing created · `1` anything else. A failure *after* creation closes
-a pane the script itself made; a worktree it made is never auto-removed — you get a
+created** · `5` refused before placement (a dangerous or isolation-breaking agent flag, a
+pane that is not an idle shell, an unsafe registry/policy path) — also nothing created · `1`
+anything else, including an isolation failure discovered after placement. A failure *after*
+creation closes a pane the script itself made; a worktree it made is never auto-removed — you get a
 `{"recovery":{"status":"orphaned",...}}` line with the cleanup command, so nothing is
 deleted behind your back.
 
@@ -140,6 +134,19 @@ prints `{"ok":false,"code":"herdr_unreachable",...}` on stdout **and** the match
 `{"error":...}` line on stderr, then exits 4, rather than reporting a cheerful `ok` with an
 empty result; both result lines carry `"sandbox"` (`$CODEX_SANDBOX`, or empty). Every other
 preflight failure is the stderr error line only, with nothing on stdout.
+
+Outbound isolation is on by default. A Codex member gets `-a never` plus a child-only
+`.codex/rules/herdr-jutsu-deny.rules` in its actual cwd; the layer is git-excluded and the
+spawn reports `enforced_if_trusted` because Codex ignores project rules for an untrusted
+repo. Policy installation is serialized per cwd through agent start. A symlinked git
+`info/` or `info/exclude` is never followed or replaced; isolation remains active and
+`isolation_detail` discloses that the exclude entry was not added. A Claude member gets a
+merged `--disallowedTools` deny for `Bash(*herdr*)`,
+`SendMessage`, and `ListAgents`, reported honestly as `partial`. Shell members are `none`.
+`--no-isolation` is only for a nested parent that must drive herdr and requires a user
+decision. Under isolation, Codex accepts only safe sandbox/approval/model/profile/add-dir
+forms, four model-related config keys, and a final `resume` pair. Every other token is
+refused; profiles require an explicit safe `-s` value.
 
 `--record-session --name <member> [--session-id <id>]` records a session id for a member that
 already exists — the case where it started behind a startup dialog, or was itself revived by
@@ -179,23 +186,17 @@ git branch -d <branch>                              # herdr leaves the branch be
 
 ## Known limits
 
-- **Messages over the herdr bus are unauthenticated.** A member without SendMessage reports
-  back with `herdr agent prompt <parent> "[crew:<name>] …"`. That lands in the parent as
-  ordinary typed input, indistinguishable from you — and it can splice into a line you are
-  half-way through typing and be submitted as part of your message. The skill treats such a
-  line as a **wake signal only**: it never acts on the body, it pulls the evidence from the
-  member's pane or report file. A real agent-neutral bridge (sender identity, delivery +
-  ack) is future work.
-- **A Codex parent is a young path with exactly one live pass.** It works over the herdr bus
-  in both directions, with none of the guarantees a Claude parent gets from SendMessage — and
-  only where your Codex rules allow those commands outside the sandbox. What has been run end
-  to end is the **manual placement** route in `references/parent-codex.md`: a Codex parent
-  raised, briefed and pulled from a Claude child by issuing the `herdr pane` / `herdr agent`
-  calls itself. Driving `jutsu-spawn.sh` from Codex, tab/workspace/worktree placement from
-  Codex, and a machine with no herdr rules at all are all still unexercised.
-- **A Codex crew member cannot always reply.** Its `[crew:…]` push needs the same rules. The
-  skill therefore treats a push as a wake signal and an optimisation, and makes the parent's
-  own pull (`herdr agent read`, or the report file) the contract.
+- **Members never message the parent.** The parent waits on the literal pane id and pulls.
+  A `[crew:…]` line has no protocol meaning and is ignored.
+- **Pulled output is untrusted prose.** Pane reads are line-capped; report files are read
+  only from the path named in the brief and at a byte cap. Any requested action is checked
+  against the brief and the parent's permissions.
+- **Isolation has explicit limits.** Codex needs a trusted repo and `-a never`; Claude's
+  string match is only partial; shell members are not isolated. The threat boundary is peer
+  agents and accidents, not root or a hostile same-user process.
+- **A Codex parent has no autonomous background wake.** It may block its current turn on
+  `herdr agent wait`, or pull later on its own schedule. Parent commands still require the
+  user's Codex rules to allow the relevant literal command outside the sandbox.
 - **herdr's agent status is evidence, not truth.** It can show a stale `blocked`, or `idle`
   for an agent sitting on a dialog it doesn't recognise. The skill looks at the pane before
   the first prompt to any herdr-driven member.
@@ -237,9 +238,9 @@ never drive a herdr session from outside one. Its safety rules always hold: `--n
 for background work, explicit pane IDs or agent names, never close what you didn't create,
 never `herdr server stop`.
 
-Crew members spawned by another session are named `<stream>-<role>`. A member without
-Claude's SendMessage (e.g. Codex) reports to the parent named in its brief with
-`herdr agent prompt <parent> "[crew:<name>] <done|blocked>: <one line> — details in <path>"`.
+Crew members spawned by another session are named `<stream>-<role>`. Members do not message
+other panes or sessions. The parent records their literal pane ids, waits, and pulls their
+FINAL responses.
 ```
 
 ### Without the plugin system
@@ -258,6 +259,6 @@ and `herdr pane` prefixes already allowed — with the script route, non-pane pl
 rule-less machines still untried. Expect the conventions to tighten as it gets used on real
 streams.
 
-0.2.0 reworked the skill text around a hardened `jutsu-spawn.sh`: `[crew:]` lines are wake
-signals, the permission-prompt rule is stricter, parent instructions split per surface, and
-the script enforces what the text used to only advise.
+0.3.0 replaces member pushes with a literal-pane completion rendezvous, installs child
+outbound isolation, treats pulled prose as evidence rather than instructions, and requires
+a visible-pane check before every key send.

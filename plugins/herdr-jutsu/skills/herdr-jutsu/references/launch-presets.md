@@ -1,9 +1,9 @@
 # Launch presets
 
-Everything after `--` in `jutsu-spawn.sh` goes to the agent binary verbatim. These are
-starting points — the installed binary is the authority: check `claude --help` /
-`codex --help` when a flag is rejected, and honour whatever the user asked for over any
-row here.
+For Claude and `--no-isolation`, caller arguments stay verbatim apart from the documented
+Claude name/deny merge. Isolated Codex arguments are parsed through the allowlist below,
+and the launcher may inject `-a never` before a final `resume` pair. The spawn line records
+both `agent_args` (caller input) and `effective_agent_args` (launched argv).
 
 ## Claude (`--kind claude`; `-n <name>` is added for you)
 
@@ -24,12 +24,10 @@ row here.
   — in `manual` mode that is nearly every one (seen live on an `echo`), and `acceptEdits`
   still asks before shell. A command the profile *does* allow runs unprompted in `manual`
   mode, which is the lever below.
-- **If the brief tells the child to report with `herdr agent prompt`, launch it with exactly
-  that command allowed** — `--allowedTools "Bash(herdr agent prompt:*)"` (`claude --help`:
-  `--allowedTools, --allowed-tools <tools...>`). That is the least privilege that lets the
-  reply push run without a prompt, and it is the profile that worked live; prefer it to
-  asking the user for a broader `--permission-mode`. Without it the child blocks on its own
-  reply and never reaches the parent.
+- Outbound isolation is added automatically: the launcher merges `Bash(*herdr*)`,
+  `SendMessage` and `ListAgents` into one `--disallowedTools` flag. This is a string-pattern
+  deny, not a process sandbox, so the spawn reports `outbound_isolation: partial` and names
+  the selected permission mode in `isolation_detail`.
 - Useful extras: `--append-system-prompt "<crew brief>"` to pin role, parent name and
   reporting rule for the whole session; `--add-dir <path>` when a worktree child must read
   the main checkout; `--resume <session-id>` to bring a registry member back in a new pane.
@@ -40,16 +38,17 @@ row here.
 | Role | Args after `--` | Why |
 |---|---|---|
 | reviewer / second opinion | `-s read-only -a never` | Cannot write, never stalls on approval |
-| implementer in a worktree | `-s workspace-write -a on-request` | Writes only inside its cwd |
+| implementer in a worktree | `-s workspace-write -a never` | Writes only inside its cwd; outbound isolation requires never-ask |
 | unattended implementer | `-s workspace-write -a never` | Failures return to the model, no prompts |
 
 - `-s/--sandbox`: `read-only | workspace-write | danger-full-access`.
 - `-a/--ask-for-approval`: `on-request | never` (run `codex --help` for the full list).
-- **Sandbox flags decide file access; they do not decide whether that member can reach
-  herdr.** That is settled separately, by the allow rules in the member's *user's* Codex
-  rules: without a rule matching `herdr agent …`, a Codex session cannot run a herdr command
-  at all, whatever `-s` says — so it cannot push a `[crew:…]` line back. Pull its result
-  instead, and see `references/parent-codex.md` § 1 for what a user would have to allow.
+- The launcher installs `.codex/rules/herdr-jutsu-deny.rules` in the member cwd, git-excludes
+  it, and requires `-a never`. The broad `herdr` prefix and resolved executable path are
+  forbidden. Its static self-check runs bare `herdr`, the resolved absolute path, and a
+  second command group, all with `--resolve-host-executables`; use that flag in manual
+  absolute-path checks too. Codex loads a project layer only for a trusted repository, so
+  the reported state is `enforced_if_trusted`, never an unconditional claim.
 - `-m <model>` and `-c model_reasoning_effort=<low|medium|high>` override
   `~/.codex/config.toml`; omit them to inherit the user's defaults.
 - **Codex offers its self-update dialog on every launch until the user decides**, so a Codex
@@ -60,10 +59,18 @@ row here.
   `--resume` flag — see `references/comms-and-handoff.md`.
 - **Permission ceiling, Codex terms:** `read-only` is always within bounds.
   `workspace-write` is within bounds only if you yourself may edit files, and only in the
-  member's own worktree. `-a never` removes the human from the loop — fine with
-  `read-only`; with `workspace-write` use it only when the user asked for an unattended
-  member. No CLI reports your own permission mode; it is in your session context. If you
-  cannot tell, ask rather than assume the broad reading.
+  member's own worktree. Outbound isolation requires `-a never`; any other approval policy
+  is refused. No CLI reports your own permission mode; it is in your session context. If
+  you cannot tell, ask rather than assume the broad reading.
+- **Isolated Codex argv is an allowlist.** Short flags accept separate, compact, and `=`
+  forms; long flags accept separate and `=` forms. Allowed: `-s/--sandbox` with exactly
+  `read-only` or `workspace-write`; `-a/--ask-for-approval` with exactly `never`;
+  `-m/--model`; `--add-dir`; and `-p/--profile` only with an explicit allowed sandbox.
+  `-c/--config` accepts only `model`, `model_reasoning_effort`,
+  `model_reasoning_summary`, or `model_verbosity` keys after whitespace/one matching quote
+  layer is removed, and rejects values containing `{`, `[`, or a newline. A final
+  `resume <session-id-or-name>` or `resume --last` pair is allowed. Everything else is
+  `isolation_unsupported_agent_arg`; only the user-selected `--no-isolation` opts out.
 - Codex reads `AGENTS.md`, not `CLAUDE.md` — the brief must carry anything it needs that
   lives only in Claude-side instructions.
 
@@ -75,12 +82,12 @@ row here.
 | Kind | Refused forms |
 |---|---|
 | claude | `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, `--permission-mode bypassPermissions`, `--permission-mode dontAsk`, `--permission-mode=bypassPermissions`, `--permission-mode=dontAsk` |
-| codex | `--dangerously-bypass-approvals-and-sandbox`, `--yolo`, `-s danger-full-access`, `--sandbox danger-full-access`, `-s=danger-full-access`, `--sandbox=danger-full-access`, and any `-c`/`--config` value setting `sandbox_mode` to `danger-full-access` (both the separate-value and `=` forms) |
+| codex | isolated Codex uses the allowlist above instead; this override does not widen it |
 
-The only way past it is `--allow-dangerous-agent-flags`, passed **before** `--`; the spawn
-then records `"dangerous_override":true`. That flag is **user-only**: pass it because the
-user told you to for this member, never because it would be convenient. Do not route around
-the refusal by putting the same setting in a config file instead.
+The only way past the Claude dangerous-flag check is `--allow-dangerous-agent-flags`, passed
+**before** `--`; the spawn then records `"dangerous_override":true`. That flag is
+**user-only**. For isolated Codex it never expands the allowlist; `--no-isolation` is the
+separate user-only decision.
 
 ## Secrets are never agent arguments
 
