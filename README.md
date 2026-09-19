@@ -14,13 +14,25 @@ codex plugin add fable-mode@dmokong-plugins
 # then start a new Codex thread — skills are cached per session
 ```
 
+Codex can install this marketplace directly from `.claude-plugin/marketplace.json`, including
+plugins whose source is an external Git URL; neither a Codex catalog nor Codex manifests are
+required for installation. This repo still carries both so Codex gets deliberate policy/category
+and interface/listing metadata, and so each plugin can describe its real Codex support instead of
+implying unsupported features work. When `.agents/plugins/marketplace.json` exists, Codex prefers it
+over the Claude catalog, so it **must name every plugin in the Claude catalog**.
+External Codex entries must use
+`{"source":"url","url":"https://github.com/<owner>/<repo>.git"}`; the tempting
+`source: "git"` and `source: "github"` variants are silently dropped. For a Git marketplace,
+`--ref <ref>` pins the whole repository snapshot and `codex plugin marketplace upgrade <name>`
+updates the registered source.
+
 ## Plugins
 
 | Plugin | Version | Lives in | What it does |
 |---|---|---|---|
 | [`fable-mode`](plugins/fable-mode) | 1.1.1 | this repo | Fable 5's working discipline as a skill — a five-gate task loop (scope → evidence → adversarial reasoning → verification → calibrated reporting) for complex, multi-step, or uncertain work. |
 | [`fable-conductor`](plugins/fable-conductor) | 1.2.1 | this repo | Orchestration of whole work streams — Fable owns shaping, spec, planning, escalations, and final review; autonomous opus/sonnet/haiku adversarial waves run everything mechanical in between, coordinated through durable file contracts. |
-| [`herdr-jutsu`](plugins/herdr-jutsu) | 0.2.0 | this repo | Raise and run a crew inside Herdr — spawn Claude/Codex sessions and CLI panes into panes, tabs, workspaces or git worktrees under one name that joins herdr agents to ListAgents/SendMessage; drive Codex over herdr, handle blocked members, hand long jobs to a fresh session. |
+| [`herdr-jutsu`](plugins/herdr-jutsu) | 0.2.1 | this repo | Raise and run a crew inside Herdr — spawn Claude/Codex sessions and CLI panes into panes, tabs, workspaces or git worktrees under one name that joins herdr agents to ListAgents/SendMessage; drive Codex over herdr, handle blocked members, hand long jobs to a fresh session. |
 | `speculator` | 2.21.1 | [DMokong/speculator](https://github.com/DMokong/speculator) | Spec-quality scoring and a 7-gate pipeline (4 required, 3 opt-in) with LLM-as-judge evaluation, worktree isolation, and beads tracking. Includes `asbuilt-quiz`. |
 | `lego-plan-builder` | 0.1.0 | [DMokong/lego-plan-builder](https://github.com/DMokong/lego-plan-builder) | Official-manual-style LEGO build instructions from an idea or image, with a deterministic physics/legality pipeline and a printable booklet. |
 
@@ -49,11 +61,13 @@ table — see their own repos for surface support.
 ## Layout
 
 ```
-.claude-plugin/marketplace.json   Claude catalog — every plugin's version lives here too
-.agents/plugins/marketplace.json  Codex catalog — entries carry no version (see RELEASE.md)
+.claude-plugin/marketplace.json   Canonical catalog — read by Claude Code and natively by Codex;
+                                  every plugin's version lives here too
+.agents/plugins/marketplace.json  Optional Codex override for policy/category metadata; because
+                                  it takes precedence, it must list every canonical plugin
 plugins/<name>/                   in-repo plugins; the cache builder ships
                                   EVERYTHING under here, so keep it clean
-plugins/<name>/.codex-plugin/     Codex manifest for that plugin (name, version, interface)
+plugins/<name>/.codex-plugin/     Optional Codex listing/interface metadata for that plugin
 .eval-workspaces/                 skill-creator eval fixtures (gitignored)
 scripts/                          check-manifests.sh, codex-install-check.sh, codex-disposable.sh
 tests/                            check-manifests mutation tests, and the herdr-jutsu
@@ -86,8 +100,9 @@ The plugin table above duplicates state that lives in `.claude-plugin/marketplac
 drift and silently become a lie. **Updating it is step 1 of the release checklist in
 `RELEASE.md`, not an afterthought.** When you bump a version, change it here in the same commit.
 
-Check for drift at any time — this checks all four version-carrying surfaces (Claude manifest,
-Claude catalog, Codex manifest, this table), not just the one `jq` used to check:
+Check for drift at any time — this checks catalog name parity plus all four version-carrying
+surfaces for in-repo plugins (Claude manifest, Claude catalog, Codex manifest, this table), not
+just the one `jq` used to check:
 
 ```bash
 scripts/check-manifests.sh

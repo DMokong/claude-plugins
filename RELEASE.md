@@ -1,10 +1,13 @@
 # Releasing a plugin from this marketplace
 
-Three plugins live in this repo: `fable-mode`, `fable-conductor`, and `herdr-jutsu`. Each is
-packaged for two catalogs — the Claude catalog (`.claude-plugin/marketplace.json`) and the Codex
-catalog (`.agents/plugins/marketplace.json`) — so a release ships to both surfaces at once. The
-other marketplace entries (`speculator`, `lego-plan-builder`) are separate GitHub
-repos — this document does not govern them.
+Three plugins live in this repo: `fable-mode`, `fable-conductor`, and `herdr-jutsu`. The Claude
+catalog (`.claude-plugin/marketplace.json`) is canonical and Codex reads it natively; a Codex
+catalog or Codex manifest is not required for Codex to install these plugins. This repo also keeps
+`.agents/plugins/marketplace.json` and `.codex-plugin/plugin.json` so Codex gets intentional
+policy/category and interface/listing metadata, including honest descriptions of unsupported
+features. Because Codex prefers its catalog when both exist, the Codex catalog **must list every
+Claude-catalog plugin**. The other entries (`speculator`, `lego-plan-builder`) are separate GitHub
+repos — this document does not govern their releases, but catalog parity still covers them.
 
 ## The four steps
 
@@ -89,7 +92,7 @@ Because the plugins here release independently, `HEAD` is frequently the
 
 ## Codex
 
-A Codex user installs from this repo's Codex catalog, `.agents/plugins/marketplace.json`:
+A Codex user adds this Git marketplace and installs a plugin:
 
 ```bash
 codex plugin marketplace add DMokong/claude-plugins
@@ -100,6 +103,16 @@ codex plugin add <name>@dmokong-plugins
 Codex has `plugin marketplace add|list|upgrade|remove` and `plugin add|list|remove`; there is no
 `install`/`update` verb pair the way Claude Code has one.
 
+Codex can read `.claude-plugin/marketplace.json` directly, including its external URL-sourced
+plugins, when `.agents/plugins/marketplace.json` is absent. If the Codex catalog is present it wins
+instead, so omitting a Claude-catalog name makes that plugin invisible to Codex. Keep the catalogs
+name-for-name identical; `scripts/check-manifests.sh` enforces this in both directions.
+
+**External-source trap.** In the Codex catalog the working shape is exactly
+`{"source":"url","url":"https://github.com/<owner>/<repo>.git"}`. The plausible-looking
+`{"source":"git",...}` and `{"source":"github","repo":...}` shapes are silently dropped: the
+marketplace can still be added, but that plugin is simply not found.
+
 **Refreshing an installed plugin.** For the local-marketplace case this was proved directly
 (`docs/codex-packaging-findings.md`, Experiment 5): re-running `codex plugin add
 <name>@dmokong-plugins` alone is sufficient — it replaces the cached copy rather than
@@ -107,30 +120,25 @@ accumulating, no `codex plugin remove` and no `codex plugin marketplace upgrade`
 new thread picks up the change. `codex plugin marketplace upgrade` is a Git-only verb: against a
 local marketplace it is a no-op (`No configured Git marketplaces to upgrade`) or an error
 (`marketplace 'dmokong-plugins' is not configured as a Git marketplace`), proved the same
-experiment. Once this repo's marketplace is registered as a **Git** source (i.e. once
-`.agents/plugins/marketplace.json` is on `main` and reachable over `owner/repo`, `https://`, or
-`ssh://`), the expected refresh sequence is `codex plugin marketplace upgrade dmokong-plugins`
-followed by a re-`codex plugin add <name>@dmokong-plugins` and a new thread — **this is not yet
-verified**; the install spike could not reach a Git marketplace source from this machine (Remote
-Login was off). Verify it once the Codex catalog is reachable on `main`:
+experiment. When this repository is registered as a **Git** marketplace through `owner/repo`,
+`https://`, or `ssh://`, `codex plugin marketplace upgrade dmokong-plugins` is verified to update
+the registered source, independently of whether the fetched snapshot uses the Claude catalog or
+the Codex override. The experiment did not establish what that command does to an already-installed
+plugin; re-adding the plugin afterward is verified only for a local marketplace.
 
 ```bash
 codex plugin marketplace add DMokong/claude-plugins --ref main
 # bump a version on main, then:
 codex plugin marketplace upgrade dmokong-plugins
-codex plugin add <name>@dmokong-plugins
-# new thread, then check the cache directory holds the bumped version
+# inspect the marketplace and installed-plugin state before deciding whether to re-add
 ```
 
 **Git marketplace tracking.** A Codex Git marketplace follows the branch it was added from — the
 repo's default branch unless `--ref <ref>` is given at `marketplace add` time. That means the
 per-plugin `<name>--v<X.Y.Z>` tags this repo cuts (see [Tag convention](#tag-convention)) are
-informational on the Codex side only: nothing in the install path reads them, and re-adding with
-`--ref <tag>` is the only way a Codex user would pin to one. Whether `--ref` pins the *whole
-repo's* Git marketplace snapshot (not just which tags are visible) is unverified — `codex plugin
-marketplace add --help` documents `--ref` as a repository-level option, which reads as whole-repo
-pinning, but no Git source could be exercised to confirm it (`docs/codex-packaging-findings.md`,
-Experiment 3 / "Still unverified").
+informational on the Codex side only: nothing in the install path reads them automatically.
+`codex plugin marketplace add <owner>/<repo> --ref <ref>` is verified to pin the **whole repository
+snapshot** to that ref, so a user can deliberately pin this marketplace to a release tag or commit.
 
 **Catalog-name collision.** Registering the catalog name `dmokong-plugins` from a second, different
 source is refused outright until the first is removed with `codex plugin marketplace remove
