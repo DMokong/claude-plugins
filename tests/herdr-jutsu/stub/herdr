@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+# tests/herdr-jutsu/stub/herdr — stub herdr CLI for jutsu-spawn.sh's test suite.
+#
+# NEVER a real herdr. Logs every invocation (one line of argv, space-joined) to
+# $STUB_LOG, returns canned JSON in the real shapes jutsu-spawn.sh consumes, and can be
+# told to fail on a specific subcommand via STUB_FAIL="<noun> <verb>" (e.g.
+# STUB_FAIL="pane rename"). `herdr worktree create` makes a REAL `git worktree` under the
+# given --cwd so "the worktree is still there" is a real, on-disk assertion.
+#
+# Controls (all optional):
+#   STUB_LOG                 path to append one line of argv per invocation (required by
+#                             the runner; falls back to /dev/null if unset so a stray
+#                             direct invocation does not crash).
+#   STUB_FAIL="noun verb"     exact match against "<argv1> <argv2>" fails that call with
+#                             a jq-built JSON error, exit 1.
+#   STUB_AGENT_START_ERROR    ".error.code" value `agent start` fails with (exit 1).
+#                             Independent of STUB_FAIL so agent-start-error-branching
+#                             tests can pick the exact code.
+#   STUB_VERSION              value `herdr --version` reports (default 0.8.2).
+#   STUB_PROCESS_INFO         raw text `pane process-info` prints verbatim instead of the
+#                             default idle-zsh fixture. Set to non-JSON to simulate an
+#                             unparseable response.
+#   STUB_AGENTS               raw JSON `agent list` prints verbatim, in the real
+#                             `{"result":{"agents":[...]}}` shape; `agent get` also reads
+#                             this envelope. Default: an empty agent list.
+#   STUB_PANE_LABEL           "label" value `pane get` reports for any pane id (default
+#                             "idle-shell"), so tests can assert a pre-rename label is
+#                             correctly restored on cleanup.
+#   STUB_AGENT_LIST_EPERM     when "1", `agent list` prints the real sandboxed-Codex EPERM
+#                             text to stderr and exits 1 (nothing on stdout) — reproduces
+#                             T1/T4 from herdr-jutsu-live-test-1.md. To simulate the
+#                             "non-JSON output" reachability failure instead, set
+#                             STUB_AGENTS to a non-JSON string (agent list already prints
+#                             it verbatim) rather than adding a second control.
+set -u
+
+STUB_LOG="${STUB_LOG:-/dev/null}"
+STUB_STATE_DIR="$(dirname -- "$STUB_LOG")"
+
+printf '%s\n' "$*" >>"$STUB_LOG"
+
+seq_next() {
+  # $1 = counter name; returns the next integer, persisted alongside STUB_LOG so ids are
+  # stable within one test case's scratch dir but do not leak across cases.
+  local file="$STUB_STATE_DIR/.stub_seq_$1" n=0
+  [ -f "$file" ] && n="$(cat -- "$file" 2>/dev/null || echo 0)"
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  n=$((n + 1))
+  printf '%s' "$n" >"$file"
+  printf '%s' "$n"
+}
+
+err_json() {
+  # $1 = code, $2 = message -> one jq-built JSON error line on stdout, matching the real
+  # CLI's error envelope closely enough for the script's `.error.code` extraction.
+  jq -cn --arg c "$1" --arg m "$2" '{"error":{"code":$c,"message":$m}}'
+}
+
+maybe_fail() {
+  # $1 = "<noun> <verb>" key for this call.
+  if [ -n "${STUB_FAIL:-}" ] && [ "$STUB_FAIL" = "$1" ]; then
+    err_json stub_forced_failure "stub forced failure: $1"
+    exit 1
+  fi
+}
+
+NOUN="${1:-}"
+VERB="${2:-}"
+case "$NOUN" in
+  --version|--help|-h) KEY="$NOUN" ;;
+  pane|tab|workspace|worktree|agent) KEY="$NOUN $VERB" ;;
+  *) KEY="$NOUN" ;;
+esac
+maybe_fail "$KEY"
+
+case "$NOUN" in
+  --version)
+    echo "herdr ${STUB_VERSION:-0.8.2}"
+    ;;
+
+  --help|-h)
+    echo "herdr (stub) — see tests/herdr-jutsu/stub/herdr for the emulated surface"
+    ;;
+
+  agent)
+    shift
+    case "${1:-}" in
+      list)
+        if [ "${STUB_AGENT_LIST_EPERM:-}" = 1 ]; then
+          # Verbatim text from herdr-jutsu-live-test-1.md T1: what a sandboxed Codex sees
+          # when herdr's socket is unreachable. Nothing on stdout, exit 1.
+          printf '%s\n' 'Error: Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }' >&2
+          exit 1
+        fi
+        if [ -n "${STUB_AGENTS:-}" ]; then
+          printf '%s\n' "$STUB_AGENTS"
+        else
+          echo '{"result":{"agents":[]}}'
+        fi
+        ;;
+      get)
+        shift
+        NAME="${1:-}"
+        FOUND=""
+        if [ -n "${STUB_AGENTS:-}" ]; then
+          FOUND="$(printf '%s' "$STUB_AGENTS" | jq -c --arg n "$NAME" '.result.agents[]? | select(.name == $n)' 2>/dev/null | head -n1)"
+        fi
+        if [ -n "$FOUND" ]; then
+          jq -cn --argjson a "$FOUND" '{"result":{"agent":$a}}'
+        else
+          err_json not_found "no live agent named $NAME" >&2
+          exit 1
+        fi
+        ;;
+      start)
+        shift
+        NAME="${1:-}"
+        if [ -n "${STUB_AGENT_START_ERROR:-}" ]; then
+          err_json "$STUB_AGENT_START_ERROR" "stub agent start failure: $STUB_AGENT_START_ERROR"
+          exit 1
+        fi
+        N="$(seq_next session)"
+        jq -cn --arg n "$NAME" --arg sid "sess-$N" \
+          '{"result":{"agent":{"name":$n,"agent_session":{"value":$sid},"agent_status":"idle"}}}'
+        ;;
+      *)
+        err_json unknown_subcommand "stub: unrecognized: agent ${1:-}" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+
+  pane)
+    shift
+    case "${1:-}" in
+      get)
+        shift
+        PANE="${1:-}"
+        # A pane is "known" to the stub iff its id looks like something the stub itself
+        # would have minted (<ws>:p<n>) or the caller-pane convention used by the runner
+        # (w0:p1). Anything else (e.g. a garbage --beside value) is not found, which is
+        # what lets tests exercise the unknown_anchor path.
+        case "$PANE" in
+          *:p[0-9]*)
+            WS="${PANE%%:*}"
+            jq -cn --arg p "$PANE" --arg t "$WS:t1" --arg ws "$WS" --arg lbl "${STUB_PANE_LABEL:-idle-shell}" \
+              '{"result":{"pane":{"pane_id":$p,"tab_id":$t,"workspace_id":$ws,"label":$lbl}}}'
+            ;;
+          *)
+            err_json not_found "no such pane: $PANE" >&2
+            exit 1
+            ;;
+        esac
+        ;;
+      split)
+        shift
+        ANCHOR="${1:-}"
+        WS="${ANCHOR%%:*}"
+        [ -n "$WS" ] || WS="w0"
+        N="$(seq_next pane)"
+        PANE_ID="$WS:p$N"
+        jq -cn --arg p "$PANE_ID" --arg t "$WS:t1" --arg ws "$WS" \
+          '{"result":{"pane":{"pane_id":$p,"tab_id":$t,"workspace_id":$ws}}}'
+        ;;
+      rename)
+        shift
+        echo '{"result":{"ok":true}}'
+        ;;
+      close)
+        shift
+        echo '{"result":{"ok":true}}'
+        ;;
+      run)
+        shift
+        echo '{"result":{"ok":true}}'
+        ;;
+      process-info)
+        shift
+        TARGET="current"
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --pane) TARGET="${2:-}"; shift 2 ;;
+            --current) TARGET="current"; shift ;;
+            *) shift ;;
+          esac
+        done
+        if [ -n "${STUB_PROCESS_INFO:-}" ]; then
+          printf '%s\n' "$STUB_PROCESS_INFO"
+        else
+          jq -cn --arg p "$TARGET" \
+            '{"result":{"process_info":{"foreground_process_group_id":222,
+              "foreground_processes":[{"argv":["-zsh"],"argv0":"-zsh","cmdline":"-zsh","cwd":"/tmp","name":"zsh","pid":333}],
+              "pane_id":$p,"shell_pid":333}}}'
+        fi
+        ;;
+      layout)
+        shift
+        echo '{"result":{"layout":{"panes":[]}}}'
+        ;;
+      *)
+        err_json unknown_subcommand "stub: unrecognized: pane ${1:-}" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+
+  tab)
+    shift
+    case "${1:-}" in
+      create)
+        shift
+        WS=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --workspace) WS="${2:-}"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        [ -n "$WS" ] || WS="w0"
+        P="$(seq_next pane)"
+        T="$(seq_next tab)"
+        PANE_ID="$WS:p$P"
+        TAB_ID="$WS:t$T"
+        jq -cn --arg p "$PANE_ID" --arg t "$TAB_ID" --arg ws "$WS" \
+          '{"result":{"tab":{"tab_id":$t},"root_pane":{"pane_id":$p,"workspace_id":$ws}}}'
+        ;;
+      rename)
+        shift
+        echo '{"result":{"ok":true}}'
+        ;;
+      *)
+        err_json unknown_subcommand "stub: unrecognized: tab ${1:-}" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+
+  workspace)
+    shift
+    case "${1:-}" in
+      create)
+        shift
+        N="$(seq_next ws)"
+        WS="w$N"
+        P="$(seq_next pane)"
+        PANE_ID="$WS:p$P"
+        jq -cn --arg ws "$WS" --arg t "$WS:t1" --arg p "$PANE_ID" \
+          '{"result":{"workspace":{"workspace_id":$ws},"tab":{"tab_id":$t},"root_pane":{"pane_id":$p}}}'
+        ;;
+      *)
+        err_json unknown_subcommand "stub: unrecognized: workspace ${1:-}" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+
+  worktree)
+    shift
+    case "${1:-}" in
+      create)
+        shift
+        CWD="" BRANCH="" BASE="" WTPATH_ARG=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --cwd) CWD="${2:-}"; shift 2 ;;
+            --branch) BRANCH="${2:-}"; shift 2 ;;
+            --base) BASE="${2:-}"; shift 2 ;;
+            --path) WTPATH_ARG="${2:-}"; shift 2 ;;
+            --label) shift 2 ;;
+            --workspace) shift 2 ;;
+            --focus|--no-focus) shift ;;
+            *) shift ;;
+          esac
+        done
+        WT_PATH="${WTPATH_ARG:-$CWD/.jutsu-worktrees/$BRANCH}"
+        mkdir -p -- "$(dirname -- "$WT_PATH")"
+        if ! git -C "$CWD" worktree add -q -b "$BRANCH" "$WT_PATH" "$BASE" >/dev/null 2>&1; then
+          git -C "$CWD" worktree add -q "$WT_PATH" "$BASE" >/dev/null 2>&1
+        fi
+        N="$(seq_next ws)"
+        WS="w$N"
+        P="$(seq_next pane)"
+        PANE_ID="$WS:p$P"
+        printf '%s %s\n' "$WS" "$WT_PATH" >>"$STUB_STATE_DIR/.stub_worktree_map"
+        jq -cn --arg ws "$WS" --arg t "$WS:t1" --arg p "$PANE_ID" --arg wp "$WT_PATH" --arg br "$BRANCH" \
+          '{"result":{"workspace":{"workspace_id":$ws},"tab":{"tab_id":$t},"root_pane":{"pane_id":$p},
+            "worktree":{"path":$wp,"branch":$br}}}'
+        ;;
+      remove)
+        shift
+        echo '{"result":{"ok":true}}'
+        ;;
+      *)
+        err_json unknown_subcommand "stub: unrecognized: worktree ${1:-}" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+
+  *)
+    err_json unknown_subcommand "stub: unrecognized invocation: $*" >&2
+    exit 1
+    ;;
+esac

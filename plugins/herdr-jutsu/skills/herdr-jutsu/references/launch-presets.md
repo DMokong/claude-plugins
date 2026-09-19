@@ -19,9 +19,17 @@ row here.
 - `--permission-mode`: `plan | manual | acceptEdits | auto | dontAsk | bypassPermissions`.
 - **Permission ceiling:** never launch a child in a broader mode than the parent's own
   unless the user said so for this crew. `bypassPermissions` / `dontAsk` are user-only
-  decisions — ask, do not infer.
-- A child in `manual` mode blocks on its first shell command (seen live on an `echo`).
-  Pick the mode deliberately, or expect to service `blocked` states.
+  decisions — ask, do not infer. This half is **enforced**, not advisory (below).
+- A child blocks on the first shell command its own permission settings do not already allow
+  — in `manual` mode that is nearly every one (seen live on an `echo`), and `acceptEdits`
+  still asks before shell. A command the profile *does* allow runs unprompted in `manual`
+  mode, which is the lever below.
+- **If the brief tells the child to report with `herdr agent prompt`, launch it with exactly
+  that command allowed** — `--allowedTools "Bash(herdr agent prompt:*)"` (`claude --help`:
+  `--allowedTools, --allowed-tools <tools...>`). That is the least privilege that lets the
+  reply push run without a prompt, and it is the profile that worked live; prefer it to
+  asking the user for a broader `--permission-mode`. Without it the child blocks on its own
+  reply and never reaches the parent.
 - Useful extras: `--append-system-prompt "<crew brief>"` to pin role, parent name and
   reporting rule for the whole session; `--add-dir <path>` when a worktree child must read
   the main checkout; `--resume <session-id>` to bring a registry member back in a new pane.
@@ -37,9 +45,19 @@ row here.
 
 - `-s/--sandbox`: `read-only | workspace-write | danger-full-access`.
 - `-a/--ask-for-approval`: `on-request | never` (run `codex --help` for the full list).
+- **Sandbox flags decide file access; they do not decide whether that member can reach
+  herdr.** That is settled separately, by the allow rules in the member's *user's* Codex
+  rules: without a rule matching `herdr agent …`, a Codex session cannot run a herdr command
+  at all, whatever `-s` says — so it cannot push a `[crew:…]` line back. Pull its result
+  instead, and see `references/parent-codex.md` § 1 for what a user would have to allow.
 - `-m <model>` and `-c model_reasoning_effort=<low|medium|high>` override
   `~/.codex/config.toml`; omit them to inherit the user's defaults.
-- `danger-full-access` and `--dangerously-bypass-approvals-and-sandbox` are user-only.
+- **Codex offers its self-update dialog on every launch until the user decides**, so a Codex
+  spawn commonly returns **exit 3 / `agent_not_ready`** — the member exists and is
+  registered, it is just sitting on that dialog. Expected, not an error: apply the
+  blocked-member rule and take only the do-nothing option, then brief it.
+- Reviving a Codex member uses the `resume` **subcommand** (`-- resume <session_id>`), not a
+  `--resume` flag — see `references/comms-and-handoff.md`.
 - **Permission ceiling, Codex terms:** `read-only` is always within bounds.
   `workspace-write` is within bounds only if you yourself may edit files, and only in the
   member's own worktree. `-a never` removes the human from the loop — fine with
@@ -48,6 +66,30 @@ row here.
   cannot tell, ask rather than assume the broad reading.
 - Codex reads `AGENTS.md`, not `CLAUDE.md` — the brief must carry anything it needs that
   lives only in Claude-side instructions.
+
+## Enforced: dangerous flags are refused, not just discouraged
+
+`jutsu-spawn.sh` scans everything after `--` and exits **5** with
+`{"error":{"code":"dangerous_agent_flag",...}}` — nothing is created — for:
+
+| Kind | Refused forms |
+|---|---|
+| claude | `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, `--permission-mode bypassPermissions`, `--permission-mode dontAsk`, `--permission-mode=bypassPermissions`, `--permission-mode=dontAsk` |
+| codex | `--dangerously-bypass-approvals-and-sandbox`, `--yolo`, `-s danger-full-access`, `--sandbox danger-full-access`, `-s=danger-full-access`, `--sandbox=danger-full-access`, and any `-c`/`--config` value setting `sandbox_mode` to `danger-full-access` (both the separate-value and `=` forms) |
+
+The only way past it is `--allow-dangerous-agent-flags`, passed **before** `--`; the spawn
+then records `"dangerous_override":true`. That flag is **user-only**: pass it because the
+user told you to for this member, never because it would be convenient. Do not route around
+the refusal by putting the same setting in a config file instead.
+
+## Secrets are never agent arguments
+
+Agent args are recorded in the registry and echoed in the spawn line. The script replaces
+the value after `--api-key`, `--token`, `--password`, `--secret` (and their `--flag=value`
+forms) with `<redacted>` **in that copy only** — the real value still goes to the agent
+process and is visible in its argv to anything that can list processes. Redaction is a
+courtesy for those four names, not protection: pass credentials through the agent's config
+file or the environment, never after `--`.
 
 ## Shell (`--kind shell`)
 

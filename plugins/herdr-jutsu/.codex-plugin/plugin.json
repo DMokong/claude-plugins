@@ -1,0 +1,35 @@
+{
+  "name": "herdr-jutsu",
+  "version": "0.2.0",
+  "description": "Raise and run a crew inside Herdr — spawn Claude/Codex sessions and CLI panes into panes, tabs, workspaces or git worktrees under one naming convention that joins herdr agents to ListAgents/SendMessage, drive Codex over herdr, handle blocked members, and hand long jobs to a fresh session.",
+  "author": {
+    "name": "Dustin Cheng"
+  },
+  "license": "MIT",
+  "keywords": [
+    "herdr",
+    "multi-agent",
+    "orchestration",
+    "worktrees",
+    "codex",
+    "cross-session",
+    "terminal-multiplexer"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Herdr Jutsu",
+    "shortDescription": "Raise and run a crew inside Herdr from a Claude Code or a Codex parent — requires the Herdr terminal, jq and git, and from Codex a rule allowing herdr commands outside the sandbox.",
+    "longDescription": "Raise and run a crew inside Herdr: extra terminal panes and full agent sessions (Claude, Codex) that are long-lived, visible, individually steerable, and replaceable when their context fills up. Requires running inside a Herdr pane (HERDR_ENV=1), plus jq and git on PATH; not inside Herdr, the skill refuses to act. From Codex there is one more prerequisite: Codex runs a command outside its sandbox only where it matches an allow rule in your own Codex rules, and inside the sandbox herdr's socket is unreachable — so without such rules a Codex session can read this skill but cannot drive herdr, either as a parent or as a crew member reporting back. The skill states what would have to be allowed and never edits a rules file; that decision is the user's. A Claude Code parent driving Codex members needs nothing extra to spawn, brief and pull. references/parent-codex.md carries the Codex-parent path: no ListAgents, no SendMessage, the Herdr bus in both directions with no sender authentication, no queued delivery and no idle notification, so a reply is a wake signal only and the evidence is pulled from the child's pane or report file. That path has passed a live end-to-end run once: a Codex parent under a workspace-write sandbox, on a machine whose user had already allowed the 'herdr agent' and 'herdr pane' command prefixes, placed a Claude child by hand, briefed it, received its wake-signal push and pulled the evidence. Still unexercised, so do not assume them: driving jutsu-spawn.sh itself from Codex (that needs a rule for the script's own path), tab/workspace/worktree placement from Codex, and anything on a machine with no herdr rules. A Claude Code parent additionally has ListAgents/SendMessage for Claude members (references/parent-claude.md).",
+    "developerName": "Dustin Cheng",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Show me how to name and place a crew member for this stream.",
+      "I am a Codex session inside Herdr — walk me through raising a Claude child and hearing back from it.",
+      "Walk me through jutsu-spawn.sh's preflight and exit codes before I spawn a reviewer pane."
+    ]
+  }
+}
