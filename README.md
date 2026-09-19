@@ -45,7 +45,7 @@ session works, fable-conductor orchestrates *many* across the model ladder.
 |---|---|---|
 | `fable-mode` | full | full |
 | `fable-conductor` | full | reference only — orchestration engine is Claude Code only |
-| `herdr-jutsu` | full — a Claude parent can brief Claude members with SendMessage and use a background literal-pane wait for a non-injecting wake | supported where user-approved Codex rules let the parent run the required literal herdr commands outside the sandbox; a Codex parent may block on the literal-pane wait or pull later, with no autonomous background wake |
+| `herdr-jutsu` | full — a Claude parent can brief Claude members with SendMessage, hear a blocking question or early warning back the same way, and use a background literal-pane wait for a non-injecting wake | supported where user-approved Codex rules let the parent run the required literal herdr commands outside the sandbox; a Codex parent may block on the literal-pane wait or pull later, with no autonomous background wake |
 
 `speculator` and `lego-plan-builder` are vendored from their own repos and are not covered by this
 table — see their own repos for surface support.

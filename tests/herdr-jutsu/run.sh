@@ -1248,7 +1248,7 @@ test_stage0_claude_disallowed_tools_merged_once() {
   count="$(printf '%s\n' "$start_line" | grep -o -- '--disallowedTools' | wc -l | tr -d ' ')"
   [ "$count" -eq 1 ] || { fail_case "expected one merged --disallowedTools flag, got $count: $start_line"; teardown_case; return; }
   case "$start_line" in
-    *WebFetch*CustomTool*'Bash(*herdr*)'*SendMessage*ListAgents*) ;;
+    *WebFetch*CustomTool*'Bash(*herdr*)'*ListAgents*) ;;
     *) fail_case "merged deny list is incomplete or reordered unexpectedly: $start_line"; teardown_case; return ;;
   esac
   [ "$(stdout_field '.outbound_isolation')" = "partial" ] \
@@ -1256,6 +1256,94 @@ test_stage0_claude_disallowed_tools_merged_once() {
   case "$(stdout_field '.isolation_detail')" in *acceptEdits*) ;;
     *) fail_case "Claude isolation_detail does not state permission mode: $(cat "$OUT_FILE")"; teardown_case; return ;;
   esac
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_claude_default_keeps_sendmessage() {
+  CURRENT_TEST="stage0_claude_default_keeps_sendmessage"
+  setup_case
+  run_spawn --name stage0-claude-msg --kind claude --cwd "$REPO_DIR"
+  [ "$CODE" -eq 0 ] || { fail_case "Claude spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  local start_line
+  start_line="$(grep '^agent start ' "$STUB_LOG" | tail -n1)"
+  case "$start_line" in
+    *'Bash(*herdr*)'*ListAgents*) ;;
+    *) fail_case "default Claude member must still deny herdr and ListAgents: $start_line"; teardown_case; return ;;
+  esac
+  case "$start_line" in
+    *SendMessage*) fail_case "default Claude member must keep SendMessage: $start_line"; teardown_case; return ;;
+  esac
+  [ "$(stdout_field '.outbound_isolation')" = "partial" ] \
+    || { fail_case "Claude spawn did not report partial isolation: $(cat "$OUT_FILE")"; teardown_case; return; }
+  case "$(stdout_field '.isolation_detail')" in *'SendMessage stays available'*) ;;
+    *) fail_case "isolation_detail must say SendMessage stays available: $(cat "$OUT_FILE")"; teardown_case; return ;;
+  esac
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_claude_strict_isolation_denies_sendmessage() {
+  CURRENT_TEST="stage0_claude_strict_isolation_denies_sendmessage"
+  setup_case
+  run_spawn --name stage0-claude-strict --kind claude --cwd "$REPO_DIR" --strict-isolation
+  [ "$CODE" -eq 0 ] || { fail_case "--strict-isolation Claude spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  local start_line
+  start_line="$(grep '^agent start ' "$STUB_LOG" | tail -n1)"
+  case "$start_line" in
+    *'Bash(*herdr*)'*ListAgents*SendMessage*) ;;
+    *) fail_case "--strict-isolation must deny herdr, ListAgents and SendMessage: $start_line"; teardown_case; return ;;
+  esac
+  case "$(stdout_field '.isolation_detail')" in *'SendMessage denied'*) ;;
+    *) fail_case "isolation_detail must say SendMessage denied: $(cat "$OUT_FILE")"; teardown_case; return ;;
+  esac
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_claude_caller_denied_sendmessage_is_reported() {
+  CURRENT_TEST="stage0_claude_caller_denied_sendmessage_is_reported"
+  setup_case
+  run_spawn --name stage0-claude-own --kind claude --cwd "$REPO_DIR" -- --disallowedTools SendMessage
+  [ "$CODE" -eq 0 ] || { fail_case "Claude spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  case "$(stdout_field '.isolation_detail')" in
+    *'SendMessage stays available'*) fail_case "detail claims SendMessage is available although the caller denied it: $(cat "$OUT_FILE")"; teardown_case; return ;;
+    *'SendMessage denied'*) ;;
+    *) fail_case "isolation_detail must say SendMessage denied: $(cat "$OUT_FILE")"; teardown_case; return ;;
+  esac
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_strict_isolation_conflicts_with_no_isolation() {
+  CURRENT_TEST="stage0_strict_isolation_conflicts_with_no_isolation"
+  setup_case
+  run_spawn --name stage0-conflict --kind claude --cwd "$REPO_DIR" --strict-isolation --no-isolation
+  [ "$CODE" -eq 2 ] || { fail_case "expected exit 2 for --strict-isolation with --no-isolation, got $CODE: $(cat "$OUT_FILE") $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ "$(stderr_error_code)" = "conflicting_options" ] || { fail_case "expected conflicting_options, got '$(stderr_error_code)': $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ ! -s "$STUB_LOG" ] || { fail_case "a refused option pair must make no herdr call, got: $(cat "$STUB_LOG")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_strict_isolation_refused_for_shell() {
+  CURRENT_TEST="stage0_strict_isolation_refused_for_shell"
+  setup_case
+  run_spawn --name stage0-shell-strict --kind shell --cwd "$REPO_DIR" --strict-isolation --cmd "true"
+  [ "$CODE" -eq 2 ] || { fail_case "expected exit 2 for --strict-isolation on a shell member, got $CODE: $(cat "$OUT_FILE") $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ "$(stderr_error_code)" = "conflicting_options" ] || { fail_case "expected conflicting_options, got '$(stderr_error_code)': $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ ! -s "$STUB_LOG" ] || { fail_case "a refused shell --strict-isolation must make no herdr call, got: $(cat "$STUB_LOG")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_strict_isolation_accepted_for_codex() {
+  CURRENT_TEST="stage0_strict_isolation_accepted_for_codex"
+  setup_case
+  run_spawn --name stage0-codex-strict --kind codex --cwd "$REPO_DIR" --strict-isolation
+  [ "$CODE" -eq 0 ] || { fail_case "--strict-isolation Codex spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ "$(stdout_field '.outbound_isolation')" = "enforced_if_trusted" ] \
+    || { fail_case "Codex --strict-isolation changed the isolation label: $(cat "$OUT_FILE")"; teardown_case; return; }
   ok "$CURRENT_TEST"
   teardown_case
 }
@@ -2124,6 +2212,12 @@ test_stage0_info_exclude_linked_worktree_idempotent
 test_stage0_codex_requires_never_and_injects_when_absent
 test_stage0_no_isolation_writes_nothing_and_reports_none
 test_stage0_claude_disallowed_tools_merged_once
+test_stage0_claude_default_keeps_sendmessage
+test_stage0_claude_strict_isolation_denies_sendmessage
+test_stage0_claude_caller_denied_sendmessage_is_reported
+test_stage0_strict_isolation_conflicts_with_no_isolation
+test_stage0_strict_isolation_refused_for_shell
+test_stage0_strict_isolation_accepted_for_codex
 test_stage0_preflight_reports_isolation_without_writing_layer
 test_stage0_failure_cleanup_removes_written_policy_layer
 test_stage0_in_pane_uses_actual_pane_cwd

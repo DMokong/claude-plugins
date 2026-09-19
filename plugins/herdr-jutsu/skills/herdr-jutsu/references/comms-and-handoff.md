@@ -3,10 +3,12 @@
 Surface-neutral. Where a parent's own tools matter, `references/parent-claude.md` /
 `references/parent-codex.md` have it.
 
-## One-way brief, then wait and pull
+## Brief, then wait and pull
 
-The parent sends the brief; the member never sends a message back. A Claude parent may use
-SendMessage to brief a Claude member. Every other parent/member pairing uses `herdr agent
+The parent sends the brief; the member's report is never sent — the parent pulls it. A
+Claude parent may use SendMessage to brief a Claude member, and that member (unless spawned
+with `--strict-isolation`) may SendMessage the parent a blocking question or an early
+warning; no other pairing has a channel back. Every other parent/member pairing uses `herdr agent
 prompt` after the visible-input look-gate. Completion rendezvous is always the literal pane
 id from the trusted spawn result: wait on that id, then pull from that id.
 
@@ -15,7 +17,7 @@ Because every member carries one name as its herdr agent name and pane label,
 member additionally answers to that name as a Claude session name; a Codex member does not
 (no `--name`).
 
-## The brief (the one message to a member)
+## The brief (the first message to a member)
 
 A brief is: **role** · **goal + done-check** · **file scope / cwd** · **issue id** ·
 **parent name and literal pane id** · **how to report**.
@@ -34,6 +36,20 @@ untouched.
 
 The pane FINAL is primary; the file is supplementary. Read only that allow-listed path and
 cap the read in bytes.
+
+### Claude member of a Claude parent — default isolation
+
+The member keeps SendMessage. In either variant's clause, replace the sentence "Do not
+message the parent or any other pane or session." with:
+
+```
+Never use herdr. You may SendMessage only <parent Claude session name>, and only for a
+question that blocks you or an early warning (a scope problem, context running low) — not
+for progress, and not for the report.
+```
+
+Name a sibling session there as well only when the two members must talk. For a Codex
+member, a Codex parent, or a `--strict-isolation` member, keep the clause as written.
 
 ### No-write variant — read-only member
 
@@ -91,6 +107,10 @@ After a dialog is dismissed, herdr can keep reporting a stale `blocked` for ~10�
 read `--source visible` again, then re-send. Do not escalate on the first refusal.
 
 ## Handoff (member low on context, or job outlives a session)
+
+An isolated member cannot spawn its own successor — it cannot drive herdr, and the parent
+would be left waiting on a dead pane. The parent runs the handoff; a Claude member's part is
+to warn early (SendMessage, where it has it) instead of running dry.
 
 1. Ask the member to write `<cwd>/.jutsu/handoff-<name>.md`: goal, state of each file
    touched, decisions + reasons, commands that prove current state, next three steps,

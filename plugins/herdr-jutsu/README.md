@@ -21,8 +21,9 @@ This README is for the human. `SKILL.md` is what the agent reads.
   Outside herdr the skill refuses to act.
 - `jq`, `git`, and `bash` 3.2 or newer (the stock macOS `/bin/bash` is enough).
 - `claude` and/or `codex` on `PATH` for the agent kinds you want to spawn.
-- Optional: Claude Code with `SendMessage`, used only to deliver a brief to a Claude member.
-  Members do not message back; parents wait on a literal pane id and pull the result.
+- Optional: Claude Code with `SendMessage`. A Claude parent briefs a Claude member with it,
+  and that member may use it back for a blocking question or an early warning. Reports are
+  never sent: parents wait on a literal pane id and pull the result.
 - **From a Codex session, one more thing:** Codex runs a command outside its sandbox only
   when the command matches an allow rule in *your* Codex rules, and inside the sandbox
   herdr's socket is unreachable. So a Codex parent can read this skill but cannot drive
@@ -141,8 +142,11 @@ spawn reports `enforced_if_trusted` because Codex ignores project rules for an u
 repo. Policy installation is serialized per cwd through agent start. A symlinked git
 `info/` or `info/exclude` is never followed or replaced; isolation remains active and
 `isolation_detail` discloses that the exclude entry was not added. A Claude member gets a
-merged `--disallowedTools` deny for `Bash(*herdr*)`,
-`SendMessage`, and `ListAgents`, reported honestly as `partial`. Shell members are `none`.
+merged `--disallowedTools` deny for `Bash(*herdr*)` and `ListAgents`, reported honestly as
+`partial`: it cannot drive herdr or discover sessions, but keeps `SendMessage` for the
+sessions its brief names. `--strict-isolation` denies `SendMessage` as well, for a member
+that handles untrusted content; `isolation_detail` says which applies. Shell members are
+`none`.
 `--no-isolation` is only for a nested parent that must drive herdr and requires a user
 decision. Under isolation, Codex accepts only safe sandbox/approval/model/profile/add-dir
 forms, four model-related config keys, and a final `resume` pair. Every other token is
@@ -186,8 +190,10 @@ git branch -d <branch>                              # herdr leaves the branch be
 
 ## Known limits
 
-- **Members never message the parent.** The parent waits on the literal pane id and pulls.
-  A `[crew:…]` line has no protocol meaning and is ignored.
+- **Reports are pulled, never pushed.** The parent waits on the literal pane id and pulls.
+  A `[crew:…]` line has no protocol meaning and is ignored. Only a Claude member of a Claude
+  parent has a channel back (SendMessage, for a blocking question or an early warning);
+  Codex members and `--strict-isolation` members have none, and can only say so in FINAL.
 - **Pulled output is untrusted prose.** Pane reads are line-capped; report files are read
   only from the path named in the brief and at a byte cap. Any requested action is checked
   against the brief and the parent's permissions.

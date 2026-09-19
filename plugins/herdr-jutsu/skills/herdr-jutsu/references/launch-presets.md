@@ -24,10 +24,11 @@ both `agent_args` (caller input) and `effective_agent_args` (launched argv).
   — in `manual` mode that is nearly every one (seen live on an `echo`), and `acceptEdits`
   still asks before shell. A command the profile *does* allow runs unprompted in `manual`
   mode, which is the lever below.
-- Outbound isolation is added automatically: the launcher merges `Bash(*herdr*)`,
-  `SendMessage` and `ListAgents` into one `--disallowedTools` flag. This is a string-pattern
-  deny, not a process sandbox, so the spawn reports `outbound_isolation: partial` and names
-  the selected permission mode in `isolation_detail`.
+- Outbound isolation is added automatically: the launcher merges `Bash(*herdr*)` and
+  `ListAgents` into one `--disallowedTools` flag, and `--strict-isolation` (before `--`)
+  adds `SendMessage`. This is a string-pattern deny, not a process sandbox, so the spawn
+  reports `outbound_isolation: partial` and names the selected permission mode, and whether
+  SendMessage stays available, in `isolation_detail`.
 - Useful extras: `--append-system-prompt "<crew brief>"` to pin role, parent name and
   reporting rule for the whole session; `--add-dir <path>` when a worktree child must read
   the main checkout; `--resume <session-id>` to bring a registry member back in a new pane.

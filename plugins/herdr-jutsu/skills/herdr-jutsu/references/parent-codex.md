@@ -60,6 +60,10 @@ project layer only when it trusts that repository. Claude is `partial`; shell an
 `--no-isolation` is only for a nested parent that legitimately must drive herdr. It is a
 user decision, like the dangerous-agent-flags override.
 
+A Claude member keeps `SendMessage` by default, which is a channel to Claude sessions only.
+A Codex parent is not one, so spawn Claude members with `--strict-isolation`: the member
+then has no channel to anyone, and "members never message the parent" holds exactly.
+
 ## 4. Brief once
 
 Use the literal pane id. First run:

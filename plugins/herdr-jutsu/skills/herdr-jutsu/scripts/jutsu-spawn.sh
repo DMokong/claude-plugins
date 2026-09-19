@@ -47,6 +47,11 @@ Options:
   --no-isolation               do not install outbound isolation for a nested parent that
                                must drive herdr (user-only decision; recorded as
                                "outbound_isolation":"none"). Must appear before `--`.
+  --strict-isolation           kind=claude: also deny SendMessage, for a member that handles
+                               untrusted content and must not message any session. No
+                               effect on kind=codex (it has no SendMessage); refused with
+                               --no-isolation or kind=shell (conflicting_options). Must
+                               appear before `--`.
   --preflight                  run the environment checks, print the result JSON line, create
                                nothing (cannot be combined with --record-session:
                                conflicting_options)
@@ -123,8 +128,11 @@ Failure after creation (EXIT trap, disarmed on success and on the retained agent
   - an --in-pane pane is never closed; a rename this run applied is reverted.
 
 kind=claude auto-adds `-n <name>` so ListAgents/SendMessage address == herdr agent name.
-Unless --no-isolation is passed, kind=claude also merges `Bash(*herdr*)`, `SendMessage`
-and `ListAgents` into one --disallowedTools flag. kind=codex installs a project policy in
+Unless --no-isolation is passed, kind=claude also merges `Bash(*herdr*)` and `ListAgents`
+into one --disallowedTools flag: the member cannot drive herdr or discover sessions, but
+keeps SendMessage, so it can message the sessions its brief names (its parent, for a
+blocking question or an early warning). --strict-isolation adds `SendMessage` to that
+flag; isolation_detail says which applies. kind=codex installs a project policy in
 the target cwd, requires `-a never` (and adds it when absent), applies the allowlist below
 even with --allow-dangerous-agent-flags, and reports
 "outbound_isolation":"enforced_if_trusted" because Codex only loads a project policy
@@ -200,7 +208,7 @@ herdr_run() { # herdr_run <herdr args...>  -> stdout in $HERDR_OUT, one-line std
 NAME="" KIND="" WHERE="pane" WORKTREE="" BASE="" IN_PANE="" BESIDE="" DIRECTION="" RATIO=""
 CWD="$PWD" STREAM="" ISSUE="" CMD="" TIMEOUT=60000
 FOCUS_ARG=(--no-focus)
-ALLOW_DANGEROUS=0 NO_ISOLATION=0 PREFLIGHT_ONLY=0 RECORD_SESSION=0 SESSION_ID_ARG=""
+ALLOW_DANGEROUS=0 NO_ISOLATION=0 STRICT_ISOLATION=0 PREFLIGHT_ONLY=0 RECORD_SESSION=0 SESSION_ID_ARG=""
 AGENT_ARGS=()
 
 while [ $# -gt 0 ]; do
@@ -222,6 +230,7 @@ while [ $# -gt 0 ]; do
     --focus) FOCUS_ARG=(--focus); shift ;;
     --allow-dangerous-agent-flags) ALLOW_DANGEROUS=1; shift ;;
     --no-isolation) NO_ISOLATION=1; shift ;;
+    --strict-isolation) STRICT_ISOLATION=1; shift ;;
     --preflight) PREFLIGHT_ONLY=1; shift ;;
     --record-session) RECORD_SESSION=1; shift ;;
     --session-id) need_value "$1" $#; SESSION_ID_ARG="$2"; shift 2 ;;
@@ -237,6 +246,17 @@ done
 if [ "$PREFLIGHT_ONLY" -eq 1 ] && [ "$RECORD_SESSION" -eq 1 ]; then
   fail conflicting_options \
     "--preflight and --record-session cannot be combined: --preflight creates nothing, --record-session appends a registry row" 2
+fi
+
+# --strict-isolation tightens an isolation layer, so it cannot be combined with having none:
+# refuse instead of printing a label the member does not have.
+if [ "$STRICT_ISOLATION" -eq 1 ] && [ "$NO_ISOLATION" -eq 1 ]; then
+  fail conflicting_options \
+    "--strict-isolation and --no-isolation cannot be combined: one tightens outbound isolation, the other removes it" 2
+fi
+if [ "$STRICT_ISOLATION" -eq 1 ] && [ "$KIND" = shell ]; then
+  fail conflicting_options \
+    "--strict-isolation cannot be combined with --kind shell: shell members are not isolated" 2
 fi
 
 # ---------------------------------------------------------------------------------------
@@ -540,14 +560,23 @@ prepare_isolation() {
         esac
         i=$((i + 1))
       done
-      for value in 'Bash(*herdr*)' SendMessage ListAgents; do
+      for value in 'Bash(*herdr*)' ListAgents; do
         array_has "$value" ${denied[@]+"${denied[@]}"} || denied+=("$value")
       done
+      if [ "$STRICT_ISOLATION" -eq 1 ]; then
+        array_has SendMessage ${denied[@]+"${denied[@]}"} || denied+=(SendMessage)
+      fi
       rebuilt+=(--disallowedTools)
       rebuilt+=(${denied[@]+"${denied[@]}"})
       LAUNCH_ARGS=(${rebuilt[@]+"${rebuilt[@]}"})
       OUTBOUND_ISOLATION="partial"
-      ISOLATION_DETAIL="Claude string-pattern deny for herdr, SendMessage and ListAgents; effective permission mode: $permission_mode"
+      # Read the label off the final deny list, so a caller-supplied SendMessage deny is
+      # reported as denied too.
+      if array_has SendMessage ${denied[@]+"${denied[@]}"}; then
+        ISOLATION_DETAIL="Claude string-pattern deny for herdr, plus ListAgents and SendMessage denied; effective permission mode: $permission_mode"
+      else
+        ISOLATION_DETAIL="Claude string-pattern deny for herdr, plus ListAgents denied; SendMessage stays available, so the member can message sessions it is given the name of; effective permission mode: $permission_mode"
+      fi
       if [ "$claude_only_barrier" -eq 1 ]; then
         ISOLATION_DETAIL="$ISOLATION_DETAIL; the string-pattern deny is the ONLY barrier because this mode does not prompt for Bash"
       fi
