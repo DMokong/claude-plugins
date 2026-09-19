@@ -32,7 +32,7 @@ updates the registered source.
 |---|---|---|---|
 | [`fable-mode`](plugins/fable-mode) | 1.1.1 | this repo | Fable 5's working discipline as a skill — a five-gate task loop (scope → evidence → adversarial reasoning → verification → calibrated reporting) for complex, multi-step, or uncertain work. |
 | [`fable-conductor`](plugins/fable-conductor) | 1.2.1 | this repo | Orchestration of whole work streams — Fable owns shaping, spec, planning, escalations, and final review; autonomous opus/sonnet/haiku adversarial waves run everything mechanical in between, coordinated through durable file contracts. |
-| [`herdr-jutsu`](plugins/herdr-jutsu) | 0.2.1 | this repo | Raise and run a crew inside Herdr — spawn Claude/Codex sessions and CLI panes into panes, tabs, workspaces or git worktrees under one name that joins herdr agents to ListAgents/SendMessage; drive Codex over herdr, handle blocked members, hand long jobs to a fresh session. |
+| [`herdr-jutsu`](plugins/herdr-jutsu) | 0.3.0 | this repo | Raise an isolated crew inside Herdr — brief once, wait on a literal pane id, pull bounded results, handle blocked members, and hand long jobs to a fresh session. |
 | `speculator` | 2.21.1 | [DMokong/speculator](https://github.com/DMokong/speculator) | Spec-quality scoring and a 7-gate pipeline (4 required, 3 opt-in) with LLM-as-judge evaluation, worktree isolation, and beads tracking. Includes `asbuilt-quiz`. |
 | `lego-plan-builder` | 0.1.0 | [DMokong/lego-plan-builder](https://github.com/DMokong/lego-plan-builder) | Official-manual-style LEGO build instructions from an idea or image, with a deterministic physics/legality pipeline and a printable booklet. |
 
@@ -45,7 +45,7 @@ session works, fable-conductor orchestrates *many* across the model ladder.
 |---|---|---|
 | `fable-mode` | full | full |
 | `fable-conductor` | full | reference only — orchestration engine is Claude Code only |
-| `herdr-jutsu` | full — a Claude Code parent additionally gets ListAgents/SendMessage for Claude crew members (`references/parent-claude.md`), and needs nothing extra to spawn, brief and pull Codex members | **one live pass**: a Codex parent has raised, briefed and pulled from a Claude child end to end, by placing it with literal `herdr pane`/`herdr agent` calls. It needs user-approved Codex rules letting those commands run outside the sandbox, and gets no sender authentication, queued delivery or idle notification over the Herdr bus. Driving `jutsu-spawn.sh` from Codex, non-pane placement, and machines with no herdr rules are unexercised — see `references/parent-codex.md` |
+| `herdr-jutsu` | full — a Claude parent can brief Claude members with SendMessage and use a background literal-pane wait for a non-injecting wake | supported where user-approved Codex rules let the parent run the required literal herdr commands outside the sandbox; a Codex parent may block on the literal-pane wait or pull later, with no autonomous background wake |
 
 `speculator` and `lego-plan-builder` are vendored from their own repos and are not covered by this
 table — see their own repos for surface support.
@@ -56,7 +56,7 @@ table — see their own repos for surface support.
 |---|---|
 | `fable-mode` | none — pure working-discipline instructions, no tools, no network, no credentials |
 | `fable-conductor` | Claude Code; full orchestration (Phases 4-5) needs the `Workflow` tool, and degrades to Agent-tool parallel batches without it; optional: `superpowers`, `speculator`, `beads` (probed, never assumed) |
-| `herdr-jutsu` | running inside a Herdr pane (`HERDR_ENV=1`), Herdr >= 0.8.2, `jq`, `git`, bash 3.2+; from a Codex session also your own Codex rules allowing the `herdr` commands (and the spawn script's path) to run outside the sandbox — the skill says what it needs and never edits a rules file |
+| `herdr-jutsu` | running inside a Herdr pane (`HERDR_ENV=1`), Herdr >= 0.8.2, `jq`, `git`, bash 3.2+; from a Codex parent also your own Codex rules allowing the `herdr` commands (and the spawn script's path) to run outside the sandbox — the launcher never edits user rules, but does install a child-only project deny policy |
 
 ## Layout
 
