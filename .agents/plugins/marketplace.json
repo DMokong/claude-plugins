@@ -1,0 +1,41 @@
+{
+  "name": "dmokong-plugins",
+  "plugins": [
+    {
+      "name": "fable-mode",
+      "source": {
+        "source": "local",
+        "path": "./plugins/fable-mode"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Developer Tools"
+    },
+    {
+      "name": "fable-conductor",
+      "source": {
+        "source": "local",
+        "path": "./plugins/fable-conductor"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Developer Tools"
+    },
+    {
+      "name": "herdr-jutsu",
+      "source": {
+        "source": "local",
+        "path": "./plugins/herdr-jutsu"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
