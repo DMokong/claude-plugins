@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Pass-through mkdir with one deterministic interrupt window for policy ownership tests.
+set -u
+
+target=""
+for arg in "$@"; do
+  case "$arg" in -*) ;; *) target="$arg" ;; esac
+done
+
+/bin/mkdir "$@"
+rc=$?
+if [ "$rc" -eq 0 ] && [ -n "${STUB_INTERRUPT_MKDIR_TARGET:-}" ] \
+  && [ "$target" = "$STUB_INTERRUPT_MKDIR_TARGET" ]; then
+  [ -z "${STUB_INTERRUPT_MKDIR_READY:-}" ] || : >"$STUB_INTERRUPT_MKDIR_READY"
+  sleep 5
+fi
+exit "$rc"
