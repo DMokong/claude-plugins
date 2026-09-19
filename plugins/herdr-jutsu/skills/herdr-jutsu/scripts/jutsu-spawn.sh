@@ -377,7 +377,7 @@ codex_config_allowed() { # codex_config_allowed <key=value>
 prepare_isolation() {
   local n=${#AGENT_ARGS[@]} i=0 a next approval_seen=0 approval_value=""
   local sandbox_seen=0 sandbox_value="" profile_seen=0 profile_value="" profile_token=""
-  local config_value="" value="" permission_mode="default" claude_only_barrier=0 claude_skip_permissions=0
+  local config_value="" value="" permission_mode="" claude_only_barrier=0 claude_skip_permissions=0
   local rebuilt=() denied=() codex_flags=() resume_tail=()
 
   if [ "$NO_ISOLATION" -eq 1 ]; then
@@ -573,9 +573,16 @@ prepare_isolation() {
       # Read the label off the final deny list, so a caller-supplied SendMessage deny is
       # reported as denied too.
       if array_has SendMessage ${denied[@]+"${denied[@]}"}; then
-        ISOLATION_DETAIL="Claude string-pattern deny for herdr, plus ListAgents and SendMessage denied; effective permission mode: $permission_mode"
+        ISOLATION_DETAIL="Claude string-pattern deny for herdr, plus ListAgents and SendMessage denied"
       else
-        ISOLATION_DETAIL="Claude string-pattern deny for herdr, plus ListAgents denied; SendMessage stays available, so the member can message sessions it is given the name of; effective permission mode: $permission_mode"
+        ISOLATION_DETAIL="Claude string-pattern deny for herdr, plus ListAgents denied; SendMessage stays available, so the member can message sessions it is given the name of"
+      fi
+      # The launcher sees launch args only, never the member's settings: name the mode only
+      # when an arg set it, and otherwise warn for the worst case the settings could select.
+      if [ -z "$permission_mode" ]; then
+        ISOLATION_DETAIL="$ISOLATION_DETAIL; no permission mode in the launch args, so the member's own settings decide it — if they select auto, dontAsk or bypassPermissions, the string-pattern deny may be the ONLY barrier"
+      else
+        ISOLATION_DETAIL="$ISOLATION_DETAIL; permission mode from launch args: $permission_mode"
       fi
       if [ "$claude_only_barrier" -eq 1 ]; then
         ISOLATION_DETAIL="$ISOLATION_DETAIL; the string-pattern deny is the ONLY barrier because this mode does not prompt for Bash"
