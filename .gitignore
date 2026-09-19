@@ -2,3 +2,7 @@
 # Kept alongside the plugins they test, but OUTSIDE plugins/ so they are never
 # copied into a built plugin cache. See claw-6smt release notes.
 .eval-workspaces/
+
+# Conductor stream directories hold absolute local paths and private tracker ids —
+# they are working records, never part of this public repo.
+docs/fable-streams/

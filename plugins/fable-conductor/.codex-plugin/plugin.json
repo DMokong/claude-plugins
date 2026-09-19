@@ -1,0 +1,34 @@
+{
+  "name": "fable-conductor",
+  "version": "1.2.1",
+  "description": "Fable-maximised orchestration of entire work streams — Fable owns brainstorm/spec/plan, escalations, and final review; autonomous opus/sonnet/haiku adversarial workflows (implement, review, test) execute everything mechanical in between, coordinated through durable file contracts.",
+  "author": {
+    "name": "Dustin Cheng"
+  },
+  "license": "MIT",
+  "keywords": [
+    "fable",
+    "orchestration",
+    "workflows",
+    "model-tiering",
+    "adversarial-review",
+    "work-streams",
+    "agent-pipelines"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Fable Conductor",
+    "shortDescription": "Stream-orchestration reference — the Workflow-tool engine that runs it is Claude Code only today.",
+    "longDescription": "Fable-maximised orchestration of entire work streams: conductor judgment at shape/spec/plan/escalations/final-review, with autonomous opus/sonnet/haiku adversarial waves running everything mechanical in between, coordinated through durable file contracts. The orchestration engine itself — the Workflow-tool wave templates, the bundled agent definitions under agents/, and the /conduct command — is Claude Code only today; none of it runs on Codex. What a Codex session gets from this plugin is the conduct skill as readable reference: the phase model, the stream directory layout, and the brief/report file-contract format documented in skills/conduct/SKILL.md and skills/conduct/references/contracts.md — useful for reading or hand-authoring stream artifacts written by a Claude Code conductor, not for running a stream from Codex.",
+    "developerName": "Dustin Cheng",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read"
+    ],
+    "defaultPrompt": [
+      "Explain the conduct skill's file-contract format for stream.md, task briefs, and reports.",
+      "Walk me through the conductor's phase model and what happens at each phase.",
+      "Show me the report-stamp convention this skill expects an implementer to follow."
+    ]
+  }
+}

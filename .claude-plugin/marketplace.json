@@ -58,7 +58,7 @@
       "name": "fable-mode",
       "source": "./plugins/fable-mode",
       "description": "Fable 5's working discipline as a skill — a five-gate task loop (scope, evidence, adversarial reasoning, verification, calibrated reporting) for complex, multi-step, or uncertain work.",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "author": {
         "name": "Dustin Cheng"
       },
@@ -76,7 +76,7 @@
       "name": "fable-conductor",
       "source": "./plugins/fable-conductor",
       "description": "Fable-maximised orchestration of entire work streams — Fable owns brainstorm/spec/plan, escalations, and final review; autonomous opus/sonnet/haiku adversarial workflows (implement, review, test) execute everything mechanical in between, coordinated through durable file contracts.",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "author": {
         "name": "Dustin Cheng"
       },
@@ -95,7 +95,7 @@
       "name": "herdr-jutsu",
       "source": "./plugins/herdr-jutsu",
       "description": "Raise and run a crew inside Herdr — spawn Claude/Codex sessions and CLI panes into panes, tabs, workspaces or git worktrees under one naming convention that joins herdr agents to ListAgents/SendMessage, drive Codex over herdr, handle blocked members, and hand long jobs to a fresh session.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "author": {
         "name": "Dustin Cheng"
       },

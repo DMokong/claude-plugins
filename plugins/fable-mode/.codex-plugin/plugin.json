@@ -1,0 +1,34 @@
+{
+  "name": "fable-mode",
+  "version": "1.1.1",
+  "description": "Fable 5's working discipline as a skill — a five-gate task loop (scope, evidence, adversarial reasoning, verification, calibrated reporting) for complex, multi-step, or uncertain work.",
+  "author": {
+    "name": "Dustin Cheng"
+  },
+  "license": "MIT",
+  "keywords": [
+    "fable",
+    "working-discipline",
+    "task-loop",
+    "verification",
+    "debugging",
+    "method-skill"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Fable Mode",
+    "shortDescription": "A five-gate working discipline for hard tasks",
+    "longDescription": "Fable 5's working discipline as a skill. Runs complex, multi-step or uncertain work through five gates — scope the task, gather evidence before acting, reason adversarially against your own plan, verify by running the check rather than reading the diff, and report with calibrated confidence. Pure instructions: the skill adds no tools and needs no network access or credentials.",
+    "developerName": "Dustin Cheng",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use fable-mode to work through this bug end to end.",
+      "Apply the fable-mode gates to this refactor before you start editing.",
+      "Review my plan in fable-mode and tell me what evidence is missing."
+    ]
+  }
+}
