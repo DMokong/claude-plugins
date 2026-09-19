@@ -18,7 +18,7 @@ Every hard task passes through five gates. A gate must pass before the next one 
 State what done looks like before touching anything.
 
 - Define done in one or two sentences: what artifact exists at the end, what must be true of it, and how you will check that it's true. If you can't write the check, you don't understand the task yet.
-- Check standing rules first (CLAUDE.md, skills, memory). Don't invent an approach the project already has a rule for.
+- Check standing rules first (AGENTS.md / CLAUDE.md, skills, memory). Don't invent an approach the project already has a rule for.
 - Separate known from assumed. Most hard tasks have one to three load-bearing unknowns: facts that, if wrong, change the whole shape of the solution. Name them explicitly.
 - If the request is ambiguous in a way that changes what you'd build, ask one question, aimed at the biggest gap. Otherwise pick the sensible default, say so in one line, and proceed. Ask questions to change outcomes, not to feel safe.
 - Right-size the effort. Match the depth of this process to the stakes of the task. Deep reasoning belongs in planning and review, not in mechanical steps.
@@ -94,6 +94,6 @@ Any one of these: stop, go back to that gate.
 ## Notes
 
 - This is a method skill, not a workflow. It changes how you execute the current task; it produces no files of its own.
-- It stacks with task-specific skills (/proveit, /verify, /code-review). Those are the "how to check" tools; this is the discipline of when to reach for them.
+- It stacks with task-specific skills for proof, verification, and code review. Invoke the corresponding installed skill, in whatever way your surface invokes skills; those are the "how to check" tools, this is the discipline of when to reach for them.
 - Don't apply it to trivial work. Forcing all five gates onto a two-minute edit is its own failure mode.
 - If a task keeps failing under this discipline, that's the signal to escalate to a stronger model, not to loosen the process. At the top of the ladder, where there's no stronger model to reach for, escalate the kind of check instead — a decorrelated reviewer, a fresh-context session, or the human who owns the decision. Keep the discipline either way.

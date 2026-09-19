@@ -12,7 +12,7 @@ claude plugin install fable-mode@dmokong-plugins
 
 | Plugin | Version | Lives in | What it does |
 |---|---|---|---|
-| [`fable-mode`](plugins/fable-mode) | 1.1.0 | this repo | Fable 5's working discipline as a skill — a five-gate task loop (scope → evidence → adversarial reasoning → verification → calibrated reporting) for complex, multi-step, or uncertain work. |
+| [`fable-mode`](plugins/fable-mode) | 1.1.1 | this repo | Fable 5's working discipline as a skill — a five-gate task loop (scope → evidence → adversarial reasoning → verification → calibrated reporting) for complex, multi-step, or uncertain work. |
 | [`fable-conductor`](plugins/fable-conductor) | 1.2.0 | this repo | Orchestration of whole work streams — Fable owns shaping, spec, planning, escalations, and final review; autonomous opus/sonnet/haiku adversarial waves run everything mechanical in between, coordinated through durable file contracts. |
 | [`herdr-jutsu`](plugins/herdr-jutsu) | 0.1.0 | this repo | Raise and run a crew inside Herdr — spawn Claude/Codex sessions and CLI panes into panes, tabs, workspaces or git worktrees under one name that joins herdr agents to ListAgents/SendMessage; drive Codex over herdr, handle blocked members, hand long jobs to a fresh session. |
 | `speculator` | 2.21.1 | [DMokong/speculator](https://github.com/DMokong/speculator) | Spec-quality scoring and a 7-gate pipeline (4 required, 3 opt-in) with LLM-as-judge evaluation, worktree isolation, and beads tracking. Includes `asbuilt-quiz`. |
