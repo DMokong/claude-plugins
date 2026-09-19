@@ -1936,6 +1936,40 @@ test_r2_claude_only_barrier_detail() {
   teardown_case
 }
 
+test_r3_claude_unset_permission_mode_is_not_called_effective() {
+  CURRENT_TEST="r3_claude_unset_permission_mode_is_not_called_effective"
+  setup_case
+  run_spawn --name r3-claude-unset --kind claude --cwd "$REPO_DIR"
+  [ "$CODE" -eq 0 ] || { fail_case "Claude spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  local detail
+  detail="$(stdout_field '.isolation_detail')"
+  case "$detail" in *'effective permission mode'*)
+    fail_case "detail claims an effective mode the launcher cannot know: $detail"; teardown_case; return ;;
+  esac
+  case "$detail" in *"member's own settings decide"*'may be the ONLY barrier'*) ;;
+    *) fail_case "unset mode must say settings decide and warn conservatively: $detail"; teardown_case; return ;;
+  esac
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_r3_claude_prompting_mode_from_args_is_labelled() {
+  CURRENT_TEST="r3_claude_prompting_mode_from_args_is_labelled"
+  setup_case
+  run_spawn --name r3-claude-args --kind claude --cwd "$REPO_DIR" -- --permission-mode acceptEdits
+  [ "$CODE" -eq 0 ] || { fail_case "Claude spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  local detail
+  detail="$(stdout_field '.isolation_detail')"
+  case "$detail" in *'permission mode from launch args: acceptEdits'*) ;;
+    *) fail_case "detail must name the launch-arg mode: $detail"; teardown_case; return ;;
+  esac
+  case "$detail" in *'ONLY barrier'*)
+    fail_case "a prompting mode must not carry the only-barrier warning: $detail"; teardown_case; return ;;
+  esac
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
 wait_for_file() { # wait_for_file <path> [attempts]
   local path="$1" attempts="${2:-60}" i=0
   while [ "$i" -lt "$attempts" ]; do
@@ -2253,6 +2287,8 @@ test_r2_refuses_profile_without_sandbox
 test_r2_refuses_full_auto
 test_r2_effective_args_and_json_argv_boundaries
 test_r2_claude_only_barrier_detail
+test_r3_claude_unset_permission_mode_is_not_called_effective
+test_r3_claude_prompting_mode_from_args_is_labelled
 test_r2_policy_lock_second_spawn_waits_then_succeeds
 test_r2_policy_lock_timeout_is_clear
 test_r2_interrupt_between_create_and_bookkeeping_rolls_back

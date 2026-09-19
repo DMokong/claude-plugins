@@ -259,7 +259,7 @@ Copy `skills/herdr-jutsu/` to `~/.claude/skills/` (one machine, all projects),
 
 `0.x` — built and live-tested on herdr 0.8.2, but young. Spawning, naming, both message
 buses, blocked-member handling, Codex resume and cleanup have been exercised for real from a
-**Claude** parent; session handoff has only been dry-run; the **Codex-parent** path has
+**Claude** parent; session handoff has run for real once (a Claude lead handing to a successor session); the **Codex-parent** path has
 passed a live end-to-end run once, by manual placement, on a machine with the `herdr agent`
 and `herdr pane` prefixes already allowed — with the script route, non-pane placements and
 rule-less machines still untried. Expect the conventions to tighten as it gets used on real
@@ -267,4 +267,11 @@ streams.
 
 0.3.0 replaces member pushes with a literal-pane completion rendezvous, installs child
 outbound isolation, treats pulled prose as evidence rather than instructions, and requires
-a visible-pane check before every key send.
+a visible-pane check before every key send. Verified live after release: a Codex member
+is refused herdr by rule and by sandbox and cannot delete its deny rules; Codex accepts the
+attached and `=` flag spellings the allowlist accepts; text left unsent in a Claude parent's
+input box survives a background-wait wake.
+
+0.3.1 stops calling a Claude member's permission mode "effective": the launcher sees launch
+args, not the member's settings, so it names the mode only when an arg set it and otherwise
+warns that the settings decide and the string-pattern deny may be the only barrier.
