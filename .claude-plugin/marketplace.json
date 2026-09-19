@@ -95,7 +95,7 @@
       "name": "herdr-jutsu",
       "source": "./plugins/herdr-jutsu",
       "description": "Raise an isolated crew inside Herdr — brief once, wait on a literal pane id, pull bounded results, handle blocked members, and hand long jobs to a fresh session.",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "author": {
         "name": "Dustin Cheng"
       },

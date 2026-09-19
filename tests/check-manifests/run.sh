@@ -432,7 +432,7 @@ test_clean_plugins_report_ok_after_earlier_mismatch() {
     "ok speculator 2.21.1" \
     "ok fable-mode 1.1.1" \
     "ok fable-conductor 1.2.1" \
-    "ok herdr-jutsu 0.3.0"; do
+    "ok herdr-jutsu 0.3.1"; do
     grep -qxF "$expected" "$OUT_FILE" \
       || { fail_case "missing clean-plugin line '$expected'. Full output:$(all_output)"; teardown_case; return; }
   done
