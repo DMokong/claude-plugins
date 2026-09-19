@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Minimal semantic stub for `codex execpolicy check`.
+set -u
+
+LOG_FILE="${STUB_CODEX_LOG:-${STUB_LOG:-/dev/null}.codex}"
+jq -cn '$ARGS.positional' --args -- "$@" >>"$LOG_FILE"
+
+if [ "${1:-}" != execpolicy ] || [ "${2:-}" != check ]; then
+  printf '%s\n' '{"error":"stub codex only supports execpolicy check"}' >&2
+  exit 2
+fi
+shift 2
+
+RULE_FILES=()
+RESOLVE_HOST=0
+COMMAND=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --rules)
+      [ "$#" -ge 2 ] || exit 2
+      RULE_FILES+=("$2")
+      shift 2
+      ;;
+    --resolve-host-executables)
+      RESOLVE_HOST=1
+      shift
+      ;;
+    --)
+      shift
+      COMMAND=(${@+"$@"})
+      break
+      ;;
+    *) shift ;;
+  esac
+done
+
+RULE_TEXT=""
+if [ "${STUB_CODEX_RULES_OVERRIDE_SET:-}" = 1 ]; then
+  RULE_TEXT="${STUB_CODEX_RULES_OVERRIDE:-}"
+else
+  for rules_file in ${RULE_FILES[@]+"${RULE_FILES[@]}"}; do
+    RULE_TEXT="$RULE_TEXT$(cat "$rules_file" 2>/dev/null || true)"
+  done
+fi
+
+PREFIX_FORBIDDEN=0
+while IFS= read -r rule_line; do
+  case "$rule_line" in
+    *'prefix_rule(pattern=["herdr"]'*'decision="forbidden"'*) PREFIX_FORBIDDEN=1 ;;
+  esac
+done <<<"$RULE_TEXT"
+
+PROGRAM=""
+[ ${#COMMAND[@]} -eq 0 ] || PROGRAM="${COMMAND[0]}"
+DECISION=""
+if [ "$PREFIX_FORBIDDEN" -eq 1 ] && [ "$PROGRAM" = herdr ]; then
+  DECISION=forbidden
+elif [ "$PREFIX_FORBIDDEN" -eq 1 ] && [ "$RESOLVE_HOST" -eq 1 ] && [ -n "$PROGRAM" ]; then
+  while IFS= read -r rule_line; do
+    case "$rule_line" in
+      *'host_executable(name="herdr"'*"paths=[\"$PROGRAM\"]"*) DECISION=forbidden ;;
+    esac
+  done <<<"$RULE_TEXT"
+fi
+
+if [ "$DECISION" = forbidden ]; then
+  jq -cn '{decision:"forbidden",matchedRules:[{decision:"forbidden"}]}'
+else
+  jq -cn '{decision:null,matchedRules:[]}'
+fi

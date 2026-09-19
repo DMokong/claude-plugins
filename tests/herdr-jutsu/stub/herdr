@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # tests/herdr-jutsu/stub/herdr — stub herdr CLI for jutsu-spawn.sh's test suite.
 #
-# NEVER a real herdr. Logs every invocation (one line of argv, space-joined) to
-# $STUB_LOG, returns canned JSON in the real shapes jutsu-spawn.sh consumes, and can be
+# NEVER a real herdr. Logs every invocation as both a compatibility text line and a JSON
+# argv array, returns canned JSON in the real shapes jutsu-spawn.sh consumes, and can be
 # told to fail on a specific subcommand via STUB_FAIL="<noun> <verb>" (e.g.
 # STUB_FAIL="pane rename"). `herdr worktree create` makes a REAL `git worktree` under the
 # given --cwd so "the worktree is still there" is a real, on-disk assertion.
@@ -26,6 +26,7 @@
 #   STUB_PANE_LABEL           "label" value `pane get` reports for any pane id (default
 #                             "idle-shell"), so tests can assert a pre-rename label is
 #                             correctly restored on cleanup.
+#   STUB_PANE_CWD             "cwd" value `pane get` reports (default /tmp).
 #   STUB_AGENT_LIST_EPERM     when "1", `agent list` prints the real sandboxed-Codex EPERM
 #                             text to stderr and exits 1 (nothing on stdout) — reproduces
 #                             T1/T4 from herdr-jutsu-live-test-1.md. To simulate the
@@ -35,9 +36,11 @@
 set -u
 
 STUB_LOG="${STUB_LOG:-/dev/null}"
+STUB_HERDR_JSON_LOG="${STUB_HERDR_JSON_LOG:-${STUB_LOG}.jsonl}"
 STUB_STATE_DIR="$(dirname -- "$STUB_LOG")"
 
 printf '%s\n' "$*" >>"$STUB_LOG"
+jq -cn '$ARGS.positional' --args -- "$@" >>"$STUB_HERDR_JSON_LOG"
 
 seq_next() {
   # $1 = counter name; returns the next integer, persisted alongside STUB_LOG so ids are
@@ -115,7 +118,18 @@ case "$NOUN" in
       start)
         shift
         NAME="${1:-}"
-        if [ -n "${STUB_AGENT_START_ERROR:-}" ]; then
+        if [ -n "${STUB_AGENT_START_HOLD_NAME:-}" ] \
+          && [ "$NAME" = "$STUB_AGENT_START_HOLD_NAME" ]; then
+          [ -z "${STUB_AGENT_START_READY:-}" ] || : >"$STUB_AGENT_START_READY"
+          hold_count=0
+          while [ ! -e "${STUB_AGENT_START_RELEASE:-/nonexistent}" ] && [ "$hold_count" -lt 200 ]; do
+            sleep 0.05
+            hold_count=$((hold_count + 1))
+          done
+        fi
+        if [ -n "${STUB_AGENT_START_ERROR:-}" ] \
+          && { [ -z "${STUB_AGENT_START_ERROR_NAME:-}" ] \
+            || [ "$NAME" = "$STUB_AGENT_START_ERROR_NAME" ]; }; then
           err_json "$STUB_AGENT_START_ERROR" "stub agent start failure: $STUB_AGENT_START_ERROR"
           exit 1
         fi
@@ -144,7 +158,8 @@ case "$NOUN" in
           *:p[0-9]*)
             WS="${PANE%%:*}"
             jq -cn --arg p "$PANE" --arg t "$WS:t1" --arg ws "$WS" --arg lbl "${STUB_PANE_LABEL:-idle-shell}" \
-              '{"result":{"pane":{"pane_id":$p,"tab_id":$t,"workspace_id":$ws,"label":$lbl}}}'
+              --arg cwd "${STUB_PANE_CWD:-/tmp}" \
+              '{"result":{"pane":{"pane_id":$p,"tab_id":$t,"workspace_id":$ws,"label":$lbl,"cwd":$cwd}}}'
             ;;
           *)
             err_json not_found "no such pane: $PANE" >&2

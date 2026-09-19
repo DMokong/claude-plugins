@@ -22,6 +22,7 @@ STUB_DIR="$HERE/stub"
 PASS=0
 FAIL=0
 CURRENT_TEST=""
+ORIGINAL_PATH="$PATH"
 
 ok() {
   PASS=$((PASS + 1))
@@ -72,9 +73,20 @@ setup_case() {
   STUB_LOG="$SCRATCH/stub.log"
   : >"$STUB_LOG"
   export STUB_LOG
+  STUB_HERDR_JSON_LOG="$SCRATCH/herdr.jsonl"
+  : >"$STUB_HERDR_JSON_LOG"
+  export STUB_HERDR_JSON_LOG
+  STUB_CODEX_LOG="$SCRATCH/codex.log"
+  : >"$STUB_CODEX_LOG"
+  export STUB_CODEX_LOG
 
   unset JUTSU_STATE_DIR XDG_STATE_HOME STUB_FAIL STUB_AGENT_START_ERROR STUB_VERSION \
-    STUB_PROCESS_INFO STUB_AGENTS STUB_PANE_LABEL STUB_AGENT_LIST_EPERM CODEX_SANDBOX 2>/dev/null
+    STUB_PROCESS_INFO STUB_AGENTS STUB_PANE_LABEL STUB_PANE_CWD STUB_AGENT_LIST_EPERM \
+    STUB_CODEX_DECISION STUB_CODEX_RULES_OVERRIDE_SET STUB_CODEX_RULES_OVERRIDE \
+    STUB_AGENT_START_HOLD_NAME STUB_AGENT_START_READY STUB_AGENT_START_RELEASE \
+    STUB_AGENT_START_ERROR_NAME \
+    STUB_INTERRUPT_MKDIR_TARGET STUB_INTERRUPT_MKDIR_READY JUTSU_POLICY_LOCK_TIMEOUT_MS \
+    CODEX_SANDBOX 2>/dev/null
 
   export HOME="$SCRATCH/home"
   mkdir -p "$HOME"
@@ -93,7 +105,7 @@ teardown_case() {
   rm -rf "$SCRATCH" 2>/dev/null || true
 }
 
-REPO_ROOT_ORIG_PATH="$PATH"
+REPO_ROOT_ORIG_PATH="$ORIGINAL_PATH"
 
 run_spawn() {
   : >"$OUT_FILE"
@@ -326,7 +338,7 @@ test_ac15_unknown_option_rejected() {
 }
 
 # =========================================================================================
-# AC-16 / M2 — dangerous agent flags refused unless explicitly overridden.
+# AC-16 / M2 — Claude dangerous flags need an override; isolated Codex uses an allowlist.
 # =========================================================================================
 
 test_ac16_claude_dangerous_flags_refused() {
@@ -370,7 +382,7 @@ test_ac16_codex_dangerous_flags_refused() {
   CURRENT_TEST="ac16_codex_dangerous_flags_refused"
   setup_case
   local flag_args
-  local i=0
+  local i=0 expected
   local FORMS=(
     "--dangerously-bypass-approvals-and-sandbox"
     "--yolo"
@@ -387,8 +399,9 @@ test_ac16_codex_dangerous_flags_refused() {
       teardown_case
       return
     fi
-    if [ "$(stderr_error_code)" != "dangerous_agent_flag" ]; then
-      fail_case "codex flag form '$flag_args': expected .error.code dangerous_agent_flag, got '$(stderr_error_code)': $(cat "$ERR_FILE")"
+    expected=isolation_unsupported_agent_arg
+    if [ "$(stderr_error_code)" != "$expected" ]; then
+      fail_case "codex flag form '$flag_args': expected .error.code $expected, got '$(stderr_error_code)': $(cat "$ERR_FILE")"
       teardown_case
       return
     fi
@@ -1111,6 +1124,1024 @@ test_item10_help_documents_new_contract() {
 }
 
 # =========================================================================================
+# Stage 0 / W1-W3 — outbound isolation is installed and reported by the launcher.
+# =========================================================================================
+
+test_stage0_codex_layer_written_with_resolved_herdr_path() {
+  CURRENT_TEST="stage0_codex_layer_written_with_resolved_herdr_path"
+  setup_case
+  run_spawn --name stage0-layer --kind codex --cwd "$REPO_DIR" -- -s read-only
+  [ "$CODE" -eq 0 ] || { fail_case "expected exit 0, got $CODE: $(cat "$ERR_FILE")"; teardown_case; return; }
+  local rules resolved
+  rules="$REPO_DIR/.codex/rules/herdr-jutsu-deny.rules"
+  resolved="$(command -v herdr)"
+  [ -f "$REPO_DIR/.codex/config.toml" ] || { fail_case "missing .codex/config.toml"; teardown_case; return; }
+  [ -f "$rules" ] || { fail_case "missing $rules"; teardown_case; return; }
+  grep -Fq "host_executable(name=\"herdr\", paths=[\"$resolved\"])" "$rules" \
+    || { fail_case "rules file does not contain resolved herdr path $resolved: $(cat "$rules")"; teardown_case; return; }
+  grep -Fq 'prefix_rule(pattern=["herdr"], decision="forbidden", justification="Crew members do not drive herdr; the parent pulls from this pane.")' "$rules" \
+    || { fail_case "rules file lacks the broad forbidden prefix rule: $(cat "$rules")"; teardown_case; return; }
+  [ -s "$STUB_CODEX_LOG" ] \
+    || { fail_case "the written rule was not statically checked with codex execpolicy"; teardown_case; return; }
+  [ "$(stdout_field '.outbound_isolation')" = "enforced_if_trusted" ] \
+    || { fail_case "spawn JSON outbound_isolation is not enforced_if_trusted: $(cat "$OUT_FILE")"; teardown_case; return; }
+  [ -n "$(stdout_field '.isolation_detail')" ] \
+    || { fail_case "spawn JSON lacks isolation_detail: $(cat "$OUT_FILE")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_differing_rules_refused_without_overwrite() {
+  CURRENT_TEST="stage0_differing_rules_refused_without_overwrite"
+  setup_case
+  mkdir -p "$REPO_DIR/.codex/rules"
+  printf '%s\n' 'user-owned different policy' >"$REPO_DIR/.codex/rules/herdr-jutsu-deny.rules"
+  local before after
+  before="$(cksum <"$REPO_DIR/.codex/rules/herdr-jutsu-deny.rules")"
+  run_spawn --name stage0-conflict --kind codex --cwd "$REPO_DIR"
+  [ "$CODE" -eq 5 ] || { fail_case "expected exit 5 for a differing existing rules file, got $CODE: $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ "$(stderr_error_code)" = "isolation_policy_conflict" ] \
+    || { fail_case "expected isolation_policy_conflict, got $(stderr_error_code): $(cat "$ERR_FILE")"; teardown_case; return; }
+  after="$(cksum <"$REPO_DIR/.codex/rules/herdr-jutsu-deny.rules")"
+  [ "$after" = "$before" ] || { fail_case "existing rules file was overwritten"; teardown_case; return; }
+  grep -q '^agent start' "$STUB_LOG" && { fail_case "agent start ran after policy conflict: $(cat "$STUB_LOG")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_info_exclude_normal_checkout_idempotent() {
+  CURRENT_TEST="stage0_info_exclude_normal_checkout_idempotent"
+  setup_case
+  run_spawn --name stage0-ex1 --kind codex --cwd "$REPO_DIR"
+  [ "$CODE" -eq 0 ] || { fail_case "first spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  run_spawn --name stage0-ex2 --kind codex --cwd "$REPO_DIR"
+  [ "$CODE" -eq 0 ] || { fail_case "second spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  local exclude
+  exclude="$REPO_DIR/$(git -C "$REPO_DIR" rev-parse --git-path info/exclude)"
+  [ "$(grep -Fxc '.codex/rules/herdr-jutsu-deny.rules' "$exclude")" -eq 1 ] \
+    || { fail_case "rules exclusion is not present exactly once: $(cat "$exclude")"; teardown_case; return; }
+  [ "$(grep -Fxc '.codex/config.toml' "$exclude")" -eq 1 ] \
+    || { fail_case "created config exclusion is not present exactly once: $(cat "$exclude")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_info_exclude_linked_worktree_idempotent() {
+  CURRENT_TEST="stage0_info_exclude_linked_worktree_idempotent"
+  setup_case
+  local linked exclude
+  linked="$SCRATCH/linked"
+  git -C "$REPO_DIR" worktree add -q -b linked-test "$linked" HEAD
+  run_spawn --name stage0-lw1 --kind codex --cwd "$linked"
+  [ "$CODE" -eq 0 ] || { fail_case "first linked-worktree spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  run_spawn --name stage0-lw2 --kind codex --cwd "$linked"
+  [ "$CODE" -eq 0 ] || { fail_case "second linked-worktree spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  exclude="$(git -C "$linked" rev-parse --git-path info/exclude)"
+  case "$exclude" in /*) ;; *) exclude="$linked/$exclude" ;; esac
+  [ "$(grep -Fxc '.codex/rules/herdr-jutsu-deny.rules' "$exclude")" -eq 1 ] \
+    || { fail_case "linked worktree's shared exclude lacks one rules entry: $(cat "$exclude")"; teardown_case; return; }
+  [ "$(grep -Fxc '.codex/config.toml' "$exclude")" -eq 1 ] \
+    || { fail_case "linked worktree's shared exclude lacks one config entry: $(cat "$exclude")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_codex_requires_never_and_injects_when_absent() {
+  CURRENT_TEST="stage0_codex_requires_never_and_injects_when_absent"
+  setup_case
+  run_spawn --name stage0-ap1 --kind codex --cwd "$REPO_DIR" -- -a on-request
+  [ "$CODE" -eq 5 ] || { fail_case "expected exit 5 for -a on-request, got $CODE: $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ "$(stderr_error_code)" = "isolation_unsupported_agent_arg" ] \
+    || { fail_case "expected isolation_unsupported_agent_arg, got $(stderr_error_code): $(cat "$ERR_FILE")"; teardown_case; return; }
+  : >"$STUB_LOG"
+  run_spawn --name stage0-ap2 --kind codex --cwd "$REPO_DIR" -- -s read-only
+  [ "$CODE" -eq 0 ] || { fail_case "spawn without -a failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  grep -qE '^agent start .* -- -s read-only -a never$' "$STUB_LOG" \
+    || { fail_case "agent start did not inject '-a never': $(cat "$STUB_LOG")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_no_isolation_writes_nothing_and_reports_none() {
+  CURRENT_TEST="stage0_no_isolation_writes_nothing_and_reports_none"
+  setup_case
+  run_spawn --name stage0-none --kind codex --cwd "$REPO_DIR" --no-isolation -- -a on-request
+  [ "$CODE" -eq 0 ] || { fail_case "--no-isolation spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ ! -e "$REPO_DIR/.codex/config.toml" ] || { fail_case "--no-isolation wrote config.toml"; teardown_case; return; }
+  [ ! -e "$REPO_DIR/.codex/rules/herdr-jutsu-deny.rules" ] || { fail_case "--no-isolation wrote a deny rule"; teardown_case; return; }
+  [ "$(stdout_field '.outbound_isolation')" = "none" ] \
+    || { fail_case "--no-isolation did not report outbound_isolation none: $(cat "$OUT_FILE")"; teardown_case; return; }
+  grep -qE '^agent start .* -- -a on-request$' "$STUB_LOG" \
+    || { fail_case "--no-isolation did not preserve caller approval args: $(cat "$STUB_LOG")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_claude_disallowed_tools_merged_once() {
+  CURRENT_TEST="stage0_claude_disallowed_tools_merged_once"
+  setup_case
+  run_spawn --name stage0-claude --kind claude --cwd "$REPO_DIR" -- \
+    --permission-mode acceptEdits --disallowedTools WebFetch CustomTool
+  [ "$CODE" -eq 0 ] || { fail_case "Claude spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  local start_line count
+  start_line="$(grep '^agent start ' "$STUB_LOG" | tail -n1)"
+  count="$(printf '%s\n' "$start_line" | grep -o -- '--disallowedTools' | wc -l | tr -d ' ')"
+  [ "$count" -eq 1 ] || { fail_case "expected one merged --disallowedTools flag, got $count: $start_line"; teardown_case; return; }
+  case "$start_line" in
+    *WebFetch*CustomTool*'Bash(*herdr*)'*ListAgents*) ;;
+    *) fail_case "merged deny list is incomplete or reordered unexpectedly: $start_line"; teardown_case; return ;;
+  esac
+  [ "$(stdout_field '.outbound_isolation')" = "partial" ] \
+    || { fail_case "Claude spawn did not report partial isolation: $(cat "$OUT_FILE")"; teardown_case; return; }
+  case "$(stdout_field '.isolation_detail')" in *acceptEdits*) ;;
+    *) fail_case "Claude isolation_detail does not state permission mode: $(cat "$OUT_FILE")"; teardown_case; return ;;
+  esac
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_claude_default_keeps_sendmessage() {
+  CURRENT_TEST="stage0_claude_default_keeps_sendmessage"
+  setup_case
+  run_spawn --name stage0-claude-msg --kind claude --cwd "$REPO_DIR"
+  [ "$CODE" -eq 0 ] || { fail_case "Claude spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  local start_line
+  start_line="$(grep '^agent start ' "$STUB_LOG" | tail -n1)"
+  case "$start_line" in
+    *'Bash(*herdr*)'*ListAgents*) ;;
+    *) fail_case "default Claude member must still deny herdr and ListAgents: $start_line"; teardown_case; return ;;
+  esac
+  case "$start_line" in
+    *SendMessage*) fail_case "default Claude member must keep SendMessage: $start_line"; teardown_case; return ;;
+  esac
+  [ "$(stdout_field '.outbound_isolation')" = "partial" ] \
+    || { fail_case "Claude spawn did not report partial isolation: $(cat "$OUT_FILE")"; teardown_case; return; }
+  case "$(stdout_field '.isolation_detail')" in *'SendMessage stays available'*) ;;
+    *) fail_case "isolation_detail must say SendMessage stays available: $(cat "$OUT_FILE")"; teardown_case; return ;;
+  esac
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_claude_strict_isolation_denies_sendmessage() {
+  CURRENT_TEST="stage0_claude_strict_isolation_denies_sendmessage"
+  setup_case
+  run_spawn --name stage0-claude-strict --kind claude --cwd "$REPO_DIR" --strict-isolation
+  [ "$CODE" -eq 0 ] || { fail_case "--strict-isolation Claude spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  local start_line
+  start_line="$(grep '^agent start ' "$STUB_LOG" | tail -n1)"
+  case "$start_line" in
+    *'Bash(*herdr*)'*ListAgents*SendMessage*) ;;
+    *) fail_case "--strict-isolation must deny herdr, ListAgents and SendMessage: $start_line"; teardown_case; return ;;
+  esac
+  case "$(stdout_field '.isolation_detail')" in *'SendMessage denied'*) ;;
+    *) fail_case "isolation_detail must say SendMessage denied: $(cat "$OUT_FILE")"; teardown_case; return ;;
+  esac
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_claude_caller_denied_sendmessage_is_reported() {
+  CURRENT_TEST="stage0_claude_caller_denied_sendmessage_is_reported"
+  setup_case
+  run_spawn --name stage0-claude-own --kind claude --cwd "$REPO_DIR" -- --disallowedTools SendMessage
+  [ "$CODE" -eq 0 ] || { fail_case "Claude spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  case "$(stdout_field '.isolation_detail')" in
+    *'SendMessage stays available'*) fail_case "detail claims SendMessage is available although the caller denied it: $(cat "$OUT_FILE")"; teardown_case; return ;;
+    *'SendMessage denied'*) ;;
+    *) fail_case "isolation_detail must say SendMessage denied: $(cat "$OUT_FILE")"; teardown_case; return ;;
+  esac
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_strict_isolation_conflicts_with_no_isolation() {
+  CURRENT_TEST="stage0_strict_isolation_conflicts_with_no_isolation"
+  setup_case
+  run_spawn --name stage0-conflict --kind claude --cwd "$REPO_DIR" --strict-isolation --no-isolation
+  [ "$CODE" -eq 2 ] || { fail_case "expected exit 2 for --strict-isolation with --no-isolation, got $CODE: $(cat "$OUT_FILE") $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ "$(stderr_error_code)" = "conflicting_options" ] || { fail_case "expected conflicting_options, got '$(stderr_error_code)': $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ ! -s "$STUB_LOG" ] || { fail_case "a refused option pair must make no herdr call, got: $(cat "$STUB_LOG")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_strict_isolation_refused_for_shell() {
+  CURRENT_TEST="stage0_strict_isolation_refused_for_shell"
+  setup_case
+  run_spawn --name stage0-shell-strict --kind shell --cwd "$REPO_DIR" --strict-isolation --cmd "true"
+  [ "$CODE" -eq 2 ] || { fail_case "expected exit 2 for --strict-isolation on a shell member, got $CODE: $(cat "$OUT_FILE") $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ "$(stderr_error_code)" = "conflicting_options" ] || { fail_case "expected conflicting_options, got '$(stderr_error_code)': $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ ! -s "$STUB_LOG" ] || { fail_case "a refused shell --strict-isolation must make no herdr call, got: $(cat "$STUB_LOG")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_strict_isolation_accepted_for_codex() {
+  CURRENT_TEST="stage0_strict_isolation_accepted_for_codex"
+  setup_case
+  run_spawn --name stage0-codex-strict --kind codex --cwd "$REPO_DIR" --strict-isolation
+  [ "$CODE" -eq 0 ] || { fail_case "--strict-isolation Codex spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ "$(stdout_field '.outbound_isolation')" = "enforced_if_trusted" ] \
+    || { fail_case "Codex --strict-isolation changed the isolation label: $(cat "$OUT_FILE")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_preflight_reports_isolation_without_writing_layer() {
+  CURRENT_TEST="stage0_preflight_reports_isolation_without_writing_layer"
+  setup_case
+  run_spawn --preflight --name stage0-pre --kind codex --cwd "$REPO_DIR"
+  [ "$CODE" -eq 0 ] || { fail_case "preflight failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ "$(stdout_field '.outbound_isolation')" = "enforced_if_trusted" ] \
+    || { fail_case "preflight outbound_isolation is wrong: $(cat "$OUT_FILE")"; teardown_case; return; }
+  [ -n "$(stdout_field '.isolation_detail')" ] \
+    || { fail_case "preflight lacks isolation_detail: $(cat "$OUT_FILE")"; teardown_case; return; }
+  [ ! -e "$REPO_DIR/.codex" ] || { fail_case "preflight wrote a .codex layer"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_failure_cleanup_removes_written_policy_layer() {
+  CURRENT_TEST="stage0_failure_cleanup_removes_written_policy_layer"
+  setup_case
+  export STUB_AGENT_START_ERROR="invalid_arguments"
+  run_spawn --name stage0-clean --kind codex --cwd "$REPO_DIR"
+  [ "$CODE" -eq 1 ] || { fail_case "expected start failure exit 1, got $CODE: $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ -s "$STUB_CODEX_LOG" ] \
+    || { fail_case "test setup never installed and checked a policy layer"; teardown_case; return; }
+  [ ! -e "$REPO_DIR/.codex/rules/herdr-jutsu-deny.rules" ] \
+    || { fail_case "cleanup left the rules file behind"; teardown_case; return; }
+  [ ! -e "$REPO_DIR/.codex/config.toml" ] \
+    || { fail_case "cleanup left the launcher-created config behind"; teardown_case; return; }
+  local exclude
+  exclude="$REPO_DIR/$(git -C "$REPO_DIR" rev-parse --git-path info/exclude)"
+  grep -Fq '.codex/rules/herdr-jutsu-deny.rules' "$exclude" \
+    && { fail_case "cleanup left the rules exclusion behind: $(cat "$exclude")"; teardown_case; return; }
+  grep -Fq '.codex/config.toml' "$exclude" \
+    && { fail_case "cleanup left the config exclusion behind: $(cat "$exclude")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_stage0_in_pane_uses_actual_pane_cwd() {
+  CURRENT_TEST="stage0_in_pane_uses_actual_pane_cwd"
+  setup_case
+  local pane_repo
+  pane_repo="$SCRATCH/pane-repo"
+  mkdir -p "$pane_repo"
+  git -C "$pane_repo" init -q
+  git -C "$pane_repo" -c user.email=test@example.com -c user.name=test commit -q --allow-empty -m init
+  export STUB_PANE_CWD="$pane_repo"
+  run_spawn --name stage0-pane --kind codex --cwd "$REPO_DIR" --in-pane w0:p9
+  [ "$CODE" -eq 0 ] || { fail_case "--in-pane spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ "$(stdout_field '.cwd')" = "$pane_repo" ] \
+    || { fail_case "spawn JSON recorded caller cwd instead of pane cwd: $(cat "$OUT_FILE")"; teardown_case; return; }
+  [ -f "$pane_repo/.codex/rules/herdr-jutsu-deny.rules" ] \
+    || { fail_case "policy layer was not written in the pane's cwd"; teardown_case; return; }
+  [ ! -e "$REPO_DIR/.codex/rules/herdr-jutsu-deny.rules" ] \
+    || { fail_case "policy layer was incorrectly written in the caller cwd"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+# =========================================================================================
+# Fix round 1 / F1-F7 — no false isolation labels; ownership-safe policy files.
+# =========================================================================================
+
+assert_refusal_result() { # assert_refusal_result <expected-code> <label>
+  local expected="$1" label="$2" got
+  [ "$CODE" -eq 5 ] || { fail_case "$label: expected exit 5, got $CODE: $(cat "$ERR_FILE")"; return 1; }
+  got="$(stderr_error_code)"
+  [ "$got" = "$expected" ] \
+    || { fail_case "$label: expected $expected, got $got: $(cat "$ERR_FILE")"; return 1; }
+  grep -q '^agent start' "$STUB_LOG" \
+    && { fail_case "$label: agent start ran despite refusal: $(cat "$STUB_LOG")"; return 1; }
+  return 0
+}
+
+test_f1_three_resolved_execpolicy_checks() {
+  CURRENT_TEST="f1_three_resolved_execpolicy_checks"
+  setup_case
+  run_spawn --name f1-checks --kind codex --cwd "$REPO_DIR" -- -s read-only
+  [ "$CODE" -eq 0 ] || { fail_case "spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  local resolved
+  resolved="$(command -v herdr)"
+  jq -se --arg h "$resolved" '
+    length == 3 and
+    all(.[]; index("--resolve-host-executables") != null) and
+    (map(. as $a | $a[(($a | index("--")) + 1):]) == [
+      ["herdr","agent","prompt","x","y"],
+      [$h,"agent","prompt","x","y"],
+      ["herdr","workspace","list"]
+    ])' "$STUB_CODEX_LOG" >/dev/null 2>&1 \
+    || { fail_case "expected three ordered resolved-host checks, got: $(cat "$STUB_CODEX_LOG")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_f1_null_execpolicy_answer_downgrades_with_probe_reason() {
+  CURRENT_TEST="f1_null_execpolicy_answer_downgrades_with_probe_reason"
+  setup_case
+  export STUB_CODEX_RULES_OVERRIDE_SET=1
+  export STUB_CODEX_RULES_OVERRIDE='host_executable(name="herdr", paths=["/not/the/stub"])'
+  run_spawn --name f1-null --kind codex --cwd "$REPO_DIR" -- -s read-only
+  [ "$CODE" -eq 0 ] || { fail_case "spawn should continue with isolation none, got $CODE: $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ "$(stdout_field '.outbound_isolation')" = none ] \
+    || { fail_case "null decision did not downgrade isolation: $(cat "$OUT_FILE")"; teardown_case; return; }
+  case "$(stdout_field '.isolation_detail')" in *"bare herdr invocation"*) ;;
+    *) fail_case "downgrade reason does not identify the failed bare-herdr probe: $(cat "$OUT_FILE")"; teardown_case; return ;;
+  esac
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_f2_all_sandbox_removal_spellings_refused() {
+  CURRENT_TEST="f2_all_sandbox_removal_spellings_refused"
+  local form label i=0
+  local FORMS=(
+    '-s danger-full-access'
+    '-sdanger-full-access'
+    '-s=danger-full-access'
+    '--sandbox danger-full-access'
+    '--sandbox=danger-full-access'
+    '--dangerously-bypass-approvals-and-sandbox'
+    '-c sandbox_mode="read-only"'
+    '-csandbox_mode="read-only"'
+    '-c=sandbox_mode="read-only"'
+    '--config sandbox_mode="read-only"'
+    '--config=sandbox_mode="read-only"'
+    '-c sandbox_permissions=["disk-full-read-access"]'
+  )
+  for form in "${FORMS[@]}"; do
+    i=$((i + 1)); setup_case; label="form $i: $form"
+    # Deliberate word splitting: each matrix entry is the argv spelling under test.
+    run_spawn --name "f2-$i" --kind codex --cwd "$REPO_DIR" \
+      --allow-dangerous-agent-flags -- $form
+    assert_refusal_result isolation_unsupported_agent_arg "$label" \
+      || { teardown_case; return; }
+    teardown_case
+  done
+  ok "$CURRENT_TEST"
+}
+
+test_f3_all_approval_flag_spellings_refused() {
+  CURRENT_TEST="f3_all_approval_flag_spellings_refused"
+  local form label i=0
+  local FORMS=(
+    '-a on-request'
+    '-aon-request'
+    '-a=on-request'
+    '--ask-for-approval on-request'
+    '--ask-for-approval=on-request'
+  )
+  for form in "${FORMS[@]}"; do
+    i=$((i + 1)); setup_case; label="form $i: $form"
+    run_spawn --name "f3a-$i" --kind codex --cwd "$REPO_DIR" -- $form
+    assert_refusal_result isolation_unsupported_agent_arg "$label" \
+      || { teardown_case; return; }
+    teardown_case
+  done
+  ok "$CURRENT_TEST"
+}
+
+test_f3_all_approval_config_spellings_refused() {
+  CURRENT_TEST="f3_all_approval_config_spellings_refused"
+  local form label i=0
+  local FORMS=(
+    '-c approval_policy="on-request"'
+    '-capproval_policy="on-request"'
+    '-c=approval_policy="on-request"'
+    '--config approval_policy="on-request"'
+    '--config=approval_policy="on-request"'
+    '-a never -c approval_policy="never"'
+  )
+  for form in "${FORMS[@]}"; do
+    i=$((i + 1)); setup_case; label="form $i: $form"
+    run_spawn --name "f3c-$i" --kind codex --cwd "$REPO_DIR" -- $form
+    assert_refusal_result isolation_unsupported_agent_arg "$label" \
+      || { teardown_case; return; }
+    teardown_case
+  done
+  ok "$CURRENT_TEST"
+}
+
+test_f3_profiles_require_explicit_safe_sandbox_and_are_reported() {
+  CURRENT_TEST="f3_profiles_require_explicit_safe_sandbox_and_are_reported"
+  local form label i=0
+  local FORMS=('-p review' '-preview' '--profile review' '--profile=review')
+  for form in "${FORMS[@]}"; do
+    i=$((i + 1)); setup_case; label="form $i: $form"
+    run_spawn --name "f3p-$i" --kind codex --cwd "$REPO_DIR" -- $form
+    assert_refusal_result isolation_unsupported_agent_arg "$label" \
+      || { teardown_case; return; }
+    teardown_case
+  done
+  setup_case
+  run_spawn --name f3p-safe --kind codex --cwd "$REPO_DIR" -- -p review -s read-only
+  [ "$CODE" -eq 0 ] || { fail_case "profile with explicit safe sandbox failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  case "$(stdout_field '.isolation_detail')" in *profile*review*) ;;
+    *) fail_case "isolation_detail does not report the active profile: $(cat "$OUT_FILE")"; teardown_case; return ;;
+  esac
+  teardown_case
+  ok "$CURRENT_TEST"
+}
+
+test_f3_approve_for_me_refused() {
+  CURRENT_TEST="f3_approve_for_me_refused"
+  setup_case
+  run_spawn --name f3-auto --kind codex --cwd "$REPO_DIR" -- --approve-for-me
+  assert_refusal_result isolation_unsupported_agent_arg '--approve-for-me' \
+    || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_f4_all_policy_path_symlinks_refused_before_creation() {
+  CURRENT_TEST="f4_all_policy_path_symlinks_refused_before_creation"
+  local variant stray i=0
+  for variant in codex_dir rules_dir rules_file dangling_config; do
+    i=$((i + 1)); setup_case
+    case "$variant" in
+      codex_dir)
+        mkdir -p "$SCRATCH/codex-target"
+        ln -s "$SCRATCH/codex-target" "$REPO_DIR/.codex"
+        ;;
+      rules_dir)
+        mkdir -p "$REPO_DIR/.codex" "$SCRATCH/rules-target"
+        ln -s "$SCRATCH/rules-target" "$REPO_DIR/.codex/rules"
+        ;;
+      rules_file)
+        mkdir -p "$REPO_DIR/.codex/rules"
+        printf '%s\n' different >"$SCRATCH/rules-target-file"
+        ln -s "$SCRATCH/rules-target-file" "$REPO_DIR/.codex/rules/herdr-jutsu-deny.rules"
+        ;;
+      dangling_config)
+        mkdir -p "$REPO_DIR/.codex"
+        ln -s "$SCRATCH/missing-config-target" "$REPO_DIR/.codex/config.toml"
+        ;;
+    esac
+    run_spawn --name "f4-$i" --kind codex --cwd "$REPO_DIR"
+    assert_refusal_result isolation_policy_conflict "$variant" \
+      || { teardown_case; return; }
+    stray="$(nonreadonly_stub_call)"
+    [ -z "$stray" ] || { fail_case "$variant: refusal occurred after creating a resource: $stray"; teardown_case; return; }
+    teardown_case
+  done
+  ok "$CURRENT_TEST"
+}
+
+test_f4_identical_preexisting_rules_survive_rollback() {
+  CURRENT_TEST="f4_identical_preexisting_rules_survive_rollback"
+  setup_case
+  local rules resolved before after checks
+  rules="$REPO_DIR/.codex/rules/herdr-jutsu-deny.rules"
+  resolved="$(command -v herdr)"
+  mkdir -p "$(dirname "$rules")"
+  printf '%s\n%s\n' \
+    "host_executable(name=\"herdr\", paths=[\"$resolved\"])" \
+    'prefix_rule(pattern=["herdr"], decision="forbidden", justification="Crew members do not drive herdr; the parent pulls from this pane.")' >"$rules"
+  before="$(cksum <"$rules")"
+  export STUB_AGENT_START_ERROR=invalid_arguments
+  run_spawn --name f4-identical --kind codex --cwd "$REPO_DIR"
+  [ "$CODE" -eq 1 ] || { fail_case "expected post-policy start failure, got $CODE: $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ -f "$rules" ] || { fail_case "pre-existing identical rules file was deleted"; teardown_case; return; }
+  after="$(cksum <"$rules")"
+  [ "$after" = "$before" ] || { fail_case "pre-existing identical rules file changed"; teardown_case; return; }
+  checks="$(wc -l <"$STUB_CODEX_LOG" | tr -d ' ')"
+  [ "$checks" -eq 3 ] || { fail_case "setup did not exercise all three policy checks; got $checks"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_f4_preexisting_empty_codex_dir_survives_rollback() {
+  CURRENT_TEST="f4_preexisting_empty_codex_dir_survives_rollback"
+  setup_case
+  mkdir -p "$REPO_DIR/.codex"
+  export STUB_AGENT_START_ERROR=invalid_arguments
+  run_spawn --name f4-empty --kind codex --cwd "$REPO_DIR"
+  [ "$CODE" -eq 1 ] || { fail_case "expected start failure, got $CODE: $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ -d "$REPO_DIR/.codex" ] || { fail_case "pre-existing empty .codex directory was deleted"; teardown_case; return; }
+  [ ! -e "$REPO_DIR/.codex/config.toml" ] || { fail_case "launcher-created config survived rollback"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_f5_exclude_without_trailing_newline_is_not_glued() {
+  CURRENT_TEST="f5_exclude_without_trailing_newline_is_not_glued"
+  setup_case
+  local exclude expected
+  exclude="$REPO_DIR/$(git -C "$REPO_DIR" rev-parse --git-path info/exclude)"
+  printf '%s' 'custom-pattern' >"$exclude"
+  run_spawn --name f5-newline --kind codex --cwd "$REPO_DIR"
+  [ "$CODE" -eq 0 ] || { fail_case "spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  expected="$(printf '%s\n%s\n%s' 'custom-pattern' '.codex/rules/herdr-jutsu-deny.rules' '.codex/config.toml')"
+  [ "$(cat "$exclude")" = "$expected" ] \
+    || { fail_case "exclude entries were glued to the prior pattern: $(cat "$exclude")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_f5_preexisting_exclude_line_is_not_owned_or_removed() {
+  CURRENT_TEST="f5_preexisting_exclude_line_is_not_owned_or_removed"
+  setup_case
+  local exclude count checks
+  exclude="$REPO_DIR/$(git -C "$REPO_DIR" rev-parse --git-path info/exclude)"
+  printf '%s\n' '.codex/rules/herdr-jutsu-deny.rules' >>"$exclude"
+  export STUB_AGENT_START_ERROR=invalid_arguments
+  run_spawn --name f5-owned --kind codex --cwd "$REPO_DIR"
+  [ "$CODE" -eq 1 ] || { fail_case "expected start failure, got $CODE: $(cat "$ERR_FILE")"; teardown_case; return; }
+  count="$(grep -Fxc '.codex/rules/herdr-jutsu-deny.rules' "$exclude")"
+  [ "$count" -eq 1 ] || { fail_case "pre-existing exclude line was removed or duplicated: $(cat "$exclude")"; teardown_case; return; }
+  checks="$(wc -l <"$STUB_CODEX_LOG" | tr -d ' ')"
+  [ "$checks" -eq 3 ] || { fail_case "setup did not exercise all three policy checks; got $checks"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_f6_tracked_conflict_in_base_refused_before_worktree_creation() {
+  CURRENT_TEST="f6_tracked_conflict_in_base_refused_before_worktree_creation"
+  setup_case
+  mkdir -p "$REPO_DIR/.codex/rules"
+  printf '%s\n' 'tracked different policy' >"$REPO_DIR/.codex/rules/herdr-jutsu-deny.rules"
+  git -C "$REPO_DIR" add .codex/rules/herdr-jutsu-deny.rules
+  git -C "$REPO_DIR" -c user.email=test@example.com -c user.name=test commit -q -m policy
+  run_spawn --name f6-base --kind codex --cwd "$REPO_DIR" --worktree f6-branch
+  [ "$CODE" -eq 5 ] || { fail_case "expected pre-creation exit 5, got $CODE: $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ "$(stderr_error_code)" = isolation_policy_conflict ] \
+    || { fail_case "expected isolation_policy_conflict: $(cat "$ERR_FILE")"; teardown_case; return; }
+  grep -q '^worktree create' "$STUB_LOG" \
+    && { fail_case "worktree was created before tracked-policy conflict was detected: $(cat "$STUB_LOG")"; teardown_case; return; }
+  grep -q '"recovery"' "$ERR_FILE" \
+    && { fail_case "pre-creation refusal emitted an orphan recovery record: $(cat "$ERR_FILE")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_f7_stub_absolute_match_also_requires_forbidden_prefix() {
+  CURRENT_TEST="f7_stub_absolute_match_also_requires_forbidden_prefix"
+  setup_case
+  local rules resolved answer
+  rules="$SCRATCH/host-only.rules"
+  resolved="$(command -v herdr)"
+  printf '%s\n' "host_executable(name=\"herdr\", paths=[\"$resolved\"])" >"$rules"
+  answer="$(codex execpolicy check --rules "$rules" --resolve-host-executables -- \
+    "$resolved" workspace list 2>/dev/null)"
+  printf '%s' "$answer" | jq -e '.decision == null and (.matchedRules | length == 0)' >/dev/null 2>&1 \
+    || { fail_case "host_executable without a forbidden prefix_rule must not match: $answer"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+# =========================================================================================
+# Fix round 2 — isolated Codex argv allowlist, lock/signal safety, honest exclusions/argv.
+# =========================================================================================
+
+assert_isolation_unsupported() { # assert_isolation_unsupported <label> <offending-token> <args...>
+  local label="$1" token="$2"
+  shift 2
+  setup_case
+  run_spawn --name r2-refuse --kind codex --cwd "$REPO_DIR" "$@"
+  [ "$CODE" -eq 5 ] \
+    || { fail_case "$label: expected exit 5, got $CODE: $(cat "$ERR_FILE")"; teardown_case; return 1; }
+  [ "$(stderr_error_code)" = isolation_unsupported_agent_arg ] \
+    || { fail_case "$label: wrong error code: $(cat "$ERR_FILE")"; teardown_case; return 1; }
+  grep -Fq -- "$token" "$ERR_FILE" \
+    || { fail_case "$label: error does not name offending token '$token': $(cat "$ERR_FILE")"; teardown_case; return 1; }
+  grep -Fq -- '--no-isolation' "$ERR_FILE" \
+    || { fail_case "$label: error does not name the only opt-out: $(cat "$ERR_FILE")"; teardown_case; return 1; }
+  teardown_case
+  return 0
+}
+
+assert_allowed_effective_present() {
+  [ "$CODE" -eq 0 ] || { fail_case "allowed form failed: $(cat "$ERR_FILE")"; return 1; }
+  jq -e '.effective_agent_args | type == "array"' "$OUT_FILE" >/dev/null 2>&1 \
+    || { fail_case "spawn line lacks effective_agent_args: $(cat "$OUT_FILE")"; return 1; }
+}
+
+test_r2_allowlist_sandbox_spellings() {
+  CURRENT_TEST="r2_allowlist_sandbox_spellings"
+  local i=0 form
+  local FORMS=('-s read-only' '-sworkspace-write' '-s=read-only' '--sandbox workspace-write' '--sandbox=read-only')
+  for form in "${FORMS[@]}"; do
+    i=$((i + 1)); setup_case
+    run_spawn --name "r2s-$i" --kind codex --cwd "$REPO_DIR" -- $form
+    assert_allowed_effective_present || { teardown_case; return; }
+    teardown_case
+  done
+  ok "$CURRENT_TEST"
+}
+
+test_r2_allowlist_approval_spellings() {
+  CURRENT_TEST="r2_allowlist_approval_spellings"
+  local i=0 form
+  local FORMS=('-a never' '-anever' '-a=never' '--ask-for-approval never' '--ask-for-approval=never')
+  for form in "${FORMS[@]}"; do
+    i=$((i + 1)); setup_case
+    run_spawn --name "r2a-$i" --kind codex --cwd "$REPO_DIR" -- $form
+    assert_allowed_effective_present || { teardown_case; return; }
+    teardown_case
+  done
+  ok "$CURRENT_TEST"
+}
+
+test_r2_allowlist_model_spellings() {
+  CURRENT_TEST="r2_allowlist_model_spellings"
+  local i=0 form
+  local FORMS=('-m alpha' '-malpha' '-m=alpha' '--model alpha' '--model=alpha')
+  for form in "${FORMS[@]}"; do
+    i=$((i + 1)); setup_case
+    run_spawn --name "r2m-$i" --kind codex --cwd "$REPO_DIR" -- $form
+    assert_allowed_effective_present || { teardown_case; return; }
+    teardown_case
+  done
+  ok "$CURRENT_TEST"
+}
+
+test_r2_allowlist_profile_spellings_with_sandbox() {
+  CURRENT_TEST="r2_allowlist_profile_spellings_with_sandbox"
+  local i=0 form
+  local FORMS=('-p review' '-preview' '-p=review' '--profile review' '--profile=review')
+  for form in "${FORMS[@]}"; do
+    i=$((i + 1)); setup_case
+    run_spawn --name "r2p-$i" --kind codex --cwd "$REPO_DIR" -- -s read-only $form
+    assert_allowed_effective_present || { teardown_case; return; }
+    case "$(stdout_field '.isolation_detail')" in *profile*review*) ;;
+      *) fail_case "profile form did not appear in isolation_detail: $(cat "$OUT_FILE")"; teardown_case; return ;;
+    esac
+    teardown_case
+  done
+  ok "$CURRENT_TEST"
+}
+
+test_r2_allowlist_add_dir_spellings() {
+  CURRENT_TEST="r2_allowlist_add_dir_spellings"
+  setup_case
+  run_spawn --name r2dir-one --kind codex --cwd "$REPO_DIR" -- --add-dir "/path/with spaces"
+  assert_allowed_effective_present || { teardown_case; return; }
+  teardown_case
+  setup_case
+  run_spawn --name r2dir-two --kind codex --cwd "$REPO_DIR" -- '--add-dir=/path/with spaces'
+  assert_allowed_effective_present || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_r2_allowlist_config_keys_and_spellings() {
+  CURRENT_TEST="r2_allowlist_config_keys_and_spellings"
+  local i=0 form
+  local FORMS=(
+    '-c model=o3'
+    '-cmodel_reasoning_effort=high'
+    '-c=model_reasoning_summary=concise'
+    '--config model_verbosity=high'
+    '--config="model"=o3'
+    "-c 'model'=o4"
+  )
+  for form in "${FORMS[@]}"; do
+    i=$((i + 1)); setup_case
+    run_spawn --name "r2c-$i" --kind codex --cwd "$REPO_DIR" -- $form
+    assert_allowed_effective_present || { teardown_case; return; }
+    teardown_case
+  done
+  setup_case
+  run_spawn --name r2c-space --kind codex --cwd "$REPO_DIR" -- --config ' model_reasoning_effort =high'
+  assert_allowed_effective_present || { teardown_case; return; }
+  teardown_case
+  setup_case
+  run_spawn --name r2c-map --kind codex --cwd "$REPO_DIR" -- -c 'model={name="o3"}'
+  [ "$CODE" -eq 5 ] && [ "$(stderr_error_code)" = isolation_unsupported_agent_arg ] \
+    || { fail_case "config map value was accepted: $(cat "$ERR_FILE")"; teardown_case; return; }
+  teardown_case
+  setup_case
+  run_spawn --name r2c-list --kind codex --cwd "$REPO_DIR" -- -c 'model=["o3"]'
+  [ "$CODE" -eq 5 ] && [ "$(stderr_error_code)" = isolation_unsupported_agent_arg ] \
+    || { fail_case "config list value was accepted: $(cat "$ERR_FILE")"; teardown_case; return; }
+  teardown_case
+  setup_case
+  run_spawn --name r2c-newline --kind codex --cwd "$REPO_DIR" -- -c $'model=o3\napproval_policy="on-request"'
+  [ "$CODE" -eq 5 ] && [ "$(stderr_error_code)" = isolation_unsupported_agent_arg ] \
+    || { fail_case "config newline value was accepted: $(cat "$ERR_FILE")"; teardown_case; return; }
+  teardown_case
+  ok "$CURRENT_TEST"
+}
+
+test_r2_allowlist_resume_last_tokens() {
+  CURRENT_TEST="r2_allowlist_resume_last_tokens"
+  setup_case
+  run_spawn --name r2resume-id --kind codex --cwd "$REPO_DIR" -- -s read-only resume session-name
+  assert_allowed_effective_present || { teardown_case; return; }
+  [ "$(jq -c '.effective_agent_args' "$OUT_FILE")" = '["-s","read-only","-a","never","resume","session-name"]' ] \
+    || { fail_case "resume id was not retained as the final tokens: $(cat "$OUT_FILE")"; teardown_case; return; }
+  teardown_case
+  setup_case
+  run_spawn --name r2resume-last --kind codex --cwd "$REPO_DIR" -- resume --last
+  assert_allowed_effective_present || { teardown_case; return; }
+  [ "$(jq -c '.effective_agent_args' "$OUT_FILE")" = '["-a","never","resume","--last"]' ] \
+    || { fail_case "resume --last was not retained as the final tokens: $(cat "$OUT_FILE")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_r2_refuses_quoted_unsafe_config_key() {
+  CURRENT_TEST="r2_refuses_quoted_unsafe_config_key"
+  assert_isolation_unsupported quoted-key sandbox_mode -- -c '"sandbox_mode"="danger-full-access"' \
+    && ok "$CURRENT_TEST"
+}
+
+test_r2_refuses_config_table_value() {
+  CURRENT_TEST="r2_refuses_config_table_value"
+  assert_isolation_unsupported table-value profiles.x -- -c 'profiles.x={approval_policy="on-request"}' \
+    && ok "$CURRENT_TEST"
+}
+
+test_r2_refuses_yolo_even_with_dangerous_override() {
+  CURRENT_TEST="r2_refuses_yolo_even_with_dangerous_override"
+  assert_isolation_unsupported yolo --yolo --allow-dangerous-agent-flags -- --yolo || return
+  setup_case
+  run_spawn --name r2-yolo-optout --kind codex --cwd "$REPO_DIR" --no-isolation -- --yolo
+  [ "$CODE" -eq 0 ] && [ "$(stdout_field '.outbound_isolation')" = none ] \
+    || { fail_case "--no-isolation did not act as the explicit opt-out: $(cat "$ERR_FILE")"; teardown_case; return; }
+  jq -e '.effective_agent_args == ["--yolo"]' "$OUT_FILE" >/dev/null 2>&1 \
+    || { fail_case "opt-out did not preserve --yolo in effective args: $(cat "$OUT_FILE")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_r2_refuses_search() {
+  CURRENT_TEST="r2_refuses_search"
+  assert_isolation_unsupported search --search -- --search && ok "$CURRENT_TEST"
+}
+
+test_r2_refuses_cd() {
+  CURRENT_TEST="r2_refuses_cd"
+  assert_isolation_unsupported cd -C -- -C /path/to/worktree && ok "$CURRENT_TEST"
+}
+
+test_r2_refuses_exec_subcommand() {
+  CURRENT_TEST="r2_refuses_exec_subcommand"
+  assert_isolation_unsupported exec exec -- exec command && ok "$CURRENT_TEST"
+}
+
+test_r2_refuses_bare_prompt() {
+  CURRENT_TEST="r2_refuses_bare_prompt"
+  assert_isolation_unsupported bare-prompt 'write code' -- 'write code' && ok "$CURRENT_TEST"
+}
+
+test_r2_refuses_profile_without_sandbox() {
+  CURRENT_TEST="r2_refuses_profile_without_sandbox"
+  assert_isolation_unsupported profile-without-sandbox -p -- -p review && ok "$CURRENT_TEST"
+}
+
+test_r2_refuses_full_auto() {
+  CURRENT_TEST="r2_refuses_full_auto"
+  assert_isolation_unsupported full-auto --full-auto -- --full-auto && ok "$CURRENT_TEST"
+}
+
+test_r2_effective_args_and_json_argv_boundaries() {
+  CURRENT_TEST="r2_effective_args_and_json_argv_boundaries"
+  setup_case
+  local model='model, "quoted" value' launched
+  run_spawn --name r2-effective --kind codex --cwd "$REPO_DIR" -- -m "$model" -s read-only
+  [ "$CODE" -eq 0 ] || { fail_case "spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  jq -e --arg m "$model" '.agent_args == ["-m",$m,"-s","read-only"]' "$OUT_FILE" >/dev/null 2>&1 \
+    || { fail_case "caller agent_args changed: $(cat "$OUT_FILE")"; teardown_case; return; }
+  jq -e --arg m "$model" '.effective_agent_args == ["-m",$m,"-s","read-only","-a","never"]' "$OUT_FILE" >/dev/null 2>&1 \
+    || { fail_case "effective args do not show injected approval: $(cat "$OUT_FILE")"; teardown_case; return; }
+  launched="$(jq -sc 'map(select(.[0:3] == ["agent","start","r2-effective"])) | last | .[((index("--")) + 1):]' "$STUB_HERDR_JSON_LOG" 2>/dev/null)"
+  printf '%s' "$launched" | jq -e --arg m "$model" '. == ["-m",$m,"-s","read-only","-a","never"]' >/dev/null 2>&1 \
+    || { fail_case "herdr JSON argv log lost boundaries: $launched"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_r2_claude_only_barrier_detail() {
+  CURRENT_TEST="r2_claude_only_barrier_detail"
+  setup_case
+  run_spawn --name r2-claude-auto --kind claude --cwd "$REPO_DIR" -- --permission-mode auto
+  [ "$CODE" -eq 0 ] || { fail_case "auto spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  case "$(stdout_field '.isolation_detail')" in *auto*'ONLY barrier'*) ;;
+    *) fail_case "auto detail does not identify the only barrier: $(cat "$OUT_FILE")"; teardown_case; return ;;
+  esac
+  teardown_case
+  setup_case
+  run_spawn --name r2-claude-bypass --kind claude --cwd "$REPO_DIR" \
+    --allow-dangerous-agent-flags -- --dangerously-skip-permissions
+  [ "$CODE" -eq 0 ] || { fail_case "authorized bypass spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  case "$(stdout_field '.isolation_detail')" in *'ONLY barrier'*) ;;
+    *) fail_case "bypass detail does not identify the only barrier: $(cat "$OUT_FILE")"; teardown_case; return ;;
+  esac
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+wait_for_file() { # wait_for_file <path> [attempts]
+  local path="$1" attempts="${2:-60}" i=0
+  while [ "$i" -lt "$attempts" ]; do
+    [ -e "$path" ] && return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
+test_r2_policy_lock_second_spawn_waits_then_succeeds() {
+  CURRENT_TEST="r2_policy_lock_second_spawn_waits_then_succeeds"
+  setup_case
+  local ready="$SCRATCH/first-ready" release="$SCRATCH/release" out1="$SCRATCH/out1" err1="$SCRATCH/err1"
+  local out2="$SCRATCH/out2" err2="$SCRATCH/err2" p1 p2 rc1 rc2
+  export STUB_AGENT_START_HOLD_NAME=r2lock-one STUB_AGENT_START_READY="$ready" STUB_AGENT_START_RELEASE="$release"
+  export STUB_AGENT_START_ERROR=invalid_arguments STUB_AGENT_START_ERROR_NAME=r2lock-one
+  "$SPAWN" --name r2lock-one --kind codex --cwd "$REPO_DIR" >"$out1" 2>"$err1" & p1=$!
+  if ! wait_for_file "$ready" 80; then
+    wait "$p1" 2>/dev/null || true
+    fail_case "first spawn never reached the held agent start"; teardown_case; return
+  fi
+  "$SPAWN" --name r2lock-two --kind codex --cwd "$REPO_DIR" >"$out2" 2>"$err2" & p2=$!
+  sleep 0.2
+  kill -0 "$p2" 2>/dev/null \
+    || { fail_case "second spawn did not wait for the policy lock: $(cat "$err2")"; : >"$release"; wait "$p1" 2>/dev/null || true; teardown_case; return; }
+  jq -se 'any(.[]; .[0:3] == ["agent","start","r2lock-two"]) | not' "$STUB_HERDR_JSON_LOG" >/dev/null 2>&1 \
+    || { fail_case "second agent started before the first released the policy lock"; : >"$release"; wait "$p1" 2>/dev/null || true; wait "$p2" 2>/dev/null || true; teardown_case; return; }
+  : >"$release"
+  wait "$p1"; rc1=$?
+  wait "$p2"; rc2=$?
+  [ "$rc1" -eq 1 ] && [ "$rc2" -eq 0 ] \
+    || { fail_case "waiter did not survive owner rollback: first=$rc1 second=$rc2; $(cat "$err1") $(cat "$err2")"; teardown_case; return; }
+  [ -f "$REPO_DIR/.codex/rules/herdr-jutsu-deny.rules" ] \
+    || { fail_case "waiting spawn did not reinstall the policy after owner rollback"; teardown_case; return; }
+  [ ! -e "$REPO_DIR/.herdr-jutsu-policy.lock" ] \
+    || { fail_case "policy lock survived successful starts"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_r2_policy_lock_timeout_is_clear() {
+  CURRENT_TEST="r2_policy_lock_timeout_is_clear"
+  setup_case
+  /bin/mkdir "$REPO_DIR/.herdr-jutsu-policy.lock"
+  export JUTSU_POLICY_LOCK_TIMEOUT_MS=150
+  run_spawn --name r2lock-timeout --kind codex --cwd "$REPO_DIR"
+  [ "$CODE" -ne 0 ] || { fail_case "spawn ignored a contended policy lock"; teardown_case; return; }
+  [ "$(stderr_error_code)" = isolation_policy_lock_timeout ] \
+    || { fail_case "lock timeout was not clear JSON: $(cat "$ERR_FILE")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_r2_interrupt_between_create_and_bookkeeping_rolls_back() {
+  CURRENT_TEST="r2_interrupt_between_create_and_bookkeeping_rolls_back"
+  setup_case
+  local ready="$SCRATCH/mkdir-ready" pid rc
+  export STUB_INTERRUPT_MKDIR_TARGET="$REPO_DIR/.codex" STUB_INTERRUPT_MKDIR_READY="$ready"
+  "$SPAWN" --name r2-signal --kind codex --cwd "$REPO_DIR" >"$OUT_FILE" 2>"$ERR_FILE" & pid=$!
+  if ! wait_for_file "$ready" 80; then
+    kill -TERM "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+    fail_case "spawn never entered the create/bookkeeping interrupt window"; teardown_case; return
+  fi
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid"; rc=$?
+  [ "$rc" -ne 0 ] || { fail_case "TERM unexpectedly produced success"; teardown_case; return; }
+  [ ! -e "$REPO_DIR/.codex" ] \
+    || { fail_case "signal left the about-to-be-owned .codex path behind"; teardown_case; return; }
+  [ ! -e "$REPO_DIR/.herdr-jutsu-policy.lock" ] \
+    || { fail_case "signal left the policy lock behind"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_r3_signal_after_successful_start_keeps_member_and_layer() {
+  CURRENT_TEST="r3_signal_after_successful_start_keeps_member_and_layer"
+  setup_case
+  local ready="$SCRATCH/date-ready" pid
+  export STUB_INTERRUPT_DATE_READY="$ready"
+  "$SPAWN" --name r3-late-signal --kind codex --cwd "$REPO_DIR" >"$OUT_FILE" 2>"$ERR_FILE" & pid=$!
+  if ! wait_for_file "$ready" 80; then
+    kill -TERM "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+    fail_case "spawn never reached the post-start bookkeeping window"; teardown_case; return
+  fi
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  unset STUB_INTERRUPT_DATE_READY
+  [ -f "$REPO_DIR/.codex/rules/herdr-jutsu-deny.rules" ] \
+    || { fail_case "a signal after a SUCCESSFUL agent start deleted the live member's deny rules"; teardown_case; return; }
+  if grep -Eq 'pane close' "$STUB_LOG"; then
+    fail_case "a signal after a SUCCESSFUL agent start closed the live member's pane: $(grep -E 'pane close' "$STUB_LOG" | head -n1)"
+    teardown_case; return
+  fi
+  [ ! -e "$REPO_DIR/.herdr-jutsu-policy.lock" ] \
+    || { fail_case "policy lock left behind after a late signal"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_r3_stale_policy_lock_from_dead_holder_is_broken() {
+  CURRENT_TEST="r3_stale_policy_lock_from_dead_holder_is_broken"
+  setup_case
+  local dead
+  ( : ) & dead=$!
+  wait "$dead" 2>/dev/null || true
+  /bin/mkdir "$REPO_DIR/.herdr-jutsu-policy.lock"
+  printf '%s\n' "$dead" >"$REPO_DIR/.herdr-jutsu-policy.lock/pid"
+  export JUTSU_POLICY_LOCK_TIMEOUT_MS=1500
+  run_spawn --name r3-stale-lock --kind codex --cwd "$REPO_DIR"
+  unset JUTSU_POLICY_LOCK_TIMEOUT_MS
+  [ "$CODE" -eq 0 ] \
+    || { fail_case "a lock whose recorded holder is dead was not broken: $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ ! -e "$REPO_DIR/.herdr-jutsu-policy.lock" ] \
+    || { fail_case "lock left behind after breaking a stale one"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_r3_live_policy_lock_is_respected_and_error_says_how_to_recover() {
+  CURRENT_TEST="r3_live_policy_lock_is_respected_and_error_says_how_to_recover"
+  setup_case
+  /bin/mkdir "$REPO_DIR/.herdr-jutsu-policy.lock"
+  printf '%s\n' "$$" >"$REPO_DIR/.herdr-jutsu-policy.lock/pid"
+  export JUTSU_POLICY_LOCK_TIMEOUT_MS=300
+  run_spawn --name r3-live-lock --kind codex --cwd "$REPO_DIR"
+  unset JUTSU_POLICY_LOCK_TIMEOUT_MS
+  [ "$CODE" -ne 0 ] && [ "$(stderr_error_code)" = isolation_policy_lock_timeout ] \
+    || { fail_case "a lock held by a LIVE process was not respected: rc=$CODE $(cat "$ERR_FILE")"; teardown_case; return; }
+  [ -d "$REPO_DIR/.herdr-jutsu-policy.lock" ] \
+    || { fail_case "a live holder's lock was removed"; teardown_case; return; }
+  grep -q 'rmdir\|remove' "$ERR_FILE" \
+    || { fail_case "timeout error does not say how to recover: $(cat "$ERR_FILE")"; teardown_case; return; }
+  /bin/rm -f "$REPO_DIR/.herdr-jutsu-policy.lock/pid"; /bin/rmdir "$REPO_DIR/.herdr-jutsu-policy.lock"
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_r2_symlinked_info_dir_is_untouched() {
+  CURRENT_TEST="r2_symlinked_info_dir_is_untouched"
+  setup_case
+  local target="$SCRATCH/info-target" before after
+  mv "$REPO_DIR/.git/info" "$target"
+  ln -s "$target" "$REPO_DIR/.git/info"
+  before="$(cksum <"$target/exclude")"
+  run_spawn --name r2-info-link --kind codex --cwd "$REPO_DIR"
+  [ "$CODE" -eq 0 ] || { fail_case "spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  after="$(cksum <"$target/exclude")"
+  [ "$before" = "$after" ] || { fail_case "symlinked info directory was written through"; teardown_case; return; }
+  [ -L "$REPO_DIR/.git/info" ] || { fail_case "info symlink was replaced"; teardown_case; return; }
+  case "$(stdout_field '.isolation_detail')" in *'NOT added'*info*) ;;
+    *) fail_case "detail does not disclose skipped exclude entry: $(cat "$OUT_FILE")"; teardown_case; return ;;
+  esac
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_r2_symlinked_exclude_is_untouched() {
+  CURRENT_TEST="r2_symlinked_exclude_is_untouched"
+  setup_case
+  local exclude="$REPO_DIR/.git/info/exclude" target="$SCRATCH/exclude-target" before after
+  mv "$exclude" "$target"
+  ln -s "$target" "$exclude"
+  before="$(cksum <"$target")"
+  run_spawn --name r2-exclude-link --kind codex --cwd "$REPO_DIR"
+  [ "$CODE" -eq 0 ] || { fail_case "spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  after="$(cksum <"$target")"
+  [ "$before" = "$after" ] || { fail_case "symlinked exclude was written through"; teardown_case; return; }
+  [ -L "$exclude" ] || { fail_case "exclude symlink was replaced"; teardown_case; return; }
+  case "$(stdout_field '.isolation_detail')" in *'NOT added'*exclude*) ;;
+    *) fail_case "detail does not disclose skipped exclude entry: $(cat "$OUT_FILE")"; teardown_case; return ;;
+  esac
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_r2_real_codex_execpolicy_probes() {
+  CURRENT_TEST="r2_real_codex_execpolicy_probes"
+  local real_codex
+  real_codex="$(PATH="$ORIGINAL_PATH" command -v codex 2>/dev/null || true)"
+  case "$real_codex" in ""|"$STUB_DIR"/*)
+    ok "$CURRENT_TEST # SKIP real codex is not available on the original PATH"
+    return ;;
+  esac
+  setup_case
+  run_spawn --name r2-real-policy --kind codex --cwd "$REPO_DIR"
+  [ "$CODE" -eq 0 ] || { fail_case "generator spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  local rules="$REPO_DIR/.codex/rules/herdr-jutsu-deny.rules" resolved output label
+  resolved="$(command -v herdr)"
+  for label in bare absolute group; do
+    case "$label" in
+      bare) output="$("$real_codex" execpolicy check --rules "$rules" --resolve-host-executables -- herdr agent prompt x y 2>&1)" ;;
+      absolute) output="$("$real_codex" execpolicy check --rules "$rules" --resolve-host-executables -- "$resolved" agent prompt x y 2>&1)" ;;
+      group) output="$("$real_codex" execpolicy check --rules "$rules" --resolve-host-executables -- herdr workspace list 2>&1)" ;;
+    esac
+    printf '%s\n' "$output" | jq -R 'fromjson?' 2>/dev/null \
+      | jq -se 'any(.[]; .decision == "forbidden")' >/dev/null 2>&1 \
+      || { fail_case "real codex $label probe was not forbidden: $output"; teardown_case; return; }
+  done
+  [ -s "$STUB_HERDR_JSON_LOG" ] \
+    || { fail_case "herdr stub did not produce JSON argv records"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+# =========================================================================================
 # AC-12 — bash -n under bash 3.2, self-contained sanity check (belt-and-braces; the done-
 # check already runs this from the outer harness).
 # =========================================================================================
@@ -1174,6 +2205,63 @@ test_l1_beside_resolves_registered_shell_name
 test_l1_beside_resolves_literal_pane_id
 test_l1_beside_unknown_anchor_refused
 test_item10_help_documents_new_contract
+test_stage0_codex_layer_written_with_resolved_herdr_path
+test_stage0_differing_rules_refused_without_overwrite
+test_stage0_info_exclude_normal_checkout_idempotent
+test_stage0_info_exclude_linked_worktree_idempotent
+test_stage0_codex_requires_never_and_injects_when_absent
+test_stage0_no_isolation_writes_nothing_and_reports_none
+test_stage0_claude_disallowed_tools_merged_once
+test_stage0_claude_default_keeps_sendmessage
+test_stage0_claude_strict_isolation_denies_sendmessage
+test_stage0_claude_caller_denied_sendmessage_is_reported
+test_stage0_strict_isolation_conflicts_with_no_isolation
+test_stage0_strict_isolation_refused_for_shell
+test_stage0_strict_isolation_accepted_for_codex
+test_stage0_preflight_reports_isolation_without_writing_layer
+test_stage0_failure_cleanup_removes_written_policy_layer
+test_stage0_in_pane_uses_actual_pane_cwd
+test_f1_three_resolved_execpolicy_checks
+test_f1_null_execpolicy_answer_downgrades_with_probe_reason
+test_f2_all_sandbox_removal_spellings_refused
+test_f3_all_approval_flag_spellings_refused
+test_f3_all_approval_config_spellings_refused
+test_f3_profiles_require_explicit_safe_sandbox_and_are_reported
+test_f3_approve_for_me_refused
+test_f4_all_policy_path_symlinks_refused_before_creation
+test_f4_identical_preexisting_rules_survive_rollback
+test_f4_preexisting_empty_codex_dir_survives_rollback
+test_f5_exclude_without_trailing_newline_is_not_glued
+test_f5_preexisting_exclude_line_is_not_owned_or_removed
+test_f6_tracked_conflict_in_base_refused_before_worktree_creation
+test_f7_stub_absolute_match_also_requires_forbidden_prefix
+test_r2_allowlist_sandbox_spellings
+test_r2_allowlist_approval_spellings
+test_r2_allowlist_model_spellings
+test_r2_allowlist_profile_spellings_with_sandbox
+test_r2_allowlist_add_dir_spellings
+test_r2_allowlist_config_keys_and_spellings
+test_r2_allowlist_resume_last_tokens
+test_r2_refuses_quoted_unsafe_config_key
+test_r2_refuses_config_table_value
+test_r2_refuses_yolo_even_with_dangerous_override
+test_r2_refuses_search
+test_r2_refuses_cd
+test_r2_refuses_exec_subcommand
+test_r2_refuses_bare_prompt
+test_r2_refuses_profile_without_sandbox
+test_r2_refuses_full_auto
+test_r2_effective_args_and_json_argv_boundaries
+test_r2_claude_only_barrier_detail
+test_r2_policy_lock_second_spawn_waits_then_succeeds
+test_r2_policy_lock_timeout_is_clear
+test_r2_interrupt_between_create_and_bookkeeping_rolls_back
+test_r2_symlinked_info_dir_is_untouched
+test_r2_symlinked_exclude_is_untouched
+test_r2_real_codex_execpolicy_probes
+test_r3_signal_after_successful_start_keeps_member_and_layer
+test_r3_stale_policy_lock_from_dead_holder_is_broken
+test_r3_live_policy_lock_is_respected_and_error_says_how_to_recover
 
 TOTAL=$((PASS + FAIL))
 if [ "$FAIL" -eq 0 ]; then

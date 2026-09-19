@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Pass-through date with one deterministic interrupt window: the launcher calls `date` while
+# building its result line, i.e. AFTER `herdr agent start` has already succeeded.
+set -u
+if [ -n "${STUB_INTERRUPT_DATE_READY:-}" ] && [ ! -e "$STUB_INTERRUPT_DATE_READY" ]; then
+  : >"$STUB_INTERRUPT_DATE_READY"
+  sleep 5
+fi
+exec /bin/date "$@"
