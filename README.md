@@ -1,11 +1,17 @@
 # dmokong-plugins
 
-A Claude Code plugin marketplace. Four plugins, two of which live in this repo
-and two of which are vendored from their own repos by URL.
+A plugin marketplace for **Claude Code and Codex**. Five plugins, three of which live in this
+repo and two of which are vendored from their own repos by URL.
 
 ```bash
 claude plugin marketplace add DMokong/claude-plugins
 claude plugin install fable-mode@dmokong-plugins
+```
+
+```bash
+codex plugin marketplace add DMokong/claude-plugins
+codex plugin add fable-mode@dmokong-plugins
+# then start a new Codex thread — skills are cached per session
 ```
 
 ## Plugins
@@ -21,13 +27,37 @@ claude plugin install fable-mode@dmokong-plugins
 `fable-mode` and `fable-conductor` stack: fable-mode disciplines how a *single*
 session works, fable-conductor orchestrates *many* across the model ladder.
 
+## Surface support
+
+| Plugin | Claude Code | Codex |
+|---|---|---|
+| `fable-mode` | full | full |
+| `fable-conductor` | full | reference only — orchestration engine is Claude Code only |
+| `herdr-jutsu` | full — a Claude Code parent additionally gets ListAgents/SendMessage for Claude crew members (`references/parent-claude.md`), and needs nothing extra to spawn, brief and pull Codex members | **one live pass**: a Codex parent has raised, briefed and pulled from a Claude child end to end, by placing it with literal `herdr pane`/`herdr agent` calls. It needs user-approved Codex rules letting those commands run outside the sandbox, and gets no sender authentication, queued delivery or idle notification over the Herdr bus. Driving `jutsu-spawn.sh` from Codex, non-pane placement, and machines with no herdr rules are unexercised — see `references/parent-codex.md` |
+
+`speculator` and `lego-plan-builder` are vendored from their own repos and are not covered by this
+table — see their own repos for surface support.
+
+## Runtime prerequisites
+
+| Plugin | Requires |
+|---|---|
+| `fable-mode` | none — pure working-discipline instructions, no tools, no network, no credentials |
+| `fable-conductor` | Claude Code; full orchestration (Phases 4-5) needs the `Workflow` tool, and degrades to Agent-tool parallel batches without it; optional: `superpowers`, `speculator`, `beads` (probed, never assumed) |
+| `herdr-jutsu` | running inside a Herdr pane (`HERDR_ENV=1`), Herdr >= 0.8.2, `jq`, `git`, bash 3.2+; from a Codex session also your own Codex rules allowing the `herdr` commands (and the spawn script's path) to run outside the sandbox — the skill says what it needs and never edits a rules file |
+
 ## Layout
 
 ```
-.claude-plugin/marketplace.json   registry — every plugin's version lives here too
+.claude-plugin/marketplace.json   Claude catalog — every plugin's version lives here too
+.agents/plugins/marketplace.json  Codex catalog — entries carry no version (see RELEASE.md)
 plugins/<name>/                   in-repo plugins; the cache builder ships
                                   EVERYTHING under here, so keep it clean
+plugins/<name>/.codex-plugin/     Codex manifest for that plugin (name, version, interface)
 .eval-workspaces/                 skill-creator eval fixtures (gitignored)
+scripts/                          check-manifests.sh, codex-install-check.sh, codex-disposable.sh
+tests/                            check-manifests mutation tests, and the herdr-jutsu
+                                  behavioral suite (tests/herdr-jutsu/run.sh, stub herdr)
 RELEASE.md                        how to ship a release — read before editing
 ```
 
@@ -40,7 +70,7 @@ the traps.
 
 Tag conventions differ by repo shape, deliberately:
 
-- **In this repo** — `<name>--v<version>` (e.g. `fable-mode--v1.1.0`). The two
+- **In this repo** — `<name>--v<version>` (e.g. `fable-mode--v1.1.0`). The three
   plugins release independently, so tags must name which one shipped.
 - **Standalone plugin repos** — plain `vX.Y.Z` (speculator uses this across 15
   releases). One plugin per repo means there is nothing to disambiguate, and
@@ -51,15 +81,16 @@ worth reconstructing.
 
 ## Keeping this file honest
 
-The plugin table above duplicates state that lives in
-`.claude-plugin/marketplace.json`, which means it can drift and silently become
-a lie. **Updating it is step 1 of the release checklist in `RELEASE.md`, not an
-afterthought.** When you bump a version, change it here in the same commit.
+The plugin table above duplicates state that lives in `.claude-plugin/marketplace.json`,
+`.agents/plugins/marketplace.json`, and each in-repo plugin's two manifests, which means it can
+drift and silently become a lie. **Updating it is step 1 of the release checklist in
+`RELEASE.md`, not an afterthought.** When you bump a version, change it here in the same commit.
 
-Check for drift at any time:
+Check for drift at any time — this checks all four version-carrying surfaces (Claude manifest,
+Claude catalog, Codex manifest, this table), not just the one `jq` used to check:
 
 ```bash
-jq -r '.plugins[] | "\(.name) \(.version)"' .claude-plugin/marketplace.json
+scripts/check-manifests.sh
 ```
 
 Anything in this README that cannot be checked by a command is a claim someone
