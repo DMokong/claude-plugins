@@ -106,7 +106,10 @@ $J --name inbox-review-cdx --kind codex --where tab --cwd <.worktree from line 1
    `--allow-dangerous-agent-flags` is passed before `--` (the user's decision, never yours).
    `--in-pane` is refused unless the target pane is demonstrably an idle shell. Never
    launch a child broader than your own.
-   Isolation is on by default. Codex gets a git-excluded project policy and `-a never`;
+   Isolation is on by default. Codex gets a git-excluded project policy and `-a never`, and
+   loses every tool that sits outside the sandbox — connected apps (mail, chat, drive, site
+   deploys), browser and computer use, plugins, image generation, web search and the MCP servers
+   in the user's `config.toml` (`isolation_detail` says how many);
    Claude gets one merged `--disallowedTools` deny for `Bash(*herdr*)` and `ListAgents`: it
    cannot drive herdr or discover sessions, but it keeps `SendMessage` for the sessions its
    brief names. Pass `--strict-isolation` to deny `SendMessage` too — do that for any member

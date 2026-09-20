@@ -341,6 +341,7 @@ scan_dangerous_flags
 OUTBOUND_ISOLATION="none"
 ISOLATION_DETAIL=""
 CODEX_PROFILE_NOTE=""
+CODEX_SURFACE_NOTE=""
 CODEX_EXCLUDE_NOTE=""
 LAUNCH_ARGS=(${AGENT_ARGS[@]+"${AGENT_ARGS[@]}"})
 
@@ -354,6 +355,43 @@ array_has() { # array_has <needle> <values...>
 unsupported_agent_arg() { # unsupported_agent_arg <token>
   fail isolation_unsupported_agent_arg \
     "Codex outbound isolation does not support agent argument token '$1'; --no-isolation is the only way to pass it, and that is the user's decision" 5
+}
+
+# A Codex session carries more than a shell: the account's connected apps (mail, chat, drive,
+# site deploys), browser/computer use, plugin installs, web search and every MCP server in the
+# user's config.toml are tools that sit OUTSIDE the filesystem sandbox and the herdr deny rule.
+# An isolated member gets none of them. The user config itself must stay loaded: it holds the
+# trust record that makes the project deny rules apply (--ignore-user-config drops those rules
+# while the user's own allow rules keep loading).
+CODEX_SURFACE_FEATURES="apps browser_use browser_use_external browser_use_full_cdp_access computer_use image_generation multi_agent plugins remote_plugin plugin_sharing skill_search skill_mcp_dependency_install tool_suggest hooks in_app_browser in_app_local_automation"
+CODEX_SURFACE_ARGS=()
+CODEX_SURFACE_MCP_COUNT=0
+
+codex_surface_args() { # fills CODEX_SURFACE_ARGS; refuses a config server it cannot name safely
+  local feature config line name
+  CODEX_SURFACE_ARGS=()
+  CODEX_SURFACE_MCP_COUNT=0
+  for feature in $CODEX_SURFACE_FEATURES; do CODEX_SURFACE_ARGS+=(--disable "$feature"); done
+  config="${CODEX_HOME:-$HOME/.codex}/config.toml"
+  if [ -f "$config" ]; then
+    # Only servers DEFINED in config.toml can be overridden: naming any other server (one a
+    # plugin provides, say) creates an invalid entry and Codex refuses to load its config.
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in '[mcp_servers.'*']') ;; *) continue ;; esac
+      name="${line#\[mcp_servers.}"; name="${name%\]}"
+      case "$name" in
+        *.*) case "${name%%.*}" in ''|*[!A-Za-z0-9_-]*) ;; *) continue ;; esac ;;   # [mcp_servers.x.env]
+      esac
+      case "$name" in
+        ''|*[!A-Za-z0-9_-]*)
+          fail isolation_unsupported_mcp_server \
+            "Codex outbound isolation cannot disable the MCP server declared as $line in $config (only names of letters, digits, '_' and '-' can be overridden); rename or remove it, or use --no-isolation, which is the user's decision" 5 ;;
+      esac
+      CODEX_SURFACE_ARGS+=(-c "mcp_servers.$name.enabled=false")
+      CODEX_SURFACE_MCP_COUNT=$((CODEX_SURFACE_MCP_COUNT + 1))
+    done <"$config"
+  fi
+  CODEX_SURFACE_ARGS+=(-c 'web_search="disabled"')
 }
 
 codex_config_allowed() { # codex_config_allowed <key=value>
@@ -498,10 +536,13 @@ prepare_isolation() {
         unsupported_agent_arg "$profile_token"
       fi
       if [ "$approval_seen" -eq 0 ]; then codex_flags+=(-a never); fi
+      codex_surface_args
       LAUNCH_ARGS=(${codex_flags[@]+"${codex_flags[@]}"})
+      LAUNCH_ARGS+=("${CODEX_SURFACE_ARGS[@]}")
       LAUNCH_ARGS+=(${resume_tail[@]+"${resume_tail[@]}"})
       OUTBOUND_ISOLATION="enforced_if_trusted"
-      ISOLATION_DETAIL="Codex project deny policy and -a never; effective only when Codex trusts the target repository"
+      CODEX_SURFACE_NOTE="; connected apps, browser and computer use, plugins and image generation are disabled, as are the $CODEX_SURFACE_MCP_COUNT MCP servers in the user config and web search"
+      ISOLATION_DETAIL="Codex project deny policy and -a never; effective only when Codex trusts the target repository$CODEX_SURFACE_NOTE"
       if [ "$profile_seen" -eq 1 ]; then
         CODEX_PROFILE_NOTE="; profile '$profile_value' is in play with explicit sandbox '$sandbox_value'"
         ISOLATION_DETAIL="$ISOLATION_DETAIL$CODEX_PROFILE_NOTE"
@@ -752,7 +793,7 @@ PARENT="$(printf '%s' "$AGENTS_JSON" \
 if [ "$PREFLIGHT_ONLY" -eq 1 ]; then
   PREFLIGHT_ISOLATION_DETAIL="$ISOLATION_DETAIL"
   if [ "$KIND" = codex ] && [ "$NO_ISOLATION" -eq 0 ]; then
-    PREFLIGHT_ISOLATION_DETAIL="planned: spawn will install the Codex project deny policy and use -a never; effective only when Codex trusts the target repository$CODEX_PROFILE_NOTE"
+    PREFLIGHT_ISOLATION_DETAIL="planned: spawn will install the Codex project deny policy and use -a never; effective only when Codex trusts the target repository$CODEX_PROFILE_NOTE$CODEX_SURFACE_NOTE"
   elif [ "$KIND" = claude ] && [ "$NO_ISOLATION" -eq 0 ]; then
     PREFLIGHT_ISOLATION_DETAIL="planned: $ISOLATION_DETAIL"
   fi
@@ -1298,9 +1339,9 @@ install_codex_policy() {
 
   OUTBOUND_ISOLATION="enforced_if_trusted"
   if command -v codex >/dev/null 2>&1; then
-    ISOLATION_DETAIL="Codex project deny policy passed three resolved-host execpolicy self-checks and -a never is active; the policy loads only when Codex trusts the target repository$CODEX_PROFILE_NOTE$CODEX_EXCLUDE_NOTE"
+    ISOLATION_DETAIL="Codex project deny policy passed three resolved-host execpolicy self-checks and -a never is active; the policy loads only when Codex trusts the target repository$CODEX_PROFILE_NOTE$CODEX_EXCLUDE_NOTE$CODEX_SURFACE_NOTE"
   else
-    ISOLATION_DETAIL="Codex project deny policy and -a never are active; codex was not on PATH for a static check, and the policy loads only when Codex trusts the target repository$CODEX_PROFILE_NOTE$CODEX_EXCLUDE_NOTE"
+    ISOLATION_DETAIL="Codex project deny policy and -a never are active; codex was not on PATH for a static check, and the policy loads only when Codex trusts the target repository$CODEX_PROFILE_NOTE$CODEX_EXCLUDE_NOTE$CODEX_SURFACE_NOTE"
   fi
 }
 

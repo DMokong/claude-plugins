@@ -141,7 +141,13 @@ Outbound isolation is on by default. A Codex member gets `-a never` plus a child
 spawn reports `enforced_if_trusted` because Codex ignores project rules for an untrusted
 repo. Policy installation is serialized per cwd through agent start. A symlinked git
 `info/` or `info/exclude` is never followed or replaced; isolation remains active and
-`isolation_detail` discloses that the exclude entry was not added. A Claude member gets a
+`isolation_detail` discloses that the exclude entry was not added. An isolated Codex member is also
+launched without the tools that live outside the sandbox: `--disable` for connected apps, browser and
+computer use, plugins, image generation and related features, `-c mcp_servers.<name>.enabled=false` for
+each server declared in the user's `config.toml`, and web search off. The user config itself stays
+loaded, because it holds the trust record that makes the project rules apply — `--ignore-user-config`
+would drop the deny rules while the user's own allow rules kept loading. A config server whose name
+the launcher cannot override safely refuses the spawn (`isolation_unsupported_mcp_server`). A Claude member gets a
 merged `--disallowedTools` deny for `Bash(*herdr*)` and `ListAgents`, reported honestly as
 `partial`: it cannot drive herdr or discover sessions, but keeps `SendMessage` for the
 sessions its brief names. `--strict-isolation` denies `SendMessage` as well, for a member
@@ -271,6 +277,11 @@ a visible-pane check before every key send. Verified live after release: a Codex
 is refused herdr by rule and by sandbox and cannot delete its deny rules; Codex accepts the
 attached and `=` flag spellings the allowlist accepts; text left unsent in a Claude parent's
 input box survives a background-wait wake.
+
+0.4.0 closes a gap found by a live probe: an "isolated" Codex member still carried the account's
+connected apps, the user's MCP servers and web tools — all outside the sandbox and the herdr deny
+rule. Isolated members are now launched without them; `--no-isolation` is unchanged. Codex's own
+sub-agent tools and built-in skills remain, and run inside the same sandbox and rules.
 
 0.3.1 stops calling a Claude member's permission mode "effective": the launcher sees launch
 args, not the member's settings, so it names the mode only when an arg set it and otherwise
