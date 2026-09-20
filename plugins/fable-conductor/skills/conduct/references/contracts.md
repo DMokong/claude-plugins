@@ -64,6 +64,7 @@ Flags — set in frontmatter or inline, exactly these:
 - `parallel_safe: true | false` — `true` only when this task's file scope is disjoint from every wave sibling's, so it may fan out concurrently.
 - `testable: true | false` — `true` triggers the test-author dispatch for this task inside the wave. (test-breaker runs only at stream level via `test-adversary.js`, gated on a test-suite AC — never per task.)
 - `tier: standard | judgment` — `standard` binds implementer + reviewer to **sonnet**; `judgment` binds them to **opus** for design-heavy or normative artifacts. The verifier is ALWAYS **haiku**, regardless of tier. Full model ladder: `fable → opus → sonnet → haiku`.
+- `implementer: claude | codex` — OPTIONAL, and the only optional flag. Absent means `claude`; any other value is an error the conductor reports at plan time, never at dispatch. `codex` is set only when the user asked for a Codex implementer for this stream, and hands ONLY the implementer step of that task's rounds to a Codex worker — the verifier and adversarial reviewer are unchanged. Exactly one such line, at column 0. There is no contract version and no new ledger column: the **planned and actual engine are disclosed in the ledger's `Notes` column** (and in the Gate-5 report). Procedure: [`runtime-codex-implementer.md`](runtime-codex-implementer.md).
 
 ## report.md format
 

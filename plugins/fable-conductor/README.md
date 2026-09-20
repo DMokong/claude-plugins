@@ -67,6 +67,22 @@ The conductor role transfers to weaker models; Fable's judgment does not:
 | `test-breaker` | Writes N deliberately-wrong implementations that try to sneak past the suite; survivors expose sensitivity gaps | sonnet |
 | `spec-auditor` | **Blinded** cold-read of the whole diff against the spec's ACs — no task reports, no implementer reasoning, ever | opus |
 
+## Codex implementer (optional, opt-in)
+
+You can hand a single task's **implementer round** to a Codex worker and keep Claude's review. The Codex worker runs inside an isolation layer the plugin installs and then *proves* (apps, browser, MCP servers, web search and sub-agent spawning off; `herdr` forbidden; network sandboxed), writes only inside the task brief's declared file scope, and answers through a fixed JSON output contract. Its work then goes through the **unchanged** Claude verifier and the **unchanged** Claude adversarial reviewer, with the same bounded fix loops and the same escalation triggers as any other task. The adapter proves what changed by comparing git trees before and after the run, so an out-of-scope edit is caught mechanically rather than trusted.
+
+Opting in is one line in a task's brief — `implementer: codex` — set only when you ask for it. There is no contract version and no new ledger column; the planned and actual engine show up in the ledger's existing `Notes`.
+
+The limits, all of them:
+
+- **`codex` and `herdr` must be on PATH — for this optional feature only.** Nothing else in the plugin needs either. A stream that never asks for a Codex implementer never probes for them, never mentions them, and behaves exactly as it did before this feature existed, installed or not.
+- **Asked for but missing is not a blocker.** The conductor says so once with the cause, offers to plan the task on the Claude implementer, and carries on.
+- **No crash-resume.** If the conductor session dies mid-run there is no resume path — the round is re-run from the round-start tree.
+- **Codex cannot conduct.** The orchestration engine (the `Workflow` wave templates, the bundled agents, `/conduct`) is Claude Code only. Codex participates as a worker for one step of one round, never as the conductor.
+- **One Codex task at a time per checkout** — the adapter takes a lock keyed by the checkout, so Codex-flagged tasks never fan out against each other.
+
+Full per-round procedure, class→action table and bounds: `skills/conduct/references/runtime-codex-implementer.md`.
+
 ## Workflow templates
 
 Three deterministic orchestration scripts under `skills/conduct/references/workflows/`, dispatched via Claude Code's `Workflow` tool:
@@ -131,15 +147,18 @@ fable-conductor/
 ├── commands/conduct.md            # /conduct
 └── skills/conduct/
     ├── SKILL.md                   # the conductor's operating manual
-    └── references/
-        ├── contracts.md           # normative file formats
-        ├── escalation.md          # triggers + adjudication playbook
-        ├── weave.md               # capability probes + handoff table
-        └── workflows/             # execute-wave.js, test-adversary.js, final-audit.js
+    ├── references/
+    │   ├── contracts.md           # normative file formats
+    │   ├── escalation.md          # triggers + adjudication playbook
+    │   ├── weave.md               # capability probes + handoff table
+    │   ├── runtime-codex-implementer.md  # opt-in Codex implementer procedure
+    │   └── workflows/             # execute-wave.js, test-adversary.js, final-audit.js
+    └── scripts/                   # the Codex adapter and its isolation prober
 ```
 
 ## Version history
 
+- **1.3.0** — optional, opt-in Codex implementer for a single task's implementer round, with Claude's verifier and adversarial reviewer unchanged
 - **1.1.3** — socket-aware conducting (conductor-to-conductor messaging; sockets carry pointers and wake-ups only, file state remains authoritative) + Claude-5-era prompt economy
 - **1.1.2** — blinded-review findings on the v1.1.1 working-directory contract
 - **1.1.1** — working-directory contract in all worker prompts and briefs
