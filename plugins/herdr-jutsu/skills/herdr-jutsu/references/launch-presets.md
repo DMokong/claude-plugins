@@ -74,6 +74,12 @@ both `agent_args` (caller input) and `effective_agent_args` (launched argv).
   layer is removed, and rejects values containing `{`, `[`, or a newline. A final
   `resume <session-id-or-name>` or `resume --last` pair is allowed. Everything else is
   `isolation_unsupported_agent_arg`; only the user-selected `--no-isolation` opts out.
+- The launcher also appends a fixed surface segment after `-a never`: a `--disable` pair for each of
+  apps, browser_use (three flags), computer_use, image_generation, multi_agent, plugins, remote_plugin,
+  plugin_sharing, skill_search, skill_mcp_dependency_install, tool_suggest, hooks, in_app_browser and
+  in_app_local_automation; one `-c mcp_servers.<name>.enabled=false` per `[mcp_servers.<name>]` header
+  in `${CODEX_HOME:-~/.codex}/config.toml`; and `-c web_search="disabled"`. `--enable` and
+  `--disable` are not on the caller allowlist, so a caller cannot switch a tool back on.
 - Codex reads `AGENTS.md`, not `CLAUDE.md` — the brief must carry anything it needs that
   lives only in Claude-side instructions.
 

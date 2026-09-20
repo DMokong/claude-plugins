@@ -1216,7 +1216,7 @@ test_stage0_codex_requires_never_and_injects_when_absent() {
   : >"$STUB_LOG"
   run_spawn --name stage0-ap2 --kind codex --cwd "$REPO_DIR" -- -s read-only
   [ "$CODE" -eq 0 ] || { fail_case "spawn without -a failed: $(cat "$ERR_FILE")"; teardown_case; return; }
-  grep -qE '^agent start .* -- -s read-only -a never$' "$STUB_LOG" \
+  grep -qE '^agent start .* -- -s read-only -a never --disable apps .* -c web_search="disabled"$' "$STUB_LOG" \
     || { fail_case "agent start did not inject '-a never': $(cat "$STUB_LOG")"; teardown_case; return; }
   ok "$CURRENT_TEST"
   teardown_case
@@ -1344,6 +1344,92 @@ test_stage0_strict_isolation_accepted_for_codex() {
   [ "$CODE" -eq 0 ] || { fail_case "--strict-isolation Codex spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
   [ "$(stdout_field '.outbound_isolation')" = "enforced_if_trusted" ] \
     || { fail_case "Codex --strict-isolation changed the isolation label: $(cat "$OUT_FILE")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+SURFACE_FEATURES="apps browser_use browser_use_external browser_use_full_cdp_access computer_use image_generation multi_agent plugins remote_plugin plugin_sharing skill_search skill_mcp_dependency_install tool_suggest hooks in_app_browser in_app_local_automation"
+
+surface_json() { # surface_json [mcp-server-name...] -> the launcher-added surface segment as a JSON array
+  local f out='[]'
+  for f in $SURFACE_FEATURES; do out="$(printf '%s' "$out" | jq -c --arg f "$f" '. + ["--disable",$f]')"; done
+  for f in "$@"; do out="$(printf '%s' "$out" | jq -c --arg f "mcp_servers.$f.enabled=false" '. + ["-c",$f]')"; done
+  printf '%s' "$out" | jq -c '. + ["-c","web_search=\"disabled\""]'
+}
+
+test_surface_codex_isolated_disables_connectors_and_web() {
+  CURRENT_TEST="surface_codex_isolated_disables_connectors_and_web"
+  setup_case
+  run_spawn --name surface-a --kind codex --cwd "$REPO_DIR" -- -s read-only
+  [ "$CODE" -eq 0 ] || { fail_case "spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  jq -e --argjson seg "$(surface_json)" '.effective_agent_args == (["-s","read-only","-a","never"] + $seg)' "$OUT_FILE" >/dev/null 2>&1 \
+    || { fail_case "isolated Codex launch lacks the surface segment: $(jq -c .effective_agent_args "$OUT_FILE")"; teardown_case; return; }
+  case "$(stdout_field '.isolation_detail')" in *'connected apps'*'MCP servers'*'web search'*) ;;
+    *) fail_case "isolation_detail does not state the reduced surface: $(stdout_field '.isolation_detail')"; teardown_case; return ;;
+  esac
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_surface_codex_mcp_overrides_come_from_config_headers() {
+  CURRENT_TEST="surface_codex_mcp_overrides_come_from_config_headers"
+  setup_case
+  mkdir -p "$HOME/.codex"
+  printf '%s\n' 'model = "x"' '[mcp_servers.memory]' 'command = "node"' '[mcp_servers.memory.env]' 'A = "b"' \
+    '[mcp_servers.r2-mcp_2]' 'url = "https://example.invalid/mcp"' '[projects."/tmp/x"]' > "$HOME/.codex/config.toml"
+  run_spawn --name surface-b --kind codex --cwd "$REPO_DIR" -- -s read-only
+  [ "$CODE" -eq 0 ] || { fail_case "spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  jq -e --argjson seg "$(surface_json memory r2-mcp_2)" '.effective_agent_args == (["-s","read-only","-a","never"] + $seg)' "$OUT_FILE" >/dev/null 2>&1 \
+    || { fail_case "MCP overrides are not one per config header in file order: $(jq -c .effective_agent_args "$OUT_FILE")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_surface_codex_home_env_is_honoured() {
+  CURRENT_TEST="surface_codex_home_env_is_honoured"
+  setup_case
+  mkdir -p "$SCRATCH/codex-home"
+  printf '%s\n' '[mcp_servers.alt]' 'command = "x"' > "$SCRATCH/codex-home/config.toml"
+  CODEX_HOME="$SCRATCH/codex-home" run_spawn --name surface-c --kind codex --cwd "$REPO_DIR" -- -s read-only
+  [ "$CODE" -eq 0 ] || { fail_case "spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  jq -e '.effective_agent_args | index("mcp_servers.alt.enabled=false") != null' "$OUT_FILE" >/dev/null 2>&1 \
+    || { fail_case "CODEX_HOME config was not read: $(jq -c .effective_agent_args "$OUT_FILE")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_surface_unsafe_mcp_server_name_refuses_spawn() {
+  CURRENT_TEST="surface_unsafe_mcp_server_name_refuses_spawn"
+  setup_case
+  mkdir -p "$HOME/.codex"
+  printf '%s\n' '[mcp_servers."has space"]' 'command = "x"' > "$HOME/.codex/config.toml"
+  run_spawn --name surface-d --kind codex --cwd "$REPO_DIR" -- -s read-only
+  [ "$CODE" -ne 0 ] || { fail_case "a server the launcher cannot disable must refuse the isolated spawn: $(cat "$OUT_FILE")"; teardown_case; return; }
+  [ "$(stderr_error_code)" = "isolation_unsupported_mcp_server" ] \
+    || { fail_case "expected isolation_unsupported_mcp_server, got '$(stderr_error_code)': $(cat "$ERR_FILE")"; teardown_case; return; }
+  grep -q '^agent start ' "$STUB_LOG" 2>/dev/null && { fail_case "agent was started despite the refusal"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_surface_no_isolation_adds_no_surface_flags() {
+  CURRENT_TEST="surface_no_isolation_adds_no_surface_flags"
+  setup_case
+  run_spawn --name surface-e --kind codex --cwd "$REPO_DIR" --no-isolation -- -s read-only
+  [ "$CODE" -eq 0 ] || { fail_case "spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  jq -e '.effective_agent_args == ["-s","read-only"]' "$OUT_FILE" >/dev/null 2>&1 \
+    || { fail_case "--no-isolation must pass caller args verbatim: $(jq -c .effective_agent_args "$OUT_FILE")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_surface_caller_cannot_reenable_a_feature() {
+  CURRENT_TEST="surface_caller_cannot_reenable_a_feature"
+  setup_case
+  run_spawn --name surface-f --kind codex --cwd "$REPO_DIR" -- -s read-only --enable apps
+  [ "$CODE" -ne 0 ] || { fail_case "--enable apps was accepted under isolation: $(cat "$OUT_FILE")"; teardown_case; return; }
+  [ "$(stderr_error_code)" = "isolation_unsupported_agent_arg" ] \
+    || { fail_case "expected isolation_unsupported_agent_arg, got '$(stderr_error_code)'"; teardown_case; return; }
   ok "$CURRENT_TEST"
   teardown_case
 }
@@ -1832,13 +1918,13 @@ test_r2_allowlist_resume_last_tokens() {
   setup_case
   run_spawn --name r2resume-id --kind codex --cwd "$REPO_DIR" -- -s read-only resume session-name
   assert_allowed_effective_present || { teardown_case; return; }
-  [ "$(jq -c '.effective_agent_args' "$OUT_FILE")" = '["-s","read-only","-a","never","resume","session-name"]' ] \
+  jq -e --argjson seg "$(surface_json)" '.effective_agent_args == (["-s","read-only","-a","never"] + $seg + ["resume","session-name"])' "$OUT_FILE" >/dev/null 2>&1 \
     || { fail_case "resume id was not retained as the final tokens: $(cat "$OUT_FILE")"; teardown_case; return; }
   teardown_case
   setup_case
   run_spawn --name r2resume-last --kind codex --cwd "$REPO_DIR" -- resume --last
   assert_allowed_effective_present || { teardown_case; return; }
-  [ "$(jq -c '.effective_agent_args' "$OUT_FILE")" = '["-a","never","resume","--last"]' ] \
+  jq -e --argjson seg "$(surface_json)" '.effective_agent_args == (["-a","never"] + $seg + ["resume","--last"])' "$OUT_FILE" >/dev/null 2>&1 \
     || { fail_case "resume --last was not retained as the final tokens: $(cat "$OUT_FILE")"; teardown_case; return; }
   ok "$CURRENT_TEST"
   teardown_case
@@ -1907,10 +1993,10 @@ test_r2_effective_args_and_json_argv_boundaries() {
   [ "$CODE" -eq 0 ] || { fail_case "spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
   jq -e --arg m "$model" '.agent_args == ["-m",$m,"-s","read-only"]' "$OUT_FILE" >/dev/null 2>&1 \
     || { fail_case "caller agent_args changed: $(cat "$OUT_FILE")"; teardown_case; return; }
-  jq -e --arg m "$model" '.effective_agent_args == ["-m",$m,"-s","read-only","-a","never"]' "$OUT_FILE" >/dev/null 2>&1 \
+  jq -e --arg m "$model" --argjson seg "$(surface_json)" '.effective_agent_args == (["-m",$m,"-s","read-only","-a","never"] + $seg)' "$OUT_FILE" >/dev/null 2>&1 \
     || { fail_case "effective args do not show injected approval: $(cat "$OUT_FILE")"; teardown_case; return; }
   launched="$(jq -sc 'map(select(.[0:3] == ["agent","start","r2-effective"])) | last | .[((index("--")) + 1):]' "$STUB_HERDR_JSON_LOG" 2>/dev/null)"
-  printf '%s' "$launched" | jq -e --arg m "$model" '. == ["-m",$m,"-s","read-only","-a","never"]' >/dev/null 2>&1 \
+  printf '%s' "$launched" | jq -e --arg m "$model" --argjson seg "$(surface_json)" '. == (["-m",$m,"-s","read-only","-a","never"] + $seg)' >/dev/null 2>&1 \
     || { fail_case "herdr JSON argv log lost boundaries: $launched"; teardown_case; return; }
   ok "$CURRENT_TEST"
   teardown_case
@@ -2252,6 +2338,12 @@ test_stage0_claude_caller_denied_sendmessage_is_reported
 test_stage0_strict_isolation_conflicts_with_no_isolation
 test_stage0_strict_isolation_refused_for_shell
 test_stage0_strict_isolation_accepted_for_codex
+test_surface_codex_isolated_disables_connectors_and_web
+test_surface_codex_mcp_overrides_come_from_config_headers
+test_surface_codex_home_env_is_honoured
+test_surface_unsafe_mcp_server_name_refuses_spawn
+test_surface_no_isolation_adds_no_surface_flags
+test_surface_caller_cannot_reenable_a_feature
 test_stage0_preflight_reports_isolation_without_writing_layer
 test_stage0_failure_cleanup_removes_written_policy_layer
 test_stage0_in_pane_uses_actual_pane_cwd
