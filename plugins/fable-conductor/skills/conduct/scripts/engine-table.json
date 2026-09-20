@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "efforts": ["low", "medium", "high"],
+  "signatures": [
+    {
+      "id": "model_at_capacity",
+      "codex_version": "0.155.1",
+      "expression": "Selected model is at capacity",
+      "transient": true
+    }
+  ]
+}

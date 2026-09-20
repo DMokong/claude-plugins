@@ -1,0 +1,21 @@
+#!/bin/bash
+# tests/fable-conductor/stub/herdr — exists only so `command -v herdr` resolves.
+# Neither the prober nor the adapter may ever EXECUTE it; every case asserts the count is 0.
+set -u
+
+if [ -z "${FC_STUB_STATE:-}" ]; then
+  if [ -n "${FC_SENTINEL_FILE:-}" ]; then
+    printf 'herdr stub called with no FC_STUB_STATE: %s\n' "$*" >>"$FC_SENTINEL_FILE"
+  fi
+  exit 97
+fi
+
+mkdir -p "$FC_STUB_STATE" 2>/dev/null || true
+n=0
+if [ -f "$FC_STUB_STATE/herdr.count" ]; then
+  n="$(cat "$FC_STUB_STATE/herdr.count" 2>/dev/null || echo 0)"
+fi
+n=$((n + 1))
+printf '%s\n' "$n" >"$FC_STUB_STATE/herdr.count"
+printf '%s\n' "$*" >>"$FC_STUB_STATE/herdr.calls"
+exit 0

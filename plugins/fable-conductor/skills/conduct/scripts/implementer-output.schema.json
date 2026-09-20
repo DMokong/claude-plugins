@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "implementer output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "files_changed", "commits", "commands_run", "tracker_note", "blocked_reason"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "files_changed": {
+      "type": "array",
+      "maxItems": 500,
+      "items": { "type": "string", "maxLength": 1024 }
+    },
+    "commits": {
+      "type": "array",
+      "maxItems": 50,
+      "items": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+    },
+    "commands_run": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cmd", "exit", "tail"],
+        "properties": {
+          "cmd": { "type": "string", "maxLength": 2000 },
+          "exit": { "type": "integer" },
+          "tail": { "type": "string", "maxLength": 8000 }
+        }
+      }
+    },
+    "tracker_note": {
+      "type": ["string", "null"],
+      "maxLength": 2000
+    },
+    "blocked_reason": {
+      "type": ["string", "null"],
+      "maxLength": 2000
+    }
+  }
+}
