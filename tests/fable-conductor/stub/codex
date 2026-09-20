@@ -1,0 +1,145 @@
+#!/bin/bash
+# tests/fable-conductor/stub/codex — offline stand-in for the Codex CLI.
+#
+# Three modes: `exec`, `execpolicy check`, `--version`. Every call is recorded under
+# $FC_STUB_STATE so a case can assert argv, cwd, pid and stdin bytes. A call made with no
+# FC_STUB_STATE means the stub was reached from outside a case (or the real binary would
+# have been): it appends to $FC_SENTINEL_FILE, which fails the whole suite.
+set -u
+
+if [ -z "${FC_STUB_STATE:-}" ]; then
+  if [ -n "${FC_SENTINEL_FILE:-}" ]; then
+    printf 'codex stub called with no FC_STUB_STATE: %s\n' "$*" >>"$FC_SENTINEL_FILE"
+  fi
+  exit 97
+fi
+
+mkdir -p "$FC_STUB_STATE" 2>/dev/null || true
+
+stub_mode=exec
+case "${1:-}" in
+  exec) stub_mode=exec ;;
+  execpolicy) stub_mode=execpolicy ;;
+  --version|-V) stub_mode=version ;;
+  *) stub_mode=other ;;
+esac
+
+# --- record the call ------------------------------------------------------------------
+n=0
+if [ -f "$FC_STUB_STATE/codex.count" ]; then
+  n="$(cat "$FC_STUB_STATE/codex.count" 2>/dev/null || echo 0)"
+fi
+n=$((n + 1))
+printf '%s\n' "$n" >"$FC_STUB_STATE/codex.count"
+
+printf '%s\n' "$stub_mode" >"$FC_STUB_STATE/codex.$n.mode"
+: >"$FC_STUB_STATE/codex.$n.argv"
+for a in "$@"; do
+  printf '%s\0' "$a" >>"$FC_STUB_STATE/codex.$n.argv"
+done
+pwd -P >"$FC_STUB_STATE/codex.$n.cwd"
+printf '%s\n' "$$" >"$FC_STUB_STATE/codex.$n.pid"
+
+mode_count=0
+if [ -f "$FC_STUB_STATE/codex.$stub_mode.count" ]; then
+  mode_count="$(cat "$FC_STUB_STATE/codex.$stub_mode.count" 2>/dev/null || echo 0)"
+fi
+mode_count=$((mode_count + 1))
+printf '%s\n' "$mode_count" >"$FC_STUB_STATE/codex.$stub_mode.count"
+
+# --- --version -------------------------------------------------------------------------
+if [ "$stub_mode" = version ]; then
+  printf 'codex-cli %s\n' "${FC_STUB_VERSION:-0.155.1}"
+  exit 0
+fi
+
+# --- execpolicy check --------------------------------------------------------------------
+if [ "$stub_mode" = execpolicy ]; then
+  decision="${FC_STUB_POLICY_DECISION:-forbidden}"
+  pexit="${FC_STUB_POLICY_EXIT:-0}"
+  nth="${FC_STUB_POLICY_NTH:-}"
+  if [ -n "$nth" ] && [ "$nth" != "$mode_count" ]; then
+    decision=forbidden
+    pexit=0
+  fi
+  case "$decision" in
+    @malformed) printf 'not json at all\n' ;;
+    *) printf '{"decision":"%s","program":"herdr"}\n' "$decision" ;;
+  esac
+  exit "$pexit"
+fi
+
+# --- exec ---------------------------------------------------------------------------------
+if [ -n "${FC_STUB_IGNORE_TERM:-}" ]; then
+  trap '' TERM
+fi
+
+# locate the -o output path and the cwd the adapter launched us in
+out_path=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then out_path="$a"; fi
+  prev="$a"
+done
+
+# Did the -o target already exist when we were launched? The adapter's pre-launch binding
+# check says it must not, and this is the observable half of that contract.
+if [ -n "$out_path" ] && { [ -e "$out_path" ] || [ -L "$out_path" ]; }; then
+  printf '1\n' >"$FC_STUB_STATE/codex.$n.out_existed"
+else
+  printf '0\n' >"$FC_STUB_STATE/codex.$n.out_existed"
+fi
+
+stdin_bytes=0
+if [ -n "${FC_STUB_READ_STDIN:-}" ]; then
+  stdin_bytes="$(cat | wc -c | tr -d ' ')"
+fi
+printf '%s\n' "$stdin_bytes" >"$FC_STUB_STATE/codex.$n.stdin_bytes"
+
+if [ -n "${FC_STUB_FORK_GRANDCHILD:-}" ]; then
+  # A TERM-ignoring grandchild in the SAME process group: only a group KILL reaps it.
+  ( trap '' TERM; sleep 600 ) &
+  printf '%s\n' "$!" >"$FC_STUB_STATE/codex.$n.grandchild"
+fi
+
+# events on stdout (the adapter redirects it to events.jsonl)
+if [ -n "${FC_STUB_EVENTS:-}" ]; then
+  if [ "$FC_STUB_EVENTS" = "@none" ]; then
+    :
+  else
+    cat "$FC_STUB_EVENTS"
+  fi
+else
+  printf '%s\n' '{"type":"thread.started","thread_id":"stub-thread"}'
+  printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5}}'
+fi
+
+if [ -n "${FC_STUB_STDERR:-}" ]; then
+  cat "$FC_STUB_STDERR" >&2
+fi
+
+if [ -n "${FC_STUB_MUTATE:-}" ]; then
+  /bin/bash "$FC_STUB_MUTATE"
+fi
+
+if [ -n "$out_path" ]; then
+  case "${FC_STUB_OUT:-}" in
+    "") printf '%s\n' '{"summary":"stub run","files_changed":[],"commits":[],"commands_run":[{"cmd":"true","exit":0,"tail":"ok"}],"tracker_note":null,"blocked_reason":null}' >"$out_path" ;;
+    @none) : ;;
+    @dir) mkdir -p "$out_path" ;;
+    @fifo) mkfifo "$out_path" ;;
+    @symlink:*) ln -s "${FC_STUB_OUT#@symlink:}" "$out_path" ;;
+    *) cat "$FC_STUB_OUT" >"$out_path" ;;
+  esac
+fi
+
+if [ -n "${FC_STUB_SLEEP:-}" ]; then
+  sleep "$FC_STUB_SLEEP"
+fi
+
+if [ -n "${FC_STUB_SELF_SIGNAL:-}" ]; then
+  kill -"$FC_STUB_SELF_SIGNAL" $$
+  sleep 5
+fi
+
+exit "${FC_STUB_EXIT:-0}"

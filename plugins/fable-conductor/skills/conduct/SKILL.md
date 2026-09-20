@@ -113,6 +113,8 @@ args = {
 
 **Workflow tool absent** → degrade per `references/weave.md`: run each wave as Agent-tool parallel batches — same briefs, same contracts, same fix-loop rules, orchestrated via direct Agent-tool dispatch — and note the degradation in `stream.md` and the affected reports.
 
+**Codex implementer (opt-in).** Never offer this and never probe for it; it exists only when the user asks for a Codex implementer for this stream and a brief carries `implementer: codex`. A stream that does not ask behaves exactly as it always has. When it is asked for and `codex`, `herdr` or the policy probe is unavailable, say so once with the cause, offer to plan the task on the Claude implementer, and carry on — never block, never repeat. Procedure: `references/runtime-codex-implementer.md`.
+
 ## Escalation loop
 
 An escalation is the designed path back to you, not a failure. Read `references/escalation.md` and adjudicate per its playbook — work the moves in order, cheapest first, your own hands last: **amend the brief** → **adjudicate the deadlock** from both evidence sets → **defer to Fable** (non-Fable conductors: socket-first to a live fable-tier peer, else park — see the entry test and single-writer rule in `references/escalation.md`) → **pull the task into session** (last resort) → **replan the affected subgraph** → **bundle a genuine product decision for the human** (only decisions the human owns; batched, never dripped one at a time).
