@@ -99,6 +99,28 @@ all_output() {
   cat "$OUT_FILE" "$ERR_FILE" 2>/dev/null
 }
 
+manifest_version_for() {
+  jq -r '.version' "$ROOT/plugins/$1/.claude-plugin/plugin.json"
+}
+
+catalog_version_for() {
+  jq -r --arg n "$1" '.plugins[] | select(.name == $n) | .version' \
+    "$ROOT/.claude-plugin/marketplace.json"
+}
+
+expected_version_for() {
+  if [ -f "$ROOT/plugins/$1/.claude-plugin/plugin.json" ]; then
+    manifest_version_for "$1"
+  else
+    catalog_version_for "$1"
+  fi
+}
+
+# different_version <version> — returns a value guaranteed not to equal its input.
+different_version() {
+  printf '%s.test-mutation\n' "$1"
+}
+
 # mismatch_lines_for <plugin-name> — every MISMATCH line naming <plugin-name>.
 mismatch_lines_for() {
   grep -E '^MISMATCH ' "$OUT_FILE" "$ERR_FILE" 2>/dev/null | grep -F "$1"
@@ -129,9 +151,11 @@ assert_named_mismatch() {
 
 # mutate_readme_version <plugin> <old-version> <new-version>
 mutate_readme_version() {
-  local plugin="$1" old="$2" new="$3" tmp
+  local plugin="$1" old="$2" new="$3" old_escaped new_escaped tmp
+  old_escaped="$(printf '%s' "$old" | sed 's/[][\/\.^$*+?(){}|]/\\&/g')"
+  new_escaped="$(printf '%s' "$new" | sed 's/[\/&]/\\&/g')"
   tmp="$(mktemp)"
-  sed -E "/\`$plugin\`/ s/\\| $old \\|/| $new |/" "$ROOT/README.md" >"$tmp"
+  sed -E "/\`$plugin\`/ s/\\| $old_escaped \\|/| $new_escaped |/" "$ROOT/README.md" >"$tmp"
   mv "$tmp" "$ROOT/README.md"
 }
 
@@ -141,7 +165,9 @@ mutate_readme_version() {
 
 test_ac25_unmutated_copy_exits_zero() {
   CURRENT_TEST="ac25_unmutated_copy_exits_zero"
+  local version
   setup_case
+  version="$(manifest_version_for fable-mode)"
   run_check
   if [ "$CODE" -ne 0 ]; then
     fail_case "expected exit 0 for an unmutated copy, got $CODE. Output:$(all_output)"
@@ -153,8 +179,8 @@ test_ac25_unmutated_copy_exits_zero() {
     teardown_case
     return
   fi
-  grep -qxF "ok fable-mode 1.1.1" "$OUT_FILE" \
-    || { fail_case "expected the line 'ok fable-mode 1.1.1' in stdout: $(cat "$OUT_FILE")"; teardown_case; return; }
+  grep -qxF "ok fable-mode $version" "$OUT_FILE" \
+    || { fail_case "expected the line 'ok fable-mode $version' in stdout: $(cat "$OUT_FILE")"; teardown_case; return; }
   ok "$CURRENT_TEST"
   teardown_case
 }
@@ -165,8 +191,12 @@ test_ac25_unmutated_copy_exits_zero() {
 
 test_ac25_claude_manifest_version_mismatch() {
   CURRENT_TEST="ac25_claude_manifest_version_mismatch"
+  local version mutation
   setup_case
-  jq_set_file "$ROOT/plugins/fable-mode/.claude-plugin/plugin.json" '.version = "9.9.9"'
+  version="$(manifest_version_for fable-mode)"
+  mutation="$(different_version "$version")"
+  jq_set_file "$ROOT/plugins/fable-mode/.claude-plugin/plugin.json" \
+    ".version = \"$mutation\""
   run_check
   if [ "$CODE" -eq 0 ]; then
     fail_case "expected non-zero exit when fable-mode's Claude manifest version drifts, got 0"
@@ -184,9 +214,12 @@ test_ac25_claude_manifest_version_mismatch() {
 
 test_ac25_claude_catalog_version_mismatch() {
   CURRENT_TEST="ac25_claude_catalog_version_mismatch"
+  local version mutation
   setup_case
+  version="$(catalog_version_for fable-mode)"
+  mutation="$(different_version "$version")"
   jq_set_file "$ROOT/.claude-plugin/marketplace.json" \
-    '(.plugins[] | select(.name=="fable-mode") | .version) = "9.9.9"'
+    "(.plugins[] | select(.name==\"fable-mode\") | .version) = \"$mutation\""
   run_check
   if [ "$CODE" -eq 0 ]; then
     fail_case "expected non-zero exit when fable-mode's Claude catalog version drifts, got 0"
@@ -204,8 +237,12 @@ test_ac25_claude_catalog_version_mismatch() {
 
 test_ac25_codex_manifest_version_mismatch() {
   CURRENT_TEST="ac25_codex_manifest_version_mismatch"
+  local version mutation
   setup_case
-  jq_set_file "$ROOT/plugins/fable-mode/.codex-plugin/plugin.json" '.version = "9.9.9"'
+  version="$(jq -r '.version' "$ROOT/plugins/fable-mode/.codex-plugin/plugin.json")"
+  mutation="$(different_version "$version")"
+  jq_set_file "$ROOT/plugins/fable-mode/.codex-plugin/plugin.json" \
+    ".version = \"$mutation\""
   run_check
   if [ "$CODE" -eq 0 ]; then
     fail_case "expected non-zero exit when fable-mode's Codex manifest version drifts, got 0"
@@ -223,9 +260,12 @@ test_ac25_codex_manifest_version_mismatch() {
 
 test_ac25_readme_row_version_mismatch() {
   CURRENT_TEST="ac25_readme_row_version_mismatch"
+  local version mutation
   setup_case
-  mutate_readme_version "fable-mode" "1\\.1\\.1" "9.9.9"
-  grep -q '9.9.9' "$ROOT/README.md" || { fail_case "harness bug: README mutation did not apply"; teardown_case; return; }
+  version="$(manifest_version_for fable-mode)"
+  mutation="$(different_version "$version")"
+  mutate_readme_version "fable-mode" "$version" "$mutation"
+  grep -qF "$mutation" "$ROOT/README.md" || { fail_case "harness bug: README mutation did not apply"; teardown_case; return; }
   run_check
   if [ "$CODE" -eq 0 ]; then
     fail_case "expected non-zero exit when the README row version drifts, got 0"
@@ -417,9 +457,12 @@ test_claude_catalog_external_source_shape_mismatch() {
 
 test_clean_plugins_report_ok_after_earlier_mismatch() {
   CURRENT_TEST="clean_plugins_report_ok_after_earlier_mismatch"
+  local broken_version mutation plugin expected
   setup_case
+  broken_version="$(catalog_version_for lego-plan-builder)"
+  mutation="$(different_version "$broken_version")"
   jq_set_file "$ROOT/.claude-plugin/marketplace.json" \
-    '(.plugins[] | select(.name=="lego-plan-builder") | .version) = "9.9.9"'
+    "(.plugins[] | select(.name==\"lego-plan-builder\") | .version) = \"$mutation\""
   run_check
   if [ "$CODE" -eq 0 ]; then
     fail_case "expected non-zero exit for the deliberately broken lego-plan-builder version, got 0"
@@ -427,12 +470,8 @@ test_clean_plugins_report_ok_after_earlier_mismatch() {
     return
   fi
   assert_named_mismatch "lego-plan-builder" "version" || { teardown_case; return; }
-  local expected
-  for expected in \
-    "ok speculator 2.21.1" \
-    "ok fable-mode 1.1.1" \
-    "ok fable-conductor 1.2.1" \
-    "ok herdr-jutsu 0.3.1"; do
+  for plugin in speculator fable-mode fable-conductor herdr-jutsu; do
+    expected="ok $plugin $(expected_version_for "$plugin")"
     grep -qxF "$expected" "$OUT_FILE" \
       || { fail_case "missing clean-plugin line '$expected'. Full output:$(all_output)"; teardown_case; return; }
   done
@@ -620,9 +659,11 @@ test_missing_catalog_rejected() {
 
 test_url_sourced_codex_catalog_version_key_added() {
   CURRENT_TEST="url_sourced_codex_catalog_version_key_added"
+  local version
   setup_case
+  version="$(catalog_version_for speculator)"
   jq_set_file "$ROOT/.agents/plugins/marketplace.json" \
-    '(.plugins[] | select(.name=="speculator")) += {version: "2.21.1"}'
+    "(.plugins[] | select(.name==\"speculator\")) += {version: \"$version\"}"
   run_check
   if [ "$CODE" -eq 0 ]; then
     fail_case "expected non-zero exit when a URL-sourced Codex entry carries a version key, got 0"
@@ -640,9 +681,11 @@ test_url_sourced_codex_catalog_version_key_added() {
 
 test_ac25_codex_catalog_version_key_added() {
   CURRENT_TEST="ac25_codex_catalog_version_key_added"
+  local version
   setup_case
+  version="$(manifest_version_for fable-mode)"
   jq_set_file "$ROOT/.agents/plugins/marketplace.json" \
-    '(.plugins[] | select(.name=="fable-mode")) += {version: "1.1.1"}'
+    "(.plugins[] | select(.name==\"fable-mode\")) += {version: \"$version\"}"
   run_check
   if [ "$CODE" -eq 0 ]; then
     fail_case "expected non-zero exit when a Codex catalog entry carries a version key, got 0"
@@ -681,8 +724,12 @@ test_ac25_orphan_codex_catalog_entry() {
 
 test_ac25_two_simultaneous_mutations_both_reported() {
   CURRENT_TEST="ac25_two_simultaneous_mutations_both_reported"
+  local version mutation
   setup_case
-  jq_set_file "$ROOT/plugins/fable-mode/.claude-plugin/plugin.json" '.version = "9.9.9"'
+  version="$(manifest_version_for fable-mode)"
+  mutation="$(different_version "$version")"
+  jq_set_file "$ROOT/plugins/fable-mode/.claude-plugin/plugin.json" \
+    ".version = \"$mutation\""
   jq_set_file "$ROOT/plugins/herdr-jutsu/.codex-plugin/plugin.json" '.name = "not-herdr-jutsu"'
   run_check
   if [ "$CODE" -eq 0 ]; then
@@ -702,9 +749,12 @@ test_ac25_two_simultaneous_mutations_both_reported() {
 
 test_ac25_url_sourced_readme_row_mismatch() {
   CURRENT_TEST="ac25_url_sourced_readme_row_mismatch"
+  local version mutation
   setup_case
-  mutate_readme_version "speculator" "2\\.21\\.1" "9.9.9"
-  grep -q '9.9.9' "$ROOT/README.md" || { fail_case "harness bug: README mutation did not apply"; teardown_case; return; }
+  version="$(catalog_version_for speculator)"
+  mutation="$(different_version "$version")"
+  mutate_readme_version "speculator" "$version" "$mutation"
+  grep -qF "$mutation" "$ROOT/README.md" || { fail_case "harness bug: README mutation did not apply"; teardown_case; return; }
   run_check
   if [ "$CODE" -eq 0 ]; then
     fail_case "expected non-zero exit when speculator's README row drifts from its catalog version, got 0"
@@ -712,6 +762,68 @@ test_ac25_url_sourced_readme_row_mismatch() {
     return
   fi
   assert_named_mismatch "speculator" "version" "readme" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+# =========================================================================================
+# A version bump remains clean when all four version-carrying surfaces agree.
+# =========================================================================================
+
+test_consistent_bump_all_surfaces_exits_zero() {
+  CURRENT_TEST="consistent_bump_all_surfaces_exits_zero"
+  local version bump
+  setup_case
+  version="$(manifest_version_for fable-conductor)"
+  bump="$(different_version "$version")"
+  jq_set_file "$ROOT/plugins/fable-conductor/.claude-plugin/plugin.json" \
+    ".version = \"$bump\""
+  jq_set_file "$ROOT/plugins/fable-conductor/.codex-plugin/plugin.json" \
+    ".version = \"$bump\""
+  jq_set_file "$ROOT/.claude-plugin/marketplace.json" \
+    "(.plugins[] | select(.name==\"fable-conductor\") | .version) = \"$bump\""
+  mutate_readme_version "fable-conductor" "$version" "$bump"
+  run_check
+  if [ "$CODE" -ne 0 ]; then
+    fail_case "expected exit 0 after a consistent bump, got $CODE. Output:$(all_output)"
+    teardown_case
+    return
+  fi
+  if grep -qE '^MISMATCH ' "$OUT_FILE" "$ERR_FILE" 2>/dev/null; then
+    fail_case "a consistent bump must report zero MISMATCH lines: $(all_output)"
+    teardown_case
+    return
+  fi
+  grep -qxF "ok fable-conductor $bump" "$OUT_FILE" \
+    || { fail_case "missing bumped clean-plugin line. Full output:$(all_output)"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+# =========================================================================================
+# The suite source itself must not pin any version copied into a case root.
+# =========================================================================================
+
+test_suite_contains_no_literal_current_version() {
+  CURRENT_TEST="suite_contains_no_literal_current_version"
+  local plugin version
+  setup_case
+  while IFS= read -r version; do
+    [ -n "$version" ] || continue
+    if grep -F -- "$version" "$HERE/run.sh" >/dev/null; then
+      fail_case "suite source contains a literal current plugin version"
+      teardown_case
+      return
+    fi
+  done < <(
+    {
+      jq -r '.plugins[].version // empty' "$ROOT/.claude-plugin/marketplace.json"
+      for plugin in $LOCAL_PLUGINS; do
+        jq -r '.version // empty' "$ROOT/plugins/$plugin/.claude-plugin/plugin.json"
+        jq -r '.version // empty' "$ROOT/plugins/$plugin/.codex-plugin/plugin.json"
+      done
+    } | LC_ALL=C sort -u
+  )
   ok "$CURRENT_TEST"
   teardown_case
 }
@@ -766,6 +878,8 @@ test_ac25_codex_catalog_version_key_added
 test_ac25_orphan_codex_catalog_entry
 test_ac25_two_simultaneous_mutations_both_reported
 test_ac25_url_sourced_readme_row_mismatch
+test_consistent_bump_all_surfaces_exits_zero
+test_suite_contains_no_literal_current_version
 
 TOTAL=$((PASS + FAIL))
 if [ "$FAIL" -eq 0 ]; then
