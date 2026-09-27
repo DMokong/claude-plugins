@@ -18,6 +18,19 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 SPAWN="$REPO_ROOT/plugins/herdr-jutsu/skills/herdr-jutsu/scripts/jutsu-spawn.sh"
 STUB_DIR="$HERE/stub"
+NORMALISE_JQ="$HERE/lib/normalise.jq"
+FIXTURES_DIR="$HERE/fixtures/v0.4.0"
+
+# --- run.sh's own argv (NOT jutsu-spawn.sh's): --only <group> / --list --------------------
+ONLY_GROUP=""
+LIST_ONLY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --only) ONLY_GROUP="${2:-}"; shift 2 ;;
+    --list) LIST_ONLY=1; shift ;;
+    *) echo "run.sh: unknown option: $1 (usage: run.sh [--only <group>] [--list])" >&2; exit 2 ;;
+  esac
+done
 
 PASS=0
 FAIL=0
@@ -2276,120 +2289,163 @@ test_ac12_bash_n_under_bash32() {
 }
 
 # --- driver -------------------------------------------------------------------------------
+#
+# Registration, not direct invocation: register_test records a function name against the
+# group active when it is called (CASE_GROUP), so --list can print every test name with its
+# group without running anything, and --only <group> can filter the actual run. "core" is
+# this file's own in-file tests (unchanged above, in their original order); every other group
+# comes from sourcing cases/*.sh (sorted), where CASE_GROUP is that file's stem. Convention
+# (matches every existing test above): the printed test name is the function name with the
+# "test_" prefix stripped, since every CURRENT_TEST assignment already follows that pattern.
 
-test_ac12_bash_n_under_bash32
-test_ac13_pane_closed_on_failure_after_split
-test_ac13_worktree_orphaned_never_removed
-test_ac13_in_pane_never_closed_rename_reverted
-test_ac14_in_pane_refuses_vim_foreground
-test_ac14_in_pane_refuses_agent_occupied
-test_ac14_in_pane_refuses_unparseable_process_info
-test_ac14_in_pane_accepts_idle_shell
-test_ac15_agent_not_ready_retained_exit3
-test_ac15_other_start_error_cleaned_up_exit1
-test_ac15_missing_value_for_every_option
-test_ac15_unknown_option_rejected
-test_ac16_claude_dangerous_flags_refused
-test_ac16_codex_dangerous_flags_refused
-test_ac16_override_accepted_and_recorded
-test_ac17_registry_modes_0700_0600
-test_ac17_sandbox_readonly_registry_none
-test_ac17_sandbox_workspace_write_registry_workspace
-test_ac18_agent_args_roundtrip_as_json_array
-test_ac18_resume_args_per_kind
-test_ac18_redaction_in_output_not_in_real_argv
-test_ac18_stream_rejects_path_traversal_and_slash
-test_ac18_registry_symlink_refused
-test_ac19_preflight_flag_reports_ok
-test_ac19_preflight_runs_name_and_parent_checks
-test_ac19_preflight_leaves_no_registry_residue
-test_ac19_version_too_old_fails_preflight
-test_ac19_version_ok_passes_preflight
-test_ac19_t4_preflight_reports_herdr_unreachable_on_eperm
-test_ac19_t4_preflight_reports_herdr_unreachable_on_non_json
-test_ac19_t4_real_spawn_creates_nothing_when_herdr_unreachable
-test_ac19_sandbox_hint_reported_both_ok_and_failing
-test_ac19_reachable_with_unnamed_parent_still_ok
-test_ac19_help_documents_herdr_unreachable
-test_t8_record_session_appends_row_claude
-test_t8_record_session_appends_row_codex
-test_t9_record_session_uses_herdr_when_session_id_omitted
-test_t9_record_session_null_herdr_session_no_flag_fails
-test_t8_record_session_unknown_member_rejected
-test_t8_record_session_symlinked_registry_refused
-test_t8_record_session_preflight_conflict_refused
-test_t8_record_session_help_documents_contract
-test_record_session_status_is_current_never_stale
-test_l1_beside_resolves_live_agent_name
-test_l1_beside_resolves_registered_shell_name
-test_l1_beside_resolves_literal_pane_id
-test_l1_beside_unknown_anchor_refused
-test_item10_help_documents_new_contract
-test_stage0_codex_layer_written_with_resolved_herdr_path
-test_stage0_differing_rules_refused_without_overwrite
-test_stage0_info_exclude_normal_checkout_idempotent
-test_stage0_info_exclude_linked_worktree_idempotent
-test_stage0_codex_requires_never_and_injects_when_absent
-test_stage0_no_isolation_writes_nothing_and_reports_none
-test_stage0_claude_disallowed_tools_merged_once
-test_stage0_claude_default_keeps_sendmessage
-test_stage0_claude_strict_isolation_denies_sendmessage
-test_stage0_claude_caller_denied_sendmessage_is_reported
-test_stage0_strict_isolation_conflicts_with_no_isolation
-test_stage0_strict_isolation_refused_for_shell
-test_stage0_strict_isolation_accepted_for_codex
-test_surface_codex_isolated_disables_connectors_and_web
-test_surface_codex_mcp_overrides_come_from_config_headers
-test_surface_codex_home_env_is_honoured
-test_surface_unsafe_mcp_server_name_refuses_spawn
-test_surface_no_isolation_adds_no_surface_flags
-test_surface_caller_cannot_reenable_a_feature
-test_stage0_preflight_reports_isolation_without_writing_layer
-test_stage0_failure_cleanup_removes_written_policy_layer
-test_stage0_in_pane_uses_actual_pane_cwd
-test_f1_three_resolved_execpolicy_checks
-test_f1_null_execpolicy_answer_downgrades_with_probe_reason
-test_f2_all_sandbox_removal_spellings_refused
-test_f3_all_approval_flag_spellings_refused
-test_f3_all_approval_config_spellings_refused
-test_f3_profiles_require_explicit_safe_sandbox_and_are_reported
-test_f3_approve_for_me_refused
-test_f4_all_policy_path_symlinks_refused_before_creation
-test_f4_identical_preexisting_rules_survive_rollback
-test_f4_preexisting_empty_codex_dir_survives_rollback
-test_f5_exclude_without_trailing_newline_is_not_glued
-test_f5_preexisting_exclude_line_is_not_owned_or_removed
-test_f6_tracked_conflict_in_base_refused_before_worktree_creation
-test_f7_stub_absolute_match_also_requires_forbidden_prefix
-test_r2_allowlist_sandbox_spellings
-test_r2_allowlist_approval_spellings
-test_r2_allowlist_model_spellings
-test_r2_allowlist_profile_spellings_with_sandbox
-test_r2_allowlist_add_dir_spellings
-test_r2_allowlist_config_keys_and_spellings
-test_r2_allowlist_resume_last_tokens
-test_r2_refuses_quoted_unsafe_config_key
-test_r2_refuses_config_table_value
-test_r2_refuses_yolo_even_with_dangerous_override
-test_r2_refuses_search
-test_r2_refuses_cd
-test_r2_refuses_exec_subcommand
-test_r2_refuses_bare_prompt
-test_r2_refuses_profile_without_sandbox
-test_r2_refuses_full_auto
-test_r2_effective_args_and_json_argv_boundaries
-test_r2_claude_only_barrier_detail
-test_r3_claude_unset_permission_mode_is_not_called_effective
-test_r3_claude_prompting_mode_from_args_is_labelled
-test_r2_policy_lock_second_spawn_waits_then_succeeds
-test_r2_policy_lock_timeout_is_clear
-test_r2_interrupt_between_create_and_bookkeeping_rolls_back
-test_r2_symlinked_info_dir_is_untouched
-test_r2_symlinked_exclude_is_untouched
-test_r2_real_codex_execpolicy_probes
-test_r3_signal_after_successful_start_keeps_member_and_layer
-test_r3_stale_policy_lock_from_dead_holder_is_broken
-test_r3_live_policy_lock_is_respected_and_error_says_how_to_recover
+TEST_FUNCS=()
+TEST_GROUPS=()
+CASE_GROUP="core"
+
+register_test() { # register_test <function_name>
+  TEST_FUNCS+=("$1")
+  TEST_GROUPS+=("$CASE_GROUP")
+}
+
+register_test test_ac12_bash_n_under_bash32
+register_test test_ac13_pane_closed_on_failure_after_split
+register_test test_ac13_worktree_orphaned_never_removed
+register_test test_ac13_in_pane_never_closed_rename_reverted
+register_test test_ac14_in_pane_refuses_vim_foreground
+register_test test_ac14_in_pane_refuses_agent_occupied
+register_test test_ac14_in_pane_refuses_unparseable_process_info
+register_test test_ac14_in_pane_accepts_idle_shell
+register_test test_ac15_agent_not_ready_retained_exit3
+register_test test_ac15_other_start_error_cleaned_up_exit1
+register_test test_ac15_missing_value_for_every_option
+register_test test_ac15_unknown_option_rejected
+register_test test_ac16_claude_dangerous_flags_refused
+register_test test_ac16_codex_dangerous_flags_refused
+register_test test_ac16_override_accepted_and_recorded
+register_test test_ac17_registry_modes_0700_0600
+register_test test_ac17_sandbox_readonly_registry_none
+register_test test_ac17_sandbox_workspace_write_registry_workspace
+register_test test_ac18_agent_args_roundtrip_as_json_array
+register_test test_ac18_resume_args_per_kind
+register_test test_ac18_redaction_in_output_not_in_real_argv
+register_test test_ac18_stream_rejects_path_traversal_and_slash
+register_test test_ac18_registry_symlink_refused
+register_test test_ac19_preflight_flag_reports_ok
+register_test test_ac19_preflight_runs_name_and_parent_checks
+register_test test_ac19_preflight_leaves_no_registry_residue
+register_test test_ac19_version_too_old_fails_preflight
+register_test test_ac19_version_ok_passes_preflight
+register_test test_ac19_t4_preflight_reports_herdr_unreachable_on_eperm
+register_test test_ac19_t4_preflight_reports_herdr_unreachable_on_non_json
+register_test test_ac19_t4_real_spawn_creates_nothing_when_herdr_unreachable
+register_test test_ac19_sandbox_hint_reported_both_ok_and_failing
+register_test test_ac19_reachable_with_unnamed_parent_still_ok
+register_test test_ac19_help_documents_herdr_unreachable
+register_test test_t8_record_session_appends_row_claude
+register_test test_t8_record_session_appends_row_codex
+register_test test_t9_record_session_uses_herdr_when_session_id_omitted
+register_test test_t9_record_session_null_herdr_session_no_flag_fails
+register_test test_t8_record_session_unknown_member_rejected
+register_test test_t8_record_session_symlinked_registry_refused
+register_test test_t8_record_session_preflight_conflict_refused
+register_test test_t8_record_session_help_documents_contract
+register_test test_record_session_status_is_current_never_stale
+register_test test_l1_beside_resolves_live_agent_name
+register_test test_l1_beside_resolves_registered_shell_name
+register_test test_l1_beside_resolves_literal_pane_id
+register_test test_l1_beside_unknown_anchor_refused
+register_test test_item10_help_documents_new_contract
+register_test test_stage0_codex_layer_written_with_resolved_herdr_path
+register_test test_stage0_differing_rules_refused_without_overwrite
+register_test test_stage0_info_exclude_normal_checkout_idempotent
+register_test test_stage0_info_exclude_linked_worktree_idempotent
+register_test test_stage0_codex_requires_never_and_injects_when_absent
+register_test test_stage0_no_isolation_writes_nothing_and_reports_none
+register_test test_stage0_claude_disallowed_tools_merged_once
+register_test test_stage0_claude_default_keeps_sendmessage
+register_test test_stage0_claude_strict_isolation_denies_sendmessage
+register_test test_stage0_claude_caller_denied_sendmessage_is_reported
+register_test test_stage0_strict_isolation_conflicts_with_no_isolation
+register_test test_stage0_strict_isolation_refused_for_shell
+register_test test_stage0_strict_isolation_accepted_for_codex
+register_test test_surface_codex_isolated_disables_connectors_and_web
+register_test test_surface_codex_mcp_overrides_come_from_config_headers
+register_test test_surface_codex_home_env_is_honoured
+register_test test_surface_unsafe_mcp_server_name_refuses_spawn
+register_test test_surface_no_isolation_adds_no_surface_flags
+register_test test_surface_caller_cannot_reenable_a_feature
+register_test test_stage0_preflight_reports_isolation_without_writing_layer
+register_test test_stage0_failure_cleanup_removes_written_policy_layer
+register_test test_stage0_in_pane_uses_actual_pane_cwd
+register_test test_f1_three_resolved_execpolicy_checks
+register_test test_f1_null_execpolicy_answer_downgrades_with_probe_reason
+register_test test_f2_all_sandbox_removal_spellings_refused
+register_test test_f3_all_approval_flag_spellings_refused
+register_test test_f3_all_approval_config_spellings_refused
+register_test test_f3_profiles_require_explicit_safe_sandbox_and_are_reported
+register_test test_f3_approve_for_me_refused
+register_test test_f4_all_policy_path_symlinks_refused_before_creation
+register_test test_f4_identical_preexisting_rules_survive_rollback
+register_test test_f4_preexisting_empty_codex_dir_survives_rollback
+register_test test_f5_exclude_without_trailing_newline_is_not_glued
+register_test test_f5_preexisting_exclude_line_is_not_owned_or_removed
+register_test test_f6_tracked_conflict_in_base_refused_before_worktree_creation
+register_test test_f7_stub_absolute_match_also_requires_forbidden_prefix
+register_test test_r2_allowlist_sandbox_spellings
+register_test test_r2_allowlist_approval_spellings
+register_test test_r2_allowlist_model_spellings
+register_test test_r2_allowlist_profile_spellings_with_sandbox
+register_test test_r2_allowlist_add_dir_spellings
+register_test test_r2_allowlist_config_keys_and_spellings
+register_test test_r2_allowlist_resume_last_tokens
+register_test test_r2_refuses_quoted_unsafe_config_key
+register_test test_r2_refuses_config_table_value
+register_test test_r2_refuses_yolo_even_with_dangerous_override
+register_test test_r2_refuses_search
+register_test test_r2_refuses_cd
+register_test test_r2_refuses_exec_subcommand
+register_test test_r2_refuses_bare_prompt
+register_test test_r2_refuses_profile_without_sandbox
+register_test test_r2_refuses_full_auto
+register_test test_r2_effective_args_and_json_argv_boundaries
+register_test test_r2_claude_only_barrier_detail
+register_test test_r3_claude_unset_permission_mode_is_not_called_effective
+register_test test_r3_claude_prompting_mode_from_args_is_labelled
+register_test test_r2_policy_lock_second_spawn_waits_then_succeeds
+register_test test_r2_policy_lock_timeout_is_clear
+register_test test_r2_interrupt_between_create_and_bookkeeping_rolls_back
+register_test test_r2_symlinked_info_dir_is_untouched
+register_test test_r2_symlinked_exclude_is_untouched
+register_test test_r2_real_codex_execpolicy_probes
+register_test test_r3_signal_after_successful_start_keeps_member_and_layer
+register_test test_r3_stale_policy_lock_from_dead_holder_is_broken
+register_test test_r3_live_policy_lock_is_respected_and_error_says_how_to_recover
+
+# --- case discovery: cases/*.sh, sorted; each file's stem is its group -------------------
+CASE_FILE=""
+for CASE_FILE in "$HERE"/cases/*.sh; do
+  [ -e "$CASE_FILE" ] || continue
+  CASE_GROUP="$(basename "$CASE_FILE" .sh)"
+  . "$CASE_FILE"
+done
+CASE_GROUP="core"
+
+if [ "$LIST_ONLY" -eq 1 ]; then
+  i=0
+  while [ "$i" -lt "${#TEST_FUNCS[@]}" ]; do
+    echo "${TEST_FUNCS[$i]#test_} ${TEST_GROUPS[$i]}"
+    i=$((i + 1))
+  done
+  exit 0
+fi
+
+i=0
+while [ "$i" -lt "${#TEST_FUNCS[@]}" ]; do
+  if [ -z "$ONLY_GROUP" ] || [ "${TEST_GROUPS[$i]}" = "$ONLY_GROUP" ]; then
+    "${TEST_FUNCS[$i]}"
+  fi
+  i=$((i + 1))
+done
 
 TOTAL=$((PASS + FAIL))
 if [ "$FAIL" -eq 0 ]; then
