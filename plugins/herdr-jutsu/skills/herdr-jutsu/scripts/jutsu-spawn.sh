@@ -52,6 +52,8 @@ Options:
                                effect on kind=codex (it has no SendMessage); refused with
                                --no-isolation or kind=shell (conflicting_options). Must
                                appear before `--`.
+  --a2a                        enable guarded peer messaging for this member
+  --peer NAME                  permit a named peer (repeatable; requires --a2a)
   --preflight                  run the environment checks, print the result JSON line, create
                                nothing (cannot be combined with --record-session:
                                conflicting_options)
@@ -209,6 +211,8 @@ NAME="" KIND="" WHERE="pane" WORKTREE="" BASE="" IN_PANE="" BESIDE="" DIRECTION=
 CWD="$PWD" STREAM="" ISSUE="" CMD="" TIMEOUT=60000
 FOCUS_ARG=(--no-focus)
 ALLOW_DANGEROUS=0 NO_ISOLATION=0 STRICT_ISOLATION=0 PREFLIGHT_ONLY=0 RECORD_SESSION=0 SESSION_ID_ARG=""
+A2A=0
+PEERS=()
 AGENT_ARGS=()
 
 while [ $# -gt 0 ]; do
@@ -231,6 +235,8 @@ while [ $# -gt 0 ]; do
     --allow-dangerous-agent-flags) ALLOW_DANGEROUS=1; shift ;;
     --no-isolation) NO_ISOLATION=1; shift ;;
     --strict-isolation) STRICT_ISOLATION=1; shift ;;
+    --a2a) A2A=1; shift ;;
+    --peer) need_value "$1" $#; PEERS+=("$2"); shift 2 ;;
     --preflight) PREFLIGHT_ONLY=1; shift ;;
     --record-session) RECORD_SESSION=1; shift ;;
     --session-id) need_value "$1" $#; SESSION_ID_ARG="$2"; shift 2 ;;
@@ -239,6 +245,52 @@ while [ $# -gt 0 ]; do
     *) fail unknown_option "unknown option: $1" 2 ;;
   esac
 done
+
+# A2A compatibility errors are request-shape errors and must be decided before any
+# environment probing can create a registry path or contact herdr.
+if [ "${#PEERS[@]}" -gt 0 ] && [ "$A2A" -ne 1 ]; then
+  fail a2a_required "--peer requires --a2a" 2
+fi
+if [ "$A2A" -eq 1 ] && [ "$RECORD_SESSION" -eq 1 ]; then
+  fail a2a_not_applicable "--a2a does not apply to --record-session" 2
+fi
+if [ "$A2A" -eq 1 ] && [ "$KIND" = shell ]; then
+  fail a2a_kind_unsupported "--a2a supports only claude and codex members" 2
+fi
+if [ "$A2A" -eq 1 ] && [ "$NO_ISOLATION" -eq 1 ]; then
+  fail a2a_requires_isolation "--a2a requires outbound isolation" 5
+fi
+
+A2A_SEEN_PEERS=()
+for a2a_peer in ${PEERS[@]+"${PEERS[@]}"}; do
+  [[ "$a2a_peer" =~ ^[a-z][a-z0-9_-]{0,31}$ ]] \
+    || fail bad_peer_name "--peer must match ^[a-z][a-z0-9_-]{0,31}$: $a2a_peer" 2
+  [ "$a2a_peer" != "$NAME" ] || fail peer_is_self "a member cannot name itself as a peer: $a2a_peer" 2
+  for a2a_seen in ${A2A_SEEN_PEERS[@]+"${A2A_SEEN_PEERS[@]}"}; do
+    [ "$a2a_seen" != "$a2a_peer" ] || fail duplicate_peer "duplicate --peer: $a2a_peer" 2
+  done
+  A2A_SEEN_PEERS+=("$a2a_peer")
+done
+
+if [ "$A2A" -eq 1 ]; then
+  a2a_i=0
+  while [ "$a2a_i" -lt "${#AGENT_ARGS[@]}" ]; do
+    a2a_arg="${AGENT_ARGS[$a2a_i]}"
+    a2a_next=""
+    [ $((a2a_i + 1)) -ge "${#AGENT_ARGS[@]}" ] || a2a_next="${AGENT_ARGS[$((a2a_i + 1))]}"
+    case "$a2a_arg" in
+      --mcp-config|--mcp-config=*|--strict-mcp-config|--allowedTools|--allowedTools=*)
+        fail a2a_arg_conflict "--a2a owns the member MCP configuration and allowed tool entry" 5 ;;
+      mcp_servers.*)
+        fail a2a_arg_conflict "--a2a owns mcp_servers.* configuration" 5 ;;
+      -c|--config)
+        case "$a2a_next" in mcp_servers.*) fail a2a_arg_conflict "--a2a owns mcp_servers.* configuration" 5 ;; esac ;;
+      -c=*|--config=*)
+        case "${a2a_arg#*=}" in mcp_servers.*) fail a2a_arg_conflict "--a2a owns mcp_servers.* configuration" 5 ;; esac ;;
+    esac
+    a2a_i=$((a2a_i + 1))
+  done
+fi
 
 # --preflight and --record-session contradict each other: --preflight promises to create
 # nothing, --record-session exists to append a row. Refuse the pair instead of letting one
@@ -649,7 +701,7 @@ REGISTRY_MODE=none REG_DIR="" REG_FILE=""
 # --preflight (creates nothing at all) and --record-session (only ever appends to a file
 # that already holds the member's row).
 NO_CREATE=0
-if [ "$PREFLIGHT_ONLY" -eq 1 ] || [ "$RECORD_SESSION" -eq 1 ]; then NO_CREATE=1; fi
+if [ "$PREFLIGHT_ONLY" -eq 1 ] || [ "$RECORD_SESSION" -eq 1 ] || [ "$A2A" -eq 1 ]; then NO_CREATE=1; fi
 
 try_state_dir() { # try_state_dir <dir> <home|workspace>
   local d="$1" mode="$2" f probe
@@ -692,6 +744,55 @@ resolve_registry() {
   return 0
 }
 resolve_registry
+
+# A2A can never fall back to workspace-local or unrecorded state. Resolve and validate
+# all executable and parent-socket inputs while registry resolution is still non-creating.
+A2A_DIR=""
+A2A_NODE="" A2A_CODEX="" A2A_HERDR=""
+absolute_command() { # absolute_command <name>
+  local p d b resolved
+  p="$(command -v "$1" 2>/dev/null || true)"
+  [ -n "$p" ] || return 1
+  case "$p" in
+    /*) ;;
+    *) d="$(dirname "$p")"; b="$(basename "$p")"; p="$(cd "$d" 2>/dev/null && pwd -P)/$b" ;;
+  esac
+  resolved="$(realpath "$p" 2>/dev/null || true)"
+  printf '%s' "${resolved:-$p}"
+}
+
+path_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null || return 1; }
+trusted_executable() { # trusted_executable <absolute-path>
+  local p="$1" target mode pair group world
+  for target in "$p" "$(dirname "$p")"; do
+    [ -e "$target" ] || return 1
+    mode="$(path_mode "$target")" || return 1
+    pair="${mode#${mode%??}}"
+    group="${pair%?}"; world="${pair#?}"
+    case "$group" in 2|3|6|7) return 1 ;; esac
+    case "$world" in 2|3|6|7) return 1 ;; esac
+  done
+  [ -f "$p" ] && [ -x "$p" ]
+}
+
+if [ "$A2A" -eq 1 ]; then
+  [ "$REGISTRY_MODE" = home ] || fail a2a_registry_unsuitable \
+    "--a2a requires home registry storage; resolved mode is $REGISTRY_MODE" 4
+  [ -n "${CLAUDE_CODE_MESSAGING_SOCKET:-}" ] || fail a2a_parent_unreachable \
+    "--a2a requires the parent CLAUDE_CODE_MESSAGING_SOCKET" 4
+  A2A_NODE="$(absolute_command node || true)"
+  [ -n "$A2A_NODE" ] || fail a2a_runtime_missing "--a2a requires node >= 20" 4
+  A2A_NODE_VERSION="$($A2A_NODE -p 'process.versions.node' 2>/dev/null || true)"
+  ver_ge "$A2A_NODE_VERSION" 20.0.0 || fail a2a_runtime_missing \
+    "--a2a requires node >= 20 (found ${A2A_NODE_VERSION:-unreadable})" 4
+  A2A_CODEX="$(absolute_command codex || true)"
+  A2A_HERDR="$(absolute_command herdr || true)"
+  for A2A_EXEC in "$A2A_NODE" "$A2A_CODEX" "$A2A_HERDR"; do
+    [ -n "$A2A_EXEC" ] && trusted_executable "$A2A_EXEC" || fail a2a_untrusted_executable \
+      "A2A executable is missing, non-absolute, or group/world-writable (as is its directory): ${A2A_EXEC:-unresolved}" 5
+  done
+  A2A_DIR="$REG_DIR/a2a"
+fi
 
 if [ "$REGISTRY_MODE" = none ]; then
   emit_warning registry_unavailable \
@@ -788,6 +889,85 @@ fi
 
 PARENT="$(printf '%s' "$AGENTS_JSON" \
   | jq -r --arg p "${HERDR_PANE_ID:-}" '.result.agents[]? | select(.pane_id == $p) | .name // empty' 2>/dev/null | head -n1)"
+
+path_contains() { # path_contains <outer> <inner>; callers pass canonical absolute paths
+  local outer="${1%/}" inner="${2%/}"
+  [ "$inner" = "$outer" ] || case "$inner" in "$outer"/*) return 0 ;; *) return 1 ;; esac
+}
+
+canonical_path() { # canonical_path <possibly-not-yet-created-path>
+  local p="$1" suffix="" base parent resolved
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  while [ ! -e "$p" ]; do
+    base="$(basename "$p")"; parent="$(dirname "$p")"
+    suffix="/$base$suffix"
+    [ "$parent" != "$p" ] || break
+    p="$parent"
+  done
+  if [ -d "$p" ]; then resolved="$(cd "$p" 2>/dev/null && pwd -P)"; else resolved="$(realpath "$p" 2>/dev/null || printf '%s' "$p")"; fi
+  printf '%s%s' "$resolved" "$suffix"
+}
+
+if [ "$A2A" -eq 1 ]; then
+  # AC-32 deliberately precedes the socket-length check: an overlapping storage request
+  # is rejected for the overlap even when its derived socket path is also long.
+  A2A_DIR="$(canonical_path "$A2A_DIR")"
+  A2A_WRITE_ROOTS=("$CWD")
+  if [ -n "$WORKTREE" ]; then A2A_WRITE_ROOTS+=("$CWD/.jutsu-worktrees/$WORKTREE"); fi
+  A2A_I=0
+  while [ "$A2A_I" -lt "${#AGENT_ARGS[@]}" ]; do
+    A2A_ARG="${AGENT_ARGS[$A2A_I]}"
+    case "$A2A_ARG" in
+      --add-dir)
+        if [ $((A2A_I + 1)) -lt "${#AGENT_ARGS[@]}" ]; then
+          A2A_WRITE_ROOTS+=("${AGENT_ARGS[$((A2A_I + 1))]}")
+          A2A_I=$((A2A_I + 1))
+        fi ;;
+      --add-dir=*) A2A_WRITE_ROOTS+=("${A2A_ARG#*=}") ;;
+    esac
+    A2A_I=$((A2A_I + 1))
+  done
+  for A2A_ROOT in ${A2A_WRITE_ROOTS[@]+"${A2A_WRITE_ROOTS[@]}"}; do
+    case "$A2A_ROOT" in /*) ;; *) A2A_ROOT="$CWD/$A2A_ROOT" ;; esac
+    A2A_ROOT="$(canonical_path "$A2A_ROOT")"
+    if path_contains "$A2A_ROOT" "$A2A_DIR" || path_contains "$A2A_DIR" "$A2A_ROOT"; then
+      fail a2a_storage_in_write_root \
+        "A2A storage and member write roots must be disjoint: $A2A_DIR / $A2A_ROOT" 5
+    fi
+  done
+
+  A2A_SOCKET="$A2A_DIR/sock/$NAME.sock"
+  A2A_SOCKET_BYTES="$(LC_ALL=C printf '%s' "$A2A_SOCKET" | wc -c | tr -d '[:space:]')"
+  [ "$A2A_SOCKET_BYTES" -le 100 ] || fail socket_path_too_long \
+    "member socket path is $A2A_SOCKET_BYTES bytes (maximum 100): $A2A_SOCKET" 5
+  [ -n "$PARENT" ] || fail a2a_parent_unnamed \
+    "the parent pane ${HERDR_PANE_ID:-<unknown>} has no herdr agent name" 4
+
+  A2A_PARENT_SOCKET="$CLAUDE_CODE_MESSAGING_SOCKET"
+  A2A_PARENT_DIR="$(dirname "$A2A_PARENT_SOCKET")"
+  [ -d "$A2A_PARENT_DIR" ] || fail a2a_parent_unreachable \
+    "parent inbox directory does not exist: $A2A_PARENT_DIR" 4
+  A2A_PARENT_MODE="$(path_mode "$A2A_PARENT_DIR" || true)"
+  A2A_PARENT_PAIR="${A2A_PARENT_MODE#${A2A_PARENT_MODE%??}}"
+  A2A_PARENT_GROUP="${A2A_PARENT_PAIR%?}"; A2A_PARENT_WORLD="${A2A_PARENT_PAIR#?}"
+  A2A_PARENT_UID="$(stat -f '%u' "$A2A_PARENT_SOCKET" 2>/dev/null || stat -c '%u' "$A2A_PARENT_SOCKET" 2>/dev/null || printf '%s' "$(id -u)")"
+  A2A_PARENT_DIR_UID="$(stat -f '%u' "$A2A_PARENT_DIR" 2>/dev/null || stat -c '%u' "$A2A_PARENT_DIR" 2>/dev/null || true)"
+  case "$A2A_PARENT_GROUP" in 2|3|6|7) fail a2a_parent_unreachable "parent socket directory is group/world-writable: $A2A_PARENT_DIR" 4 ;; esac
+  case "$A2A_PARENT_WORLD" in 2|3|6|7) fail a2a_parent_unreachable "parent socket directory is group/world-writable: $A2A_PARENT_DIR" 4 ;; esac
+  [ "$A2A_PARENT_UID" = "$(id -u)" ] && [ "$A2A_PARENT_DIR_UID" = "$(id -u)" ] \
+    || fail a2a_parent_unreachable "parent socket and directory must be owned by the current user" 4
+
+  # All refusing preflight checks have now passed. A real spawn may establish its private
+  # launcher-owned storage; --preflight retains its create-nothing contract.
+  if [ "$PREFLIGHT_ONLY" -ne 1 ]; then
+    mkdir -p "$A2A_DIR/sock" || fail storage_unsafe "could not create A2A storage: $A2A_DIR" 5
+    chmod 700 "$A2A_DIR" "$A2A_DIR/sock" 2>/dev/null || true
+    if [ ! -e "$REG_FILE" ]; then
+      ( umask 077; : >"$REG_FILE" ) || fail registry_write_failed "could not create $REG_FILE" 1
+      chmod 600 "$REG_FILE" 2>/dev/null || true
+    fi
+  fi
+fi
 
 # Every preflight check is now done and nothing has been created: --preflight reports here.
 if [ "$PREFLIGHT_ONLY" -eq 1 ]; then
