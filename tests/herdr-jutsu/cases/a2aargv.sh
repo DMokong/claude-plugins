@@ -7,6 +7,24 @@ A2A_FIXTURE_DIR="$HERE/fixtures/a2a"
 
 a2aargv_begin() {
   setup_case
+  # AC-24 adds prompt/wait calls to successful Codex A2A spawns. Keep this earlier AC-3/4
+  # case on the canonical stub and supply only those two newly required commands from a
+  # scratch wrapper (E4: AC-24 changes the behaviour this case pins).
+  local wrapper_dir="$SCRATCH/herdr-wrapper"
+  mkdir -m 700 "$wrapper_dir"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'if [ "${1:-} ${2:-}" = "agent prompt" ] || [ "${1:-} ${2:-}" = "agent wait" ]; then' \
+    '  printf "%s\n" "$*" >>"$STUB_LOG"' \
+    '  jq -cn '\''$ARGS.positional'\'' --args -- "$@" >>"$STUB_HERDR_JSON_LOG"' \
+    '  printf "%s\n" '\''{"result":{"ok":true}}'\''' \
+    '  exit 0' \
+    'fi' \
+    'exec "$A2A_ARGV_REAL_HERDR" "$@"' \
+    >"$wrapper_dir/herdr"
+  chmod 700 "$wrapper_dir/herdr"
+  export A2A_ARGV_REAL_HERDR="$STUB_DIR/herdr"
+  export PATH="$wrapper_dir:$PATH"
   export JUTSU_STATE_DIR="$SCRATCH/state"
   export STUB_AGENTS='{"result":{"agents":[{"name":"parent","kind":"claude","pane_id":"w0:p1","agent_status":"idle"}]}}'
   export CLAUDE_CODE_MESSAGING_SOCKET="$SCRATCH/p.sock"

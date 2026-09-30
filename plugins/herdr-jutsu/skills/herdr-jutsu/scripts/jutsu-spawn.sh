@@ -1215,6 +1215,50 @@ a2a_write_member() {
   a2a_release_lock
 }
 
+a2a_codex_rollout_thread() { # a2a_codex_rollout_thread <bootstrap-send-epoch>
+  local sent="$1" sessions="${CODEX_HOME:-$HOME/.codex}/sessions" list="" rollout="" head="" id=""
+  local candidates=""
+  [ -d "$sessions" ] || return 1
+  list="$(mktemp "${TMPDIR:-/tmp}/jutsu-rollouts.XXXXXX" 2>/dev/null || true)"
+  [ -n "$list" ] || return 1
+  find "$sessions" -type f -name 'rollout-*.jsonl' -print >"$list" 2>/dev/null || true
+  while IFS= read -r rollout; do
+    [ -n "$rollout" ] || continue
+    head="$(sed -n '1p' "$rollout" 2>/dev/null || true)"
+    id="$(printf '%s' "$head" | jq -r --arg cwd "$CWD" --argjson sent "$sent" '
+      .payload as $p
+      | (($p.timestamp // "") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601?) as $ts
+      | select($p.originator == "codex-tui" and $p.cwd == $cwd
+          and (($ts // -1) >= $sent) and (($p.id | type) == "string"))
+      | $p.id' 2>/dev/null || true)"
+    [ -n "$id" ] && candidates="${candidates}${id}
+"
+  done <"$list"
+  rm -f "$list"
+  [ "$(printf '%s' "$candidates" | sed '/^$/d' | wc -l | tr -d '[:space:]')" = 1 ] || return 1
+  printf '%s' "$candidates" | sed -n '1p'
+}
+
+a2a_bootstrap_codex() {
+  local prompt='A2A bootstrap: reply with exactly READY and do nothing else.' sent=0 discovered=""
+  sent="$(date -u +%s)"
+  herdr_run agent prompt "$PANE_ID" "$prompt" || return 1
+  herdr_run agent wait "$PANE_ID" --until idle --timeout "$TIMEOUT" || return 1
+
+  # Prefer herdr's post-bootstrap view. The start response is retained as a fallback for
+  # herdr versions that return the session there but omit it from a later `agent get`.
+  if herdr_run agent get "$NAME"; then
+    discovered="$(printf '%s' "$HERDR_OUT" | jq -r '.result.agent.agent_session.value // empty' 2>/dev/null || true)"
+  fi
+  [ -n "$discovered" ] || discovered="$SESSION_ID"
+  if [ -z "$discovered" ]; then
+    discovered="$(a2a_codex_rollout_thread "$sent" || true)"
+  fi
+  [ -n "$discovered" ] || return 1
+  SESSION_ID="$discovered"
+  return 0
+}
+
 build_line() { # build_line <status>
   jq -cn \
     --arg name "$NAME" --arg kind "$KIND" --arg stream "$STREAM" --arg issue "$ISSUE" \
@@ -1903,6 +1947,21 @@ TRAP_ARMED=0
 # and retained starts release it here; other failures exit through the trap, which rolls
 # back first and releases second.
 release_policy_lock
+
+if [ "$A2A" -eq 1 ] && [ "$KIND" = codex ]; then
+  if ! a2a_bootstrap_codex; then
+    # The member is already running and must remain visible to both address-book and
+    # registry readers, but an empty thread id keeps relay calls in the `not_ready` class.
+    SESSION_ID=""
+    a2a_write_member
+    LINE="$(build_line "$STATUS")"
+    append_registry "$LINE"
+    printf '%s\n' "$LINE"
+    emit_error a2a_thread_unresolved \
+      "could not resolve exactly one Codex thread after the A2A bootstrap; $NAME remains running"
+    exit 1
+  fi
+fi
 
 if [ "$A2A" -eq 1 ]; then a2a_write_member; fi
 
