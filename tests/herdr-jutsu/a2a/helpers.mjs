@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 
 export const repoRoot = path.resolve(import.meta.dirname, '../../..');
 export const relayPath = path.join(repoRoot, 'plugins/herdr-jutsu/skills/herdr-jutsu/scripts/jutsu-a2a.mjs');
+export const stubHerdrPath = path.join(import.meta.dirname, 'stub-herdr.mjs');
 
 export async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'jutsu-a2a-'));
@@ -41,7 +42,7 @@ export class McpClient {
     const args = [relayPath, 'mcp',
       '--self', options.self ?? 'alice', '--stream', options.stream,
       '--a2a-dir', options.a2aDir, '--node', process.execPath,
-      '--codex', '/bin/echo', '--herdr', '/bin/echo'];
+      '--codex', '/bin/echo', '--herdr', options.herdr ?? stubHerdrPath];
     for (const peer of options.peers ?? ['parent', 'bob']) args.push('--peer', peer);
     this.child = spawn(process.execPath, args, {
       stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...env },

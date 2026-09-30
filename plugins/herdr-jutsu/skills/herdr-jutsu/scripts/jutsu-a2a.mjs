@@ -188,7 +188,11 @@ async function pidIsSameProcess(owner) {
     if (error.code === 'ESRCH') return false;
     if (error.code !== 'EPERM') return false;
   }
-  return (await processStartTime(owner.pid)) === owner.start_time;
+  const observedStart = await processStartTime(owner.pid);
+  // A successful signal probe proves the process is live. If this sandbox
+  // denies ps, its start time cannot be verified, so conservatively retain the
+  // lock instead of breaking a potentially live holder.
+  return observedStart === null || observedStart === owner.start_time;
 }
 
 async function recoverLock(lockDir) {
@@ -255,13 +259,13 @@ async function releaseLock(lock) {
 async function openAudit(a2aDir, stream) {
   const auditPath = path.join(a2aDir, `${stream}.audit.jsonl`);
   try {
-    return await safeOpenExisting(auditPath, C.O_WRONLY | C.O_APPEND);
+    return await safeOpenExisting(auditPath, C.O_RDWR | C.O_APPEND);
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
     try {
-      return await safeCreate(auditPath, C.O_WRONLY | C.O_APPEND);
+      return await safeCreate(auditPath, C.O_RDWR | C.O_APPEND);
     } catch (createError) {
-      if (createError.code === 'EEXIST') return safeOpenExisting(auditPath, C.O_WRONLY | C.O_APPEND);
+      if (createError.code === 'EEXIST') return safeOpenExisting(auditPath, C.O_RDWR | C.O_APPEND);
       throw createError;
     }
   }
@@ -288,6 +292,11 @@ function auditEntry(config, request, result) {
 function validateBody(body) {
   if (typeof body !== 'string') throw new RelayError('bad_request');
   if (Buffer.byteLength(body, 'utf8') > 65_536) throw new RelayError('too_large');
+  // JavaScript strings can contain lone UTF-16 surrogates. Encoding those
+  // would silently insert U+FFFD, which is not a strict UTF-8 decode.
+  if (/(?:[\uD800-\uDBFF](?![\uDC00-\uDFFF]))|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(body)) {
+    throw new RelayError('bad_request');
+  }
   const cleaned = body.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '');
   if (cleaned.length === 0) throw new RelayError('bad_request');
   if (Buffer.byteLength(cleaned, 'utf8') > 8_192) throw new RelayError('too_large');
@@ -323,7 +332,9 @@ async function validateMemberSocket(config, recipient, isParent) {
 
 async function resolveSenderAndRecipient(config, request, book) {
   if (config.mode === 'mcp') {
-    if (!book.members?.[config.self]) throw new RelayError('not_ready');
+    const sender = book.members?.[config.self];
+    if (!sender || (sender.engine === 'codex' && !sender.thread_id)
+        || (sender.engine === 'claude' && !sender.socket)) throw new RelayError('not_ready');
     if (!config.peers.includes(request.to)) throw new RelayError('not_a_peer');
   } else {
     if (book.parent?.name !== config.from
@@ -341,14 +352,81 @@ async function resolveSenderAndRecipient(config, request, book) {
   return recipient;
 }
 
-async function budgetCheck(_auditHandle, _config, _request) {
-  // Task 04 owns the audit-derived budget guards. Keeping the call inside the
-  // lock fixes the serialization point for that implementation.
+async function readAuditEntries(auditHandle) {
+  let text;
+  try {
+    text = await auditHandle.readFile({ encoding: 'utf8' });
+  } catch {
+    throw storageUnsafe('cannot read audit log');
+  }
+  if (text.length === 0) return [];
+  try {
+    return text.trimEnd().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  } catch {
+    throw storageUnsafe('invalid audit log');
+  }
 }
 
-async function livenessCheck(recipient) {
-  // Task 06 wires herdr and transport-specific liveness probes here.
-  if (!recipient || typeof recipient !== 'object') throw new RelayError('recipient_unavailable');
+function isSuccessfulAudit(entry) {
+  return entry?.outcome === 'delivered' || entry?.outcome === 'queued';
+}
+
+async function budgetCheck(auditHandle, config, request) {
+  const now = nowMs();
+  const sender = config.self ?? config.from;
+  const entries = (await readAuditEntries(auditHandle)).filter((entry) => {
+    const timestamp = Date.parse(entry.ts);
+    return isSuccessfulAudit(entry) && Number.isFinite(timestamp) && timestamp <= now;
+  });
+  const within = (milliseconds) => entries.filter((entry) => now - Date.parse(entry.ts) < milliseconds);
+  const minute = within(60_000);
+  const hour = within(3_600_000);
+  if (minute.filter((entry) => entry.from === sender).length >= 6
+      || hour.filter((entry) => entry.from === sender).length >= 60) {
+    throw new RelayError('rate_limited');
+  }
+  if (minute.filter((entry) => entry.to === request.to).length >= 12) {
+    throw new RelayError('recipient_busy');
+  }
+  const pairKey = [sender, request.to].sort().join('\0');
+  if (within(1_800_000).filter((entry) => [entry.from, entry.to].sort().join('\0') === pairKey).length >= 20) {
+    throw new RelayError('pair_budget_exhausted');
+  }
+  const hourBytes = hour.reduce((total, entry) => total + (Number.isFinite(entry.bytes) ? entry.bytes : 0), 0);
+  if (hour.length >= 120 || hourBytes + Buffer.byteLength(request.body, 'utf8') > 512 * 1024) {
+    throw new RelayError('stream_budget_exhausted');
+  }
+}
+
+async function livenessCheck(config, recipient) {
+  if (!recipient || typeof recipient !== 'object' || typeof recipient.pane_id !== 'string') {
+    throw new RelayError('recipient_unavailable');
+  }
+  if (recipient.engine === 'codex' && !recipient.thread_id) throw new RelayError('recipient_unavailable');
+  if (recipient.engine === 'claude') {
+    if (typeof recipient.socket !== 'string') throw new RelayError('recipient_unavailable');
+    const socketStubbed = process.env.A2A_TEST_MODE === '1'
+      && process.env.A2A_TEST_SOCKET_PATH === recipient.socket;
+    if (!socketStubbed) {
+      try {
+        if (!(await fsp.lstat(recipient.socket)).isSocket()) throw new Error('not a socket');
+      } catch {
+        throw new RelayError('recipient_unavailable');
+      }
+    }
+  }
+  try {
+    const { stdout } = await execFileAsync(config.herdr, ['agent', 'get', recipient.pane_id], {
+      encoding: 'utf8', timeout: 5_000, maxBuffer: 1024 * 1024,
+    });
+    const parsed = JSON.parse(stdout);
+    const agent = parsed?.result?.agent;
+    if (!agent || agent.name !== recipient.name || (agent.engine ?? agent.kind) !== recipient.engine) {
+      throw new Error('agent mismatch');
+    }
+  } catch {
+    throw new RelayError('recipient_unavailable');
+  }
 }
 
 async function deliver(recipient) {
@@ -372,9 +450,20 @@ async function recordEarlyRefusal(config, request, error) {
 }
 
 async function relay(config, rawRequest) {
+  let request;
+  try {
+    request = { to: rawRequest.to, body: validateBody(rawRequest.body) };
+    if (typeof request.to !== 'string' || request.to.length === 0) throw new RelayError('bad_request');
+  } catch (error) {
+    const relayError = error instanceof RelayError ? error : new RelayError('bad_request');
+    await ensureA2aDir(config.a2aDir);
+    await recordEarlyRefusal(config, {
+      to: typeof rawRequest.to === 'string' ? rawRequest.to : '',
+      body: typeof rawRequest.body === 'string' ? rawRequest.body : '',
+    }, relayError);
+    throw relayError;
+  }
   await ensureA2aDir(config.a2aDir);
-  const request = { to: rawRequest.to, body: validateBody(rawRequest.body) };
-  if (typeof request.to !== 'string' || request.to.length === 0) throw new RelayError('bad_request');
 
   let lock;
   let audit;
@@ -390,7 +479,7 @@ async function relay(config, rawRequest) {
     const book = await addressBook(config);
     const recipient = await resolveSenderAndRecipient(config, request, book);
     await budgetCheck(audit, config, request);
-    await livenessCheck(recipient);
+    await livenessCheck(config, { ...recipient, name: request.to });
     const result = await deliver(recipient, config, request);
     await appendAudit(audit, auditEntry(config, request, { ...result, reason: null }));
     return { ...result, reason: null };
@@ -501,6 +590,7 @@ async function readBodyFile(file) {
   const handle = await safeOpenExisting(file);
   try {
     const bytes = await handle.readFile();
+    if (bytes.byteLength > 65_536) throw new RelayError('too_large');
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   } catch (error) {
     if (error instanceof RelayError) throw error;
@@ -513,12 +603,24 @@ async function readBodyFile(file) {
 async function sendMode(args) {
   const config = parseOptions(args, {
     '--a2a-dir': 'a2aDir', '--stream': 'stream', '--from': 'from', '--to': 'to',
-    '--body': 'body', '--body-file': 'bodyFile',
+    '--body': 'body', '--body-file': 'bodyFile', '--herdr': 'herdr',
   });
   requireOptions(config, ['a2aDir', 'stream', 'from', 'to']);
   if ((config.body === undefined) === (config.bodyFile === undefined)) throw new RelayError('bad_arguments');
   config.mode = 'send';
-  const body = config.bodyFile ? await readBodyFile(config.bodyFile) : config.body;
+  // The documented parent CLI deliberately has no executable-path flag. The
+  // launcher supplies an absolute path to MCP children; an interactive parent
+  // resolves its own trusted herdr command in the normal shell environment.
+  config.herdr ??= 'herdr';
+  let body;
+  try {
+    body = config.bodyFile ? await readBodyFile(config.bodyFile) : config.body;
+  } catch (error) {
+    const relayError = error instanceof RelayError ? error : new RelayError('bad_request');
+    await ensureA2aDir(config.a2aDir);
+    await recordEarlyRefusal(config, { to: config.to, body: '' }, relayError);
+    throw relayError;
+  }
   const result = await relay(config, { to: config.to, body });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
