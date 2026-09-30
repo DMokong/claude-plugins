@@ -1145,15 +1145,20 @@ test_stage0_codex_layer_written_with_resolved_herdr_path() {
   setup_case
   run_spawn --name stage0-layer --kind codex --cwd "$REPO_DIR" -- -s read-only
   [ "$CODE" -eq 0 ] || { fail_case "expected exit 0, got $CODE: $(cat "$ERR_FILE")"; teardown_case; return; }
-  local rules resolved
+  local rules resolved resolved_codex
   rules="$REPO_DIR/.codex/rules/herdr-jutsu-deny.rules"
   resolved="$(command -v herdr)"
+  resolved_codex="$(command -v codex)"
   [ -f "$REPO_DIR/.codex/config.toml" ] || { fail_case "missing .codex/config.toml"; teardown_case; return; }
   [ -f "$rules" ] || { fail_case "missing $rules"; teardown_case; return; }
   grep -Fq "host_executable(name=\"herdr\", paths=[\"$resolved\"])" "$rules" \
     || { fail_case "rules file does not contain resolved herdr path $resolved: $(cat "$rules")"; teardown_case; return; }
   grep -Fq 'prefix_rule(pattern=["herdr"], decision="forbidden", justification="Crew members do not drive herdr; the parent pulls from this pane.")' "$rules" \
     || { fail_case "rules file lacks the broad forbidden prefix rule: $(cat "$rules")"; teardown_case; return; }
+  grep -Fq "host_executable(name=\"codex\", paths=[\"$resolved_codex\"])" "$rules" \
+    || { fail_case "rules file does not contain resolved codex path $resolved_codex: $(cat "$rules")"; teardown_case; return; }
+  grep -Fq 'prefix_rule(pattern=["codex","queue"], decision="forbidden"' "$rules" \
+    || { fail_case "rules file lacks the codex queue forbidden rule: $(cat "$rules")"; teardown_case; return; }
   [ -s "$STUB_CODEX_LOG" ] \
     || { fail_case "the written rule was not statically checked with codex execpolicy"; teardown_case; return; }
   [ "$(stdout_field '.outbound_isolation')" = "enforced_if_trusted" ] \
@@ -1693,7 +1698,7 @@ test_f4_all_policy_path_symlinks_refused_before_creation() {
 test_f4_identical_preexisting_rules_survive_rollback() {
   CURRENT_TEST="f4_identical_preexisting_rules_survive_rollback"
   setup_case
-  local rules resolved before after checks
+  local rules resolved resolved_codex before after checks expected
   rules="$REPO_DIR/.codex/rules/herdr-jutsu-deny.rules"
   resolved="$(command -v herdr)"
   mkdir -p "$(dirname "$rules")"
@@ -1701,12 +1706,20 @@ test_f4_identical_preexisting_rules_survive_rollback() {
     "host_executable(name=\"herdr\", paths=[\"$resolved\"])" \
     'prefix_rule(pattern=["herdr"], decision="forbidden", justification="Crew members do not drive herdr; the parent pulls from this pane.")' >"$rules"
   before="$(cksum <"$rules")"
+  resolved_codex="$(command -v codex)"
+  expected="$(printf '%s\n%s\n%s\n%s' \
+    "host_executable(name=\"herdr\", paths=[\"$resolved\"])" \
+    'prefix_rule(pattern=["herdr"], decision="forbidden", justification="Crew members do not drive herdr; the parent pulls from this pane.")' \
+    "host_executable(name=\"codex\", paths=[\"$resolved_codex\"])" \
+    'prefix_rule(pattern=["codex","queue"], decision="forbidden", justification="Crew members use the guarded herdr-jutsu A2A relay; direct Codex queue delivery is forbidden.")')"
   export STUB_AGENT_START_ERROR=invalid_arguments
   run_spawn --name f4-identical --kind codex --cwd "$REPO_DIR"
   [ "$CODE" -eq 1 ] || { fail_case "expected post-policy start failure, got $CODE: $(cat "$ERR_FILE")"; teardown_case; return; }
   [ -f "$rules" ] || { fail_case "pre-existing identical rules file was deleted"; teardown_case; return; }
   after="$(cksum <"$rules")"
-  [ "$after" = "$before" ] || { fail_case "pre-existing identical rules file changed"; teardown_case; return; }
+  [ "$after" != "$before" ] || { fail_case "exact 0.4.0 rules were not migrated to policy v2"; teardown_case; return; }
+  [ "$(cat "$rules")" = "$expected" ] \
+    || { fail_case "migrated policy v2 did not survive post-policy rollback: $(cat "$rules")"; teardown_case; return; }
   checks="$(wc -l <"$STUB_CODEX_LOG" | tr -d ' ')"
   [ "$checks" -eq 3 ] || { fail_case "setup did not exercise all three policy checks; got $checks"; teardown_case; return; }
   ok "$CURRENT_TEST"
@@ -2256,13 +2269,16 @@ test_r2_real_codex_execpolicy_probes() {
   setup_case
   run_spawn --name r2-real-policy --kind codex --cwd "$REPO_DIR"
   [ "$CODE" -eq 0 ] || { fail_case "generator spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
-  local rules="$REPO_DIR/.codex/rules/herdr-jutsu-deny.rules" resolved output label
+  local rules="$REPO_DIR/.codex/rules/herdr-jutsu-deny.rules" resolved resolved_codex output label
   resolved="$(command -v herdr)"
-  for label in bare absolute group; do
+  resolved_codex="$(command -v codex)"
+  for label in bare absolute group codex-bare codex-absolute; do
     case "$label" in
       bare) output="$("$real_codex" execpolicy check --rules "$rules" --resolve-host-executables -- herdr agent prompt x y 2>&1)" ;;
       absolute) output="$("$real_codex" execpolicy check --rules "$rules" --resolve-host-executables -- "$resolved" agent prompt x y 2>&1)" ;;
       group) output="$("$real_codex" execpolicy check --rules "$rules" --resolve-host-executables -- herdr workspace list 2>&1)" ;;
+      codex-bare) output="$("$real_codex" execpolicy check --rules "$rules" --resolve-host-executables -- codex queue --thread x --message y 2>&1)" ;;
+      codex-absolute) output="$("$real_codex" execpolicy check --rules "$rules" --resolve-host-executables -- "$resolved_codex" queue --thread x --message y 2>&1)" ;;
     esac
     printf '%s\n' "$output" | jq -R 'fromjson?' 2>/dev/null \
       | jq -se 'any(.[]; .decision == "forbidden")' >/dev/null 2>&1 \

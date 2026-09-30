@@ -1090,7 +1090,7 @@ CREATED_PANE=""          # a pane/tab/workspace root THIS run created -> closabl
 IN_PANE_ID="" IN_PANE_LABEL="" IN_PANE_RENAMED=0
 SESSION_ID="" STATUS=""
 TRAP_ARMED=0
-POLICY_RULE_FILE="" POLICY_CONFIG_FILE="" POLICY_EXCLUDE_FILE=""
+POLICY_RULE_FILE="" POLICY_RULE_TMP="" POLICY_CONFIG_FILE="" POLICY_EXCLUDE_FILE=""
 POLICY_RULE_CREATED=0 POLICY_CONFIG_CREATED=0
 POLICY_CODEX_DIR_CREATED=0 POLICY_RULES_DIR_CREATED=0
 POLICY_RULE_INTENT=0 POLICY_CONFIG_INTENT=0
@@ -1274,6 +1274,10 @@ remove_owned_line() { # remove_owned_line <file> <line> <line-number> <restore-n
 
 cleanup_policy_layer() {
   # Reverse creation order, and only remove resources this invocation proved it created.
+  if [ -n "$POLICY_RULE_TMP" ]; then
+    rm -f "$POLICY_RULE_TMP" 2>/dev/null || true
+    POLICY_RULE_TMP=""
+  fi
   if [ "$POLICY_CONFIG_EXCLUDE_ADDED" -eq 1 ]; then
     remove_owned_line "$POLICY_EXCLUDE_FILE" '.codex/config.toml' \
       "$POLICY_CONFIG_EXCLUDE_LINE" "$POLICY_CONFIG_EXCLUDE_NEWLINE"
@@ -1459,12 +1463,27 @@ append_exclude_once() { # append_exclude_once <file> <entry> <tracking-variable-
   return 0
 }
 
-codex_rules_content() { # codex_rules_content <resolved-herdr-path>
+codex_rules_v1_content() { # codex_rules_v1_content <resolved-herdr-path>
   local escaped_path
   escaped_path="$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
   printf '%s\n%s' \
     "host_executable(name=\"herdr\", paths=[\"$escaped_path\"])" \
     'prefix_rule(pattern=["herdr"], decision="forbidden", justification="Crew members do not drive herdr; the parent pulls from this pane.")'
+}
+
+codex_rules_content() { # codex_rules_content <resolved-herdr-path> <resolved-codex-path>
+  local escaped_herdr escaped_codex
+  escaped_herdr="$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  escaped_codex="$(printf '%s' "$2" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  printf '%s\n%s\n%s\n%s' \
+    "host_executable(name=\"herdr\", paths=[\"$escaped_herdr\"])" \
+    'prefix_rule(pattern=["herdr"], decision="forbidden", justification="Crew members do not drive herdr; the parent pulls from this pane.")' \
+    "host_executable(name=\"codex\", paths=[\"$escaped_codex\"])" \
+    'prefix_rule(pattern=["codex","queue"], decision="forbidden", justification="Crew members use the guarded herdr-jutsu A2A relay; direct Codex queue delivery is forbidden.")'
+}
+
+policy_file_matches() { # policy_file_matches <file> <content>; includes the final newline
+  cmp -s "$1" <(printf '%s\n' "$2")
 }
 
 policy_conflict() { # policy_conflict <message>; post-placement conflicts orphan worktrees
@@ -1473,8 +1492,8 @@ policy_conflict() { # policy_conflict <message>; post-placement conflicts orphan
   fail isolation_policy_conflict "$1" "$status"
 }
 
-validate_policy_paths() { # validate_policy_paths <cwd> <expected-rules>
-  local root="$1" expected="$2" codex_dir rules_dir rule_file config_file existing=""
+validate_policy_paths() { # validate_policy_paths <cwd> <current-rules> <v0.4.0-rules>
+  local root="$1" expected="$2" legacy="$3" codex_dir rules_dir rule_file config_file
   codex_dir="$root/.codex"
   rules_dir="$codex_dir/rules"
   rule_file="$rules_dir/herdr-jutsu-deny.rules"
@@ -1494,8 +1513,9 @@ validate_policy_paths() { # validate_policy_paths <cwd> <expected-rules>
   fi
   if [ -e "$rule_file" ]; then
     [ -f "$rule_file" ] || policy_conflict "Codex isolation policy is not a regular file: $rule_file"
-    existing="$(cat "$rule_file" 2>/dev/null || true)"
-    [ "$existing" = "$expected" ] || policy_conflict \
+    policy_file_matches "$rule_file" "$expected" \
+      || policy_file_matches "$rule_file" "$legacy" \
+      || policy_conflict \
       "refusing to overwrite a differing Codex isolation policy: $rule_file"
   fi
 }
@@ -1551,7 +1571,7 @@ acquire_policy_lock() {
 }
 
 install_codex_policy() {
-  local herdr_path rules_content existing
+  local herdr_path codex_path rules_content legacy_rules_content
   local git_top exclude exclude_dir codex_dir rules_dir
 
   [ "$KIND" = codex ] || return 0
@@ -1562,13 +1582,19 @@ install_codex_policy() {
     degrade_codex_isolation "could not resolve the herdr executable for the Codex deny policy"
     return 0
   fi
-  rules_content="$(codex_rules_content "$herdr_path")"
+  codex_path="$(command -v codex 2>/dev/null || true)"
+  if [ -z "$codex_path" ]; then
+    degrade_codex_isolation "could not resolve the codex executable for the Codex deny policy"
+    return 0
+  fi
+  rules_content="$(codex_rules_content "$herdr_path" "$codex_path")"
+  legacy_rules_content="$(codex_rules_v1_content "$herdr_path")"
 
   POLICY_CONFIG_FILE="$CWD/.codex/config.toml"
   POLICY_RULE_FILE="$CWD/.codex/rules/herdr-jutsu-deny.rules"
   codex_dir="$CWD/.codex"
   rules_dir="$codex_dir/rules"
-  validate_policy_paths "$CWD" "$rules_content"
+  validate_policy_paths "$CWD" "$rules_content" "$legacy_rules_content"
 
   if [ ! -d "$codex_dir" ]; then
     POLICY_CODEX_DIR_INTENT=1
@@ -1577,7 +1603,7 @@ install_codex_policy() {
       POLICY_CODEX_DIR_INTENT=0
     else
       POLICY_CODEX_DIR_INTENT=0
-      validate_policy_paths "$CWD" "$rules_content"
+      validate_policy_paths "$CWD" "$rules_content" "$legacy_rules_content"
       [ -d "$codex_dir" ] || { degrade_codex_isolation "could not create $codex_dir"; return 0; }
     fi
   fi
@@ -1588,7 +1614,7 @@ install_codex_policy() {
       POLICY_RULES_DIR_INTENT=0
     else
       POLICY_RULES_DIR_INTENT=0
-      validate_policy_paths "$CWD" "$rules_content"
+      validate_policy_paths "$CWD" "$rules_content" "$legacy_rules_content"
       [ -d "$rules_dir" ] || { degrade_codex_isolation "could not create $rules_dir"; return 0; }
     fi
   fi
@@ -1602,15 +1628,28 @@ install_codex_policy() {
       POLICY_CONFIG_INTENT=0
     else
       POLICY_CONFIG_INTENT=0
-      validate_policy_paths "$CWD" "$rules_content"
+      validate_policy_paths "$CWD" "$rules_content" "$legacy_rules_content"
       [ -f "$POLICY_CONFIG_FILE" ] \
         || { degrade_codex_isolation "could not create $POLICY_CONFIG_FILE"; return 0; }
     fi
   fi
 
   if [ -e "$POLICY_RULE_FILE" ]; then
-    existing="$(cat "$POLICY_RULE_FILE" 2>/dev/null || true)"
-    if [ "$existing" != "$rules_content" ]; then
+    if policy_file_matches "$POLICY_RULE_FILE" "$rules_content"; then
+      :
+    elif policy_file_matches "$POLICY_RULE_FILE" "$legacy_rules_content"; then
+      POLICY_RULE_TMP="$(mktemp "$rules_dir/.herdr-jutsu-deny.rules.XXXXXX" 2>/dev/null || true)"
+      if [ -z "$POLICY_RULE_TMP" ] \
+        || ! printf '%s\n' "$rules_content" >"$POLICY_RULE_TMP" 2>/dev/null \
+        || ! chmod 600 "$POLICY_RULE_TMP" 2>/dev/null \
+        || ! mv -f "$POLICY_RULE_TMP" "$POLICY_RULE_FILE" 2>/dev/null; then
+        [ -z "$POLICY_RULE_TMP" ] || rm -f "$POLICY_RULE_TMP" 2>/dev/null || true
+        POLICY_RULE_TMP=""
+        degrade_codex_isolation "could not atomically upgrade the Codex isolation policy: $POLICY_RULE_FILE"
+        return 0
+      fi
+      POLICY_RULE_TMP=""
+    else
       fail isolation_policy_conflict \
         "refusing to overwrite a differing Codex isolation policy: $POLICY_RULE_FILE" 5
     fi
@@ -1622,7 +1661,7 @@ install_codex_policy() {
       POLICY_RULE_INTENT=0
     else
       POLICY_RULE_INTENT=0
-      validate_policy_paths "$CWD" "$rules_content"
+      validate_policy_paths "$CWD" "$rules_content" "$legacy_rules_content"
       [ -f "$POLICY_RULE_FILE" ] \
         || { degrade_codex_isolation "could not create $POLICY_RULE_FILE"; return 0; }
     fi
@@ -1680,8 +1719,11 @@ install_codex_policy() {
 if [ "$KIND" = codex ] && [ "$NO_ISOLATION" -eq 0 ] \
   && [ -z "$WORKTREE" ] && [ -z "$IN_PANE" ]; then
   POLICY_HERDR_PATH="$(command -v herdr 2>/dev/null || true)"
-  if [ -n "$POLICY_HERDR_PATH" ]; then
-    validate_policy_paths "$CWD" "$(codex_rules_content "$POLICY_HERDR_PATH")"
+  POLICY_CODEX_PATH="$(command -v codex 2>/dev/null || true)"
+  if [ -n "$POLICY_HERDR_PATH" ] && [ -n "$POLICY_CODEX_PATH" ]; then
+    validate_policy_paths "$CWD" \
+      "$(codex_rules_content "$POLICY_HERDR_PATH" "$POLICY_CODEX_PATH")" \
+      "$(codex_rules_v1_content "$POLICY_HERDR_PATH")"
   fi
 fi
 
@@ -1693,11 +1735,14 @@ if [ -n "$WORKTREE" ]; then
   fi
   if [ "$KIND" = codex ] && [ "$NO_ISOLATION" -eq 0 ]; then
     POLICY_HERDR_PATH="$(command -v herdr 2>/dev/null || true)"
+    POLICY_CODEX_PATH="$(command -v codex 2>/dev/null || true)"
     if [ -n "$POLICY_HERDR_PATH" ] \
+      && [ -n "$POLICY_CODEX_PATH" ] \
       && git -C "$CWD" cat-file -e "$BASE:.codex/rules/herdr-jutsu-deny.rules" 2>/dev/null; then
       BASE_POLICY="$(git -C "$CWD" show "$BASE:.codex/rules/herdr-jutsu-deny.rules" 2>/dev/null || true)"
-      EXPECTED_POLICY="$(codex_rules_content "$POLICY_HERDR_PATH")"
-      [ "$BASE_POLICY" = "$EXPECTED_POLICY" ] || policy_conflict \
+      EXPECTED_POLICY="$(codex_rules_content "$POLICY_HERDR_PATH" "$POLICY_CODEX_PATH")"
+      LEGACY_POLICY="$(codex_rules_v1_content "$POLICY_HERDR_PATH")"
+      [ "$BASE_POLICY" = "$EXPECTED_POLICY" ] || [ "$BASE_POLICY" = "$LEGACY_POLICY" ] || policy_conflict \
         "base ref $BASE tracks a differing Codex isolation policy; refusing to create the worktree"
     fi
   fi
@@ -1730,8 +1775,11 @@ elif [ -n "$IN_PANE" ]; then
   CWD="$PANE_CWD"
   if [ "$KIND" = codex ] && [ "$NO_ISOLATION" -eq 0 ]; then
     POLICY_HERDR_PATH="$(command -v herdr 2>/dev/null || true)"
-    if [ -n "$POLICY_HERDR_PATH" ]; then
-      validate_policy_paths "$CWD" "$(codex_rules_content "$POLICY_HERDR_PATH")"
+    POLICY_CODEX_PATH="$(command -v codex 2>/dev/null || true)"
+    if [ -n "$POLICY_HERDR_PATH" ] && [ -n "$POLICY_CODEX_PATH" ]; then
+      validate_policy_paths "$CWD" \
+        "$(codex_rules_content "$POLICY_HERDR_PATH" "$POLICY_CODEX_PATH")" \
+        "$(codex_rules_v1_content "$POLICY_HERDR_PATH")"
     fi
   fi
   # refuse unless the pane is demonstrably an idle interactive shell — BEFORE any rename.
