@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = agent ] && [ "${2:-}" = get ]; then
+  [ -z "${A2A_RELAY_HOLD_READY:-}" ] || : >"$A2A_RELAY_HOLD_READY"
+  while [ -n "${A2A_RELAY_HOLD_RELEASE:-}" ] && [ ! -e "$A2A_RELAY_HOLD_RELEASE" ]; do sleep 0.01; done
+  jq -cn '{result:{agent:{name:"member",kind:"codex"}}}'
+  exit 0
+fi
+exit 2

@@ -792,6 +792,8 @@ if [ "$A2A" -eq 1 ]; then
       "A2A executable is missing, non-absolute, or group/world-writable (as is its directory): ${A2A_EXEC:-unresolved}" 5
   done
   A2A_DIR="$REG_DIR/a2a"
+  A2A_RELAY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/jutsu-a2a.mjs"
+  [ -f "$A2A_RELAY" ] || fail a2a_runtime_missing "A2A relay is missing: $A2A_RELAY" 4
 fi
 
 if [ "$REGISTRY_MODE" = none ]; then
@@ -957,6 +959,37 @@ if [ "$A2A" -eq 1 ]; then
   [ "$A2A_PARENT_UID" = "$(id -u)" ] && [ "$A2A_PARENT_DIR_UID" = "$(id -u)" ] \
     || fail a2a_parent_unreachable "parent socket and directory must be owned by the current user" 4
 
+  # Build the relay command once, preserving the normative order. jq supplies both the
+  # compact Claude JSON and TOML-compatible quoted strings for Codex without shell
+  # interpolation of names or paths.
+  A2A_SERVER_ARGS=("$A2A_RELAY" mcp --self "$NAME" --stream "$STREAM" --a2a-dir "$A2A_DIR" \
+    --node "$A2A_NODE" --codex "$A2A_CODEX" --herdr "$A2A_HERDR" --peer "$PARENT")
+  for A2A_PEER in ${PEERS[@]+"${PEERS[@]}"}; do
+    A2A_SERVER_ARGS+=(--peer "$A2A_PEER")
+  done
+  if [ "$KIND" = claude ]; then
+    A2A_MCP_JSON="$(jq -cn --arg command "$A2A_NODE" \
+      --argjson args "$(jq -cn '$ARGS.positional' --args -- "${A2A_SERVER_ARGS[@]}")" \
+      '{mcpServers:{herdr_jutsu_a2a:{type:"stdio",command:$command,args:$args}}}')"
+    # prepare_isolation already made one merged deny segment. Add A2A's four patterns to
+    # that same segment, then append the owned socket/MCP/tool arguments.
+    for A2A_DENY in 'Bash(*codex queue*)' 'Bash(*cc-socks*)' 'Bash(*jutsu-a2a*)' 'Bash(*/a2a/*)'; do
+      array_has "$A2A_DENY" ${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"} || LAUNCH_ARGS+=("$A2A_DENY")
+    done
+    LAUNCH_ARGS+=(--messaging-socket-path "$A2A_SOCKET" --mcp-config "$A2A_MCP_JSON" \
+      --allowedTools mcp__herdr_jutsu_a2a__send_message)
+  else
+    A2A_TOML_COMMAND="$(jq -Rn --arg v "$A2A_NODE" '$v')"
+    A2A_TOML_ARGS="$(jq -cn '$ARGS.positional' --args -- "${A2A_SERVER_ARGS[@]}")"
+    # The surface-disabling segment is already at the end of LAUNCH_ARGS (before a resume
+    # tail when present). A2A sessions do not resume, so these four keys are last and
+    # enabled=true necessarily follows every disabling override, including collisions.
+    LAUNCH_ARGS+=(-c "mcp_servers.herdr_jutsu_a2a.command=$A2A_TOML_COMMAND" \
+      -c "mcp_servers.herdr_jutsu_a2a.args=$A2A_TOML_ARGS" \
+      -c 'mcp_servers.herdr_jutsu_a2a.default_tools_approval_mode="approve"' \
+      -c 'mcp_servers.herdr_jutsu_a2a.enabled=true')
+  fi
+
   # All refusing preflight checks have now passed. A real spawn may establish its private
   # launcher-owned storage; --preflight retains its create-nothing contract.
   if [ "$PREFLIGHT_ONLY" -ne 1 ]; then
@@ -1066,6 +1099,121 @@ POLICY_RULE_EXCLUDE_ADDED=0 POLICY_CONFIG_EXCLUDE_ADDED=0
 POLICY_RULE_EXCLUDE_LINE=0 POLICY_CONFIG_EXCLUDE_LINE=0
 POLICY_RULE_EXCLUDE_NEWLINE=0 POLICY_CONFIG_EXCLUDE_NEWLINE=0
 POLICY_LOCK_DIR="" POLICY_LOCK_HELD=0 POLICY_LOCK_INTENT=0
+A2A_LOCK_DIR="" A2A_LOCK_NONCE="" A2A_LOCK_HELD=0
+
+a2a_now_seconds() {
+  if [ "${A2A_TEST_MODE:-}" = 1 ] && [[ "${A2A_NOW_MS:-}" =~ ^[0-9]+$ ]]; then
+    printf '%s' $((A2A_NOW_MS / 1000))
+  else
+    date +%s
+  fi
+}
+
+a2a_mtime_seconds() {
+  stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null || return 1
+}
+
+a2a_start_time() {
+  local value=""
+  value="$(ps -o lstart= -p "$1" 2>/dev/null | awk '{$1=$1; print}' || true)"
+  # Match the relay's conservative sandbox behaviour: only the current process gets a
+  # fallback identity when ps is denied. Other live pids remain unverifiable and their
+  # locks are retained.
+  if [ -z "$value" ] && [ "$1" = "$$" ]; then value="$(date '+%a %b %e %T %Y')"; fi
+  printf '%s' "$value"
+}
+
+a2a_release_lock() {
+  local observed=""
+  [ "$A2A_LOCK_HELD" -eq 1 ] || return 0
+  [ -f "$A2A_LOCK_DIR/owner.json" ] && [ ! -L "$A2A_LOCK_DIR/owner.json" ] \
+    && observed="$(jq -r '.nonce // empty' "$A2A_LOCK_DIR/owner.json" 2>/dev/null || true)"
+  if [ "$observed" = "$A2A_LOCK_NONCE" ]; then
+    rm -f "$A2A_LOCK_DIR/owner.json" 2>/dev/null || true
+    rmdir "$A2A_LOCK_DIR" 2>/dev/null || true
+  fi
+  A2A_LOCK_HELD=0
+}
+
+a2a_acquire_lock() {
+  local timeout_ms="${JUTSU_A2A_LOCK_TIMEOUT_MS:-5000}" waited=0 owner="" pid="" start="" nonce=""
+  local live_start="" mtime="" age=0 current_nonce="" tmp=""
+  case "$timeout_ms" in ''|*[!0-9]*) timeout_ms=5000 ;; esac
+  A2A_LOCK_DIR="$A2A_DIR/$STREAM.lock"
+  while [ "$waited" -le "$timeout_ms" ]; do
+    if mkdir "$A2A_LOCK_DIR" 2>/dev/null; then
+      chmod 700 "$A2A_LOCK_DIR" 2>/dev/null || true
+      A2A_LOCK_NONCE="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+      start="$(a2a_start_time "$$")"
+      [ -n "$start" ] && [[ "$A2A_LOCK_NONCE" =~ ^[0-9a-f]{32}$ ]] \
+        || fail storage_unsafe "could not determine A2A lock owner identity" 5
+      tmp="$A2A_LOCK_DIR/.owner.$$"
+      ( umask 077; jq -cn --argjson pid "$$" --arg start "$start" --arg nonce "$A2A_LOCK_NONCE" \
+        '{pid:$pid,start_time:$start,nonce:$nonce}' >"$tmp" ) \
+        || fail storage_unsafe "could not write A2A lock owner" 5
+      chmod 600 "$tmp" 2>/dev/null || true
+      mv -f "$tmp" "$A2A_LOCK_DIR/owner.json" \
+        || fail storage_unsafe "could not publish A2A lock owner" 5
+      A2A_LOCK_HELD=1
+      if [ "${A2A_TEST_MODE:-}" = 1 ] && [ -n "${A2A_TEST_LAUNCHER_LOCK_READY:-}" ]; then
+        : >"$A2A_TEST_LAUNCHER_LOCK_READY"
+        while [ ! -e "${A2A_TEST_LAUNCHER_LOCK_RELEASE:-/nonexistent}" ]; do sleep 0.01; done
+      fi
+      return 0
+    fi
+    if [ -d "$A2A_LOCK_DIR" ] && [ ! -L "$A2A_LOCK_DIR" ]; then
+      owner="$(cat "$A2A_LOCK_DIR/owner.json" 2>/dev/null || true)"
+      if printf '%s' "$owner" | jq -e '(.pid|type)=="number" and (.pid|floor)==.pid and .pid>0 and (.start_time|type)=="string" and (.nonce|type)=="string" and (.nonce|test("^[0-9a-f]{32}$"))' >/dev/null 2>&1; then
+        pid="$(printf '%s' "$owner" | jq -r '.pid')"
+        start="$(printf '%s' "$owner" | jq -r '.start_time')"
+        nonce="$(printf '%s' "$owner" | jq -r '.nonce')"
+        live_start=""
+        if kill -0 "$pid" 2>/dev/null; then live_start="$(a2a_start_time "$pid")"; fi
+        if ! kill -0 "$pid" 2>/dev/null || { [ -n "$live_start" ] && [ "$live_start" != "$start" ]; }; then
+          current_nonce="$(jq -r '.nonce // empty' "$A2A_LOCK_DIR/owner.json" 2>/dev/null || true)"
+          if [ "$current_nonce" = "$nonce" ]; then
+            rm -f "$A2A_LOCK_DIR/owner.json" 2>/dev/null || true
+            rmdir "$A2A_LOCK_DIR" 2>/dev/null || true
+            continue
+          fi
+        fi
+      else
+        mtime="$(a2a_mtime_seconds "$A2A_LOCK_DIR" || true)"
+        [ -n "$mtime" ] && age=$(( $(a2a_now_seconds) - mtime )) || age=0
+        if [ "$age" -gt 30 ]; then
+          rm -f "$A2A_LOCK_DIR/owner.json" 2>/dev/null || true
+          rmdir "$A2A_LOCK_DIR" 2>/dev/null || true
+          [ ! -e "$A2A_LOCK_DIR" ] && continue
+        fi
+      fi
+    fi
+    [ "$waited" -lt "$timeout_ms" ] || break
+    sleep 0.025
+    waited=$((waited + 25))
+  done
+  fail busy_retry "timed out waiting for A2A stream lock: $A2A_LOCK_DIR" 1
+}
+
+a2a_write_member() {
+  local members="$A2A_DIR/$STREAM.members.json" tmp="$A2A_DIR/.$STREAM.members.$$" current='{}'
+  a2a_acquire_lock
+  [ ! -e "$members" ] || current="$(cat "$members")" \
+    || { a2a_release_lock; fail storage_unsafe "could not read $members" 5; }
+  ( umask 077; printf '%s' "$current" | jq -c \
+      --arg parent "$PARENT" --arg parent_pane "${HERDR_PANE_ID:-}" --arg parent_socket "$A2A_PARENT_SOCKET" \
+      --arg name "$NAME" --arg pane "$PANE_ID" --arg engine "$KIND" \
+      --arg socket "$A2A_SOCKET" --arg thread "$SESSION_ID" \
+      '.parent //= {name:$parent,pane_id:$parent_pane,engine:"claude",socket:$parent_socket}
+       | .members //= {}
+       | .members[$name] = ({pane_id:$pane,engine:$engine}
+           + if $engine == "claude" then {socket:$socket} else {thread_id:$thread} end)' >"$tmp" ) \
+    || { rm -f "$tmp"; a2a_release_lock; fail storage_unsafe "could not build $members" 5; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$members" \
+    || { rm -f "$tmp"; a2a_release_lock; fail storage_unsafe "could not replace $members" 5; }
+  chmod 600 "$members" 2>/dev/null || true
+  a2a_release_lock
+}
 
 build_line() { # build_line <status>
   jq -cn \
@@ -1205,6 +1353,7 @@ on_exit() {
   if [ "$POLICY_LOCK_HELD" -eq 1 ] || [ "$POLICY_LOCK_INTENT" -eq 1 ]; then
     release_policy_lock
   fi
+  a2a_release_lock
   exit "$rc"
 }
 trap on_exit EXIT
@@ -1677,7 +1826,9 @@ else
   ARGS+=(${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"})
   START=(herdr agent start "$NAME" --kind "$KIND" --pane "$PANE_ID" --timeout "$TIMEOUT")
   [ ${#ARGS[@]} -eq 0 ] || START+=(-- "${ARGS[@]}")
-  if R="$("${START[@]}" 2>&1)"; then
+  # Test-only relay clock controls may be used by the launcher's lock tests, but they are
+  # never part of the environment generated for a member process.
+  if R="$(env -u A2A_TEST_MODE -u A2A_NOW_MS "${START[@]}" 2>&1)"; then
     SESSION_ID="$(jq -r '.result.agent.agent_session.value // empty' <<<"$R" 2>/dev/null || true)"
     STATUS="$(jq -r '.result.agent.agent_status // "unknown"' <<<"$R" 2>/dev/null || echo unknown)"
     [ -n "$STATUS" ] || STATUS="unknown"
@@ -1704,6 +1855,8 @@ TRAP_ARMED=0
 # and retained starts release it here; other failures exit through the trap, which rolls
 # back first and releases second.
 release_policy_lock
+
+if [ "$A2A" -eq 1 ]; then a2a_write_member; fi
 
 # resume_args: the kind-specific argv that would revive this member.
 if [ -n "$SESSION_ID" ] && [ "$KIND" = claude ]; then
