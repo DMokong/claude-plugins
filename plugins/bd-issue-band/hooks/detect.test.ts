@@ -59,3 +59,16 @@ test('exempt paths', () => {
   expect(isExempt('/home/me/.claude/dev-mods/a/b.ts', home)).toBe(true)
   expect(isExempt('/home/me/projects/exampleapp/a.ts', home)).toBe(false)
 })
+
+test('a Beads MCP server is recognised whatever it is called', () => {
+  expect(detect({ tool: 'mcp__beads__claim', issue_id: 'app-1' })).toEqual({ kind: 'claim', ids: ['app-1'] })
+  expect(detect({ tool: 'mcp__plugin_beads_beads__close', issue_id: 'app-1' })).toEqual({ kind: 'close', ids: ['app-1'] })
+  expect(detect({ tool: 'mcp__my_BEADS_remote__comment', issue_id: 'app-1', text: 'x' })).toEqual({ kind: 'comment', ids: ['app-1'] })
+})
+
+test('another MCP server with the same tool names is not bd', () => {
+  expect(detect({ tool: 'mcp__github__close', issue_id: 'app-1' })).toBe(null)
+  expect(detect({ tool: 'mcp__linear__comment', issue_id: 'app-1' })).toBe(null)
+  expect(detect({ tool: 'mcp__beads__claim' })).toBe(null)
+  expect(detect({ tool: 'mcp__beads__show', issue_id: 'app-1' })).toBe(null)
+})

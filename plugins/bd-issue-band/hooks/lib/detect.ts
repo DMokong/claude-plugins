@@ -5,11 +5,11 @@ export type BdEvent =
   | { kind: 'edit'; path: string }
 
 const ISSUE_ID = /^[a-z][a-z0-9]*-[a-z0-9]+(\.[0-9]+)*$/
-const MCP_PREFIX = 'mcp__claude_ai_Beads_MCP__'
-const MCP_KINDS: Record<string, 'claim' | 'comment' | 'close'> = {
-  claim: 'claim',
-  comment: 'comment',
-  close: 'close',
+/** `mcp__<server>__<action>`: the server name is everything up to the last double underscore. */
+const MCP_TOOL = /^mcp__(.+)__([a-z_]+)$/
+
+function isMcpKind(action: string | undefined): action is 'claim' | 'comment' | 'close' {
+  return action === 'claim' || action === 'comment' || action === 'close'
 }
 
 /** The tokens after `bd` and its global flags, or null when the segment is not a bd call. */
@@ -64,9 +64,12 @@ export function detect(call: Record<string, unknown>): BdEvent | null {
     }
     return null
   }
-  if (tool.startsWith(MCP_PREFIX) && typeof call.issue_id === 'string') {
-    const kind = MCP_KINDS[tool.slice(MCP_PREFIX.length)]
-    return kind === undefined ? null : { kind, ids: [call.issue_id] }
+  // Any MCP server whose name says beads: connectors and plugins name theirs differently.
+  const mcp = MCP_TOOL.exec(tool)
+  const server = mcp?.[1]
+  const action = mcp?.[2]
+  if (server !== undefined && /beads/i.test(server) && isMcpKind(action) && typeof call.issue_id === 'string') {
+    return { kind: action, ids: [call.issue_id] }
   }
   if ((tool === 'Edit' || tool === 'Write') && typeof call.file_path === 'string') {
     return { kind: 'edit', path: call.file_path }
