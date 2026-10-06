@@ -1,0 +1,24 @@
+{
+  "name": "crew-pane",
+  "version": "0.2.0",
+  "description": "Status line and pane for the crew this session raised inside Herdr, and the stream it conducts",
+  "author": { "name": "Dustin Cheng" },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "enabled": {
+      "type": "string",
+      "title": "Crew pane",
+      "description": "Poll Herdr and show this session's crew",
+      "options": ["on", "off"],
+      "default": "on"
+    },
+    "speak": {
+      "type": "string",
+      "title": "Speak when a member blocks",
+      "description": "Say it aloud with the system voice as well as showing a toast",
+      "options": ["off", "on"],
+      "default": "off"
+    }
+  }
+}

@@ -126,6 +126,23 @@
         "status",
         "claude-code-only"
       ]
+    },
+    {
+      "name": "crew-pane",
+      "source": "./plugins/crew-pane",
+      "description": "Status line and /crew pane for the crew a session raised inside Herdr with herdr-jutsu, and the fable-conductor stream it conducts. A read-only Claude Code mod.",
+      "version": "0.2.0",
+      "author": {
+        "name": "Dustin Cheng"
+      },
+      "license": "MIT",
+      "keywords": [
+        "herdr",
+        "multi-agent",
+        "mod",
+        "status",
+        "claude-code-only"
+      ]
     }
   ]
 }
