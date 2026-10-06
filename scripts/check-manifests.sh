@@ -6,6 +6,10 @@
 # either direction, invalid Codex source shapes, URL drift, and a `version`
 # key leaking into any Codex catalog entry (entries are versionless by design).
 #
+# Plugins named in scripts/claude-only-plugins.txt run on Claude Code only. For those the
+# rule is reversed: three version surfaces must agree (Claude manifest, Claude catalog,
+# README row) and the two Codex surfaces must be absent.
+#
 # Usage: scripts/check-manifests.sh [repo-root]
 #
 # With no argument, resolves the repo root from this script's own location.
@@ -30,6 +34,7 @@ command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
 claude_catalog="$root/.claude-plugin/marketplace.json"
 codex_catalog="$root/.agents/plugins/marketplace.json"
 readme="$root/README.md"
+claude_only_file="$root/scripts/claude-only-plugins.txt"
 
 [ -f "$claude_catalog" ] || die "missing $claude_catalog"
 [ -f "$codex_catalog" ] || die "missing $codex_catalog"
@@ -40,6 +45,19 @@ readme="$root/README.md"
 # into a false clean result.
 jq empty "$claude_catalog" >/dev/null 2>&1 || die "malformed $claude_catalog"
 jq empty "$codex_catalog" >/dev/null 2>&1 || die "malformed $codex_catalog"
+
+# Plugins that run on Claude Code only (mods: function hooks, no skills). For these the
+# Codex surfaces must be ABSENT, the reverse of every other in-repo plugin. The list is
+# explicit so that a Codex manifest missing from any unlisted plugin stays a failure.
+# One name per line; `#` starts a comment; blank lines are ignored.
+claude_only_names=""
+if [ -f "$claude_only_file" ]; then
+  claude_only_names="$(sed -e 's/#.*//' -e 's/[[:space:]]//g' "$claude_only_file" | awk 'NF' | LC_ALL=C sort -u)"
+fi
+
+is_claude_only() {
+  [ -n "$claude_only_names" ] && printf '%s\n' "$claude_only_names" | grep -Fqx -- "$1"
+}
 
 problems=0
 problem_names=""
@@ -91,8 +109,14 @@ done < <(printf '%s\n' "$codex_names" | uniq -d)
 # Catalog parity is strict even for URL-sourced plugins. Codex natively reads
 # the Claude catalog when no Codex catalog exists, but when both are present it
 # prefers the Codex catalog; omitting a name here would therefore hide it.
-if [ "$claude_names" != "$codex_names" ]; then
+# What the Codex catalog must hold: every Claude-catalog name except the Claude-only ones.
+codex_expected_names="$(printf '%s\n' "$claude_names" | while IFS= read -r expected_name; do
+  if ! is_claude_only "$expected_name"; then printf '%s\n' "$expected_name"; fi
+done)"
+
+if [ "$codex_expected_names" != "$codex_names" ]; then
   while IFS= read -r claude_name; do
+    if is_claude_only "$claude_name"; then continue; fi
     jq -e --arg n "$claude_name" 'any(.plugins[]; .name == $n)' "$codex_catalog" >/dev/null \
       || mismatch "$claude_name" codex-catalog-missing absent present
   done < <(printf '%s\n' "$claude_names")
@@ -102,6 +126,17 @@ if [ "$claude_names" != "$codex_names" ]; then
       || mismatch "$codex_name" codex-catalog-orphan present absent
   done < <(printf '%s\n' "$codex_names")
 fi
+
+# A listed name must be a real Claude-catalog plugin, and must not be offered to Codex.
+while IFS= read -r only_name; do
+  [ -n "$only_name" ] || continue
+  if ! jq -e --arg n "$only_name" 'any(.plugins[]; .name == $n)' "$claude_catalog" >/dev/null; then
+    mismatch "$only_name" claude-only-list-stale absent present
+  fi
+  if jq -e --arg n "$only_name" 'any(.plugins[]; .name == $n)' "$codex_catalog" >/dev/null; then
+    mismatch "$only_name" claude-only-codex-catalog-entry present absent
+  fi
+done < <(printf '%s\n' "$claude_only_names")
 
 # Claude entries are either in-repo plugins with the exact conventional path
 # and a real directory, or external plugins with the exact url/url source
@@ -181,26 +216,32 @@ check_local_plugin() {
   [ "$catalog_version" = "$ref_version" ] \
     || mismatch "$name" claude-catalog-version "$catalog_version" "$ref_version"
 
-  codex_manifest="$root/plugins/$name/.codex-plugin/plugin.json"
-  if [ ! -f "$codex_manifest" ]; then
-    mismatch "$name" codex-manifest-missing absent present
+  if is_claude_only "$name"; then
+    if [ -e "$root/plugins/$name/.codex-plugin" ]; then
+      mismatch "$name" claude-only-codex-manifest present absent
+    fi
   else
-    codex_version="$(jq -r '.version // empty' "$codex_manifest")"
-    codex_name="$(jq -r '.name // empty' "$codex_manifest")"
-    [ "$codex_version" = "$ref_version" ] \
-      || mismatch "$name" codex-manifest-version "$codex_version" "$ref_version"
-    [ "$codex_name" = "$name" ] \
-      || mismatch "$name" codex-manifest-name "$codex_name" "$name"
-  fi
+    codex_manifest="$root/plugins/$name/.codex-plugin/plugin.json"
+    if [ ! -f "$codex_manifest" ]; then
+      mismatch "$name" codex-manifest-missing absent present
+    else
+      codex_version="$(jq -r '.version // empty' "$codex_manifest")"
+      codex_name="$(jq -r '.name // empty' "$codex_manifest")"
+      [ "$codex_version" = "$ref_version" ] \
+        || mismatch "$name" codex-manifest-version "$codex_version" "$ref_version"
+      [ "$codex_name" = "$name" ] \
+        || mismatch "$name" codex-manifest-name "$codex_name" "$name"
+    fi
 
-  codex_entry="$(jq -c --arg n "$name" '.plugins[] | select(.name == $n)' "$codex_catalog")"
-  if [ -z "$codex_entry" ]; then
-    mismatch "$name" codex-catalog-missing absent present
-  else
-    codex_path="$(printf '%s' "$codex_entry" | jq -r '.source.path // empty')"
-    expected_path="./plugins/$name"
-    [ "$codex_path" = "$expected_path" ] \
-      || mismatch "$name" codex-catalog-path "$codex_path" "$expected_path"
+    codex_entry="$(jq -c --arg n "$name" '.plugins[] | select(.name == $n)' "$codex_catalog")"
+    if [ -z "$codex_entry" ]; then
+      mismatch "$name" codex-catalog-missing absent present
+    else
+      codex_path="$(printf '%s' "$codex_entry" | jq -r '.source.path // empty')"
+      expected_path="./plugins/$name"
+      [ "$codex_path" = "$expected_path" ] \
+        || mismatch "$name" codex-catalog-path "$codex_path" "$expected_path"
+    fi
   fi
 
   row_version="$(readme_version_for "$name")"
