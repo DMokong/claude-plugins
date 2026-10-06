@@ -1,6 +1,6 @@
 # dmokong-plugins
 
-A plugin marketplace for **Claude Code and Codex**. Five plugins, three of which live in this
+A plugin marketplace for **Claude Code and Codex**. Six plugins, four of which live in this
 repo and two of which are vendored from their own repos by URL.
 
 ```bash
@@ -19,7 +19,8 @@ plugins whose source is an external Git URL; neither a Codex catalog nor Codex m
 required for installation. This repo still carries both so Codex gets deliberate policy/category
 and interface/listing metadata, and so each plugin can describe its real Codex support instead of
 implying unsupported features work. When `.agents/plugins/marketplace.json` exists, Codex prefers it
-over the Claude catalog, so it **must name every plugin in the Claude catalog**.
+over the Claude catalog, so it **must name every plugin in the Claude catalog** except the
+Claude Code only ones listed in `scripts/claude-only-plugins.txt`, which it must not name.
 External Codex entries must use
 `{"source":"url","url":"https://github.com/<owner>/<repo>.git"}`; the tempting
 `source: "git"` and `source: "github"` variants are silently dropped. For a Git marketplace,
@@ -33,6 +34,7 @@ updates the registered source.
 | [`fable-mode`](plugins/fable-mode) | 1.1.1 | this repo | Fable 5's working discipline as a skill — a five-gate task loop (scope → evidence → adversarial reasoning → verification → calibrated reporting) for complex, multi-step, or uncertain work. |
 | [`fable-conductor`](plugins/fable-conductor) | 1.3.0 | this repo | Orchestration of whole work streams — Fable owns shaping, spec, planning, escalations, and final review; autonomous opus/sonnet/haiku adversarial waves run everything mechanical in between, coordinated through durable file contracts. |
 | [`herdr-jutsu`](plugins/herdr-jutsu) | 0.5.0 | this repo | Raise an isolated crew inside Herdr — brief once, wait on a literal pane id, pull bounded results, handle blocked members, and hand long jobs to a fresh session. |
+| [`bd-issue-band`](plugins/bd-issue-band) | 0.2.0 | this repo | A Claude Code mod: a band above the prompt showing the bd (beads) issue this session holds and how long since its last comment. Dormant where no bd tracker resolves. |
 | `speculator` | 2.21.3 | [DMokong/speculator](https://github.com/DMokong/speculator) | Spec-quality scoring and a 7-gate pipeline (4 required, 3 opt-in) with LLM-as-judge evaluation, worktree isolation, and beads tracking. Includes `asbuilt-quiz`. |
 | `lego-plan-builder` | 0.1.0 | [DMokong/lego-plan-builder](https://github.com/DMokong/lego-plan-builder) | Official-manual-style LEGO build instructions from an idea or image, with a deterministic physics/legality pipeline and a printable booklet. |
 
@@ -46,6 +48,7 @@ session works, fable-conductor orchestrates *many* across the model ladder.
 | `fable-mode` | full | full |
 | `fable-conductor` | full — plus an optional, opt-in Codex implementer for one task's implementer round, with Claude's verifier and reviewer unchanged | reference only — orchestration engine is Claude Code only |
 | `herdr-jutsu` | full — a Claude parent can brief Claude members with SendMessage, hear a blocking question or early warning back the same way, and use a background literal-pane wait for a non-injecting wake | supported where user-approved Codex rules let the parent run the required literal herdr commands outside the sandbox; a Codex parent may block on the literal-pane wait or pull later, with no autonomous background wake |
+| `bd-issue-band` | full | not offered — a mod (function hooks) runs on Claude Code only, so it is not in the Codex catalog |
 
 `speculator` and `lego-plan-builder` are vendored from their own repos and are not covered by this
 table — see their own repos for surface support.
@@ -57,6 +60,7 @@ table — see their own repos for surface support.
 | `fable-mode` | none — pure working-discipline instructions, no tools, no network, no credentials |
 | `fable-conductor` | Claude Code; full orchestration (Phases 4-5) needs the `Workflow` tool, and degrades to Agent-tool parallel batches without it; optional: `superpowers`, `speculator`, `beads` (probed, never assumed), and — for the opt-in Codex implementer only — `codex` and `herdr` on PATH |
 | `herdr-jutsu` | running inside a Herdr pane (`HERDR_ENV=1`), Herdr >= 0.8.2, `jq`, `git`, bash 3.2+; from a Codex parent also your own Codex rules allowing the `herdr` commands (and the spawn script's path) to run outside the sandbox — the launcher never edits user rules, but does install a child-only project deny policy |
+| `bd-issue-band` | Claude Code with mod support (early access; tested on 2.1.291); the `bd` CLI on PATH in a project with a bd tracker — without one the mod stays dormant |
 
 ## Layout
 

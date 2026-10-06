@@ -2,3 +2,4 @@
 # scripts/check-manifests.sh requires these to have NO .codex-plugin/ directory and NO
 # entry in .agents/plugins/marketplace.json, so a Codex user is never offered a plugin
 # that would do nothing. One name per line.
+bd-issue-band
