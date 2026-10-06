@@ -108,7 +108,9 @@ Codex has `plugin marketplace add|list|upgrade|remove` and `plugin add|list|remo
 Codex can read `.claude-plugin/marketplace.json` directly, including its external URL-sourced
 plugins, when `.agents/plugins/marketplace.json` is absent. If the Codex catalog is present it wins
 instead, so omitting a Claude-catalog name makes that plugin invisible to Codex. Keep the catalogs
-name-for-name identical; `scripts/check-manifests.sh` enforces this in both directions.
+name-for-name identical, apart from the mods named in `scripts/claude-only-plugins.txt`, which
+must be in the Claude catalog only; `scripts/check-manifests.sh` enforces both rules in both
+directions.
 
 **External-source trap.** In the Codex catalog the working shape is exactly
 `{"source":"url","url":"https://github.com/<owner>/<repo>.git"}`. The plausible-looking

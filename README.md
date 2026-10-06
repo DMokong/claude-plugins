@@ -72,6 +72,7 @@ table — see their own repos for surface support.
                                   every plugin's version lives here too
 .agents/plugins/marketplace.json  Optional Codex override for policy/category metadata; because
                                   it takes precedence, it must list every canonical plugin
+                                  except the Claude Code only ones
 scripts/claude-only-plugins.txt   Plugins that run on Claude Code only (mods); the checks
                                   require these to have NO Codex manifest or catalog entry
 plugins/<name>/                   in-repo plugins; the cache builder ships

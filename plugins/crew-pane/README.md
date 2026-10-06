@@ -17,7 +17,8 @@ reads two kinds of file. It sends nothing to any pane.
 - Running inside a Herdr pane (`HERDR_ENV=1`). Outside one it draws "Not inside herdr" and polls
   nothing.
 - For member names and issues: the `herdr-jutsu` registry, found through `$JUTSU_STATE_DIR`, then
-  `$XDG_STATE_HOME/herdr-jutsu`, then `<cwd>/.jutsu/state`. Without it the pane lists nothing.
+  `$XDG_STATE_HOME/herdr-jutsu`, then `<cwd>/.jutsu/state`. Without it "My crew" is
+  empty; the "All" view still lists every live agent Herdr reports.
 - For the stream table: `docs/fable-streams/*/stream.md` under the session's directory, as
   `fable-conductor` writes it. Without it the table is absent.
 
