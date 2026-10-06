@@ -187,9 +187,15 @@ Only what this crew created — check the registry, not your memory.
 herdr agent read <literal-pane-id> --source visible                    # verify intended member
 herdr agent send-keys <literal-pane-id> ctrl+c                         # only after that check
 herdr pane close <literal-pane-id>                                     # then close that pane
-herdr worktree remove --workspace <workspace_id>                        # a worktree stream
+git worktree remove <worktree>           # row has "worktree_where":"tab" (the default)
+herdr worktree remove --workspace <workspace_id>   # ONLY when "worktree_where":"workspace"
 git branch -d <branch>     # only after merge; `worktree remove` leaves the branch behind
 ```
+
+Read `worktree_where` from the registry row before choosing. A tab-mode row's
+`workspace_id` is the **parent's own workspace** — pointing `herdr worktree remove
+--workspace` at it targets the wrong thing. Rows written before 0.4.1 have no
+`worktree_where`; they are workspace-mode.
 
 The visible read must identify the intended member and show it is safe to interrupt. Never
 send the key by name, and never send it merely because herdr's status says it is idle or done.
@@ -204,8 +210,8 @@ line on stderr and, when the registry is writable, appends a row with `"status":
 
 ```json
 {"recovery":{"status":"orphaned","worktree":"<path>","branch":"<branch>",
- "workspace_id":"<ws>","pane_id":"<pane>","reason":"<error code>",
- "cleanup":"herdr worktree remove --workspace <ws>"}}
+ "worktree_where":"tab","workspace_id":"<ws>","pane_id":"<pane>","reason":"<error code>",
+ "cleanup":"herdr pane close <pane> && git -C <repo> worktree remove <path>"}}
 ```
 
 Clean it up by hand, in this order: `git -C <worktree> status` → decide with the user if it
