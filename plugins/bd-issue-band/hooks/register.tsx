@@ -83,8 +83,9 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     if ((await $.env.get('DMOKONG_MODS')) === '0') isOff = true
-    // A headless run (claude -p) has nobody to draw for: no timers, no command.
-    if (isOff || !e.isInteractive) return next(e)
+    // A headless run (claude -p) has nobody to draw for: nothing is observed, no timers, no command.
+    if (!e.isInteractive) isOff = true
+    if (isOff) return next(e)
 
     await $.command.register({
       name: 'issue',

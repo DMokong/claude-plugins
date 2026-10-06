@@ -462,3 +462,21 @@ test('a probe that has not answered holds nothing up, and its answer forgets ear
   expect(await after.find({ type: 'Text', text: /No bd issue claimed/ })).toBeUndefined()
   await after.unmount()
 })
+
+test('a headless run observes nothing and starts no bd process', async ($, on) => {
+  mock.clock(on, { now: 1_000_000_000 })
+  mock.env(on, { HOME: '/home/me' })
+  booted(on)
+  const shown = toasts(on)
+  let runs = 0
+  on('process.run', async () => {
+    runs += 1
+    return ran('[]')
+  })
+  on('tool.call', async () => ({ result: {} }))
+  await $.session.start({ cwd: '/repo', surface: null, isInteractive: false })
+  await $.tool.call(EDIT)
+  await $.tool.call({ tool: 'Bash', command: 'bd update app-1 --claim' })
+  expect(shown).toEqual([])
+  expect(runs).toBe(0)
+})
