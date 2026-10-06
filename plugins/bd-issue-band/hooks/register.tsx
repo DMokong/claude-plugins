@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import { parseLastComment, parseShow } from './lib/bd'
 import type { IssueInfo } from './lib/bd'
 import { detect, isExempt } from './lib/detect'
-import { EMPTY, applyEvent, applyRefresh, bandModel, fit, staleMark, takeStaleToast, touch } from './lib/model'
+import { EMPTY, applyEvent, applyProbe, applyRefresh, bandModel, fit, staleMark, takeStaleToast, touch } from './lib/model'
 
 const band = atom({ plugin: 'bd-issue-band', key: 'band' } as const, EMPTY)
 const BD_TIMEOUT_MS = 8_000
@@ -34,6 +34,18 @@ async function refresh($: EngineInterface, id: string): Promise<void> {
   }
 }
 
+/** Asks bd once whether a tracker resolves from the session's directory. Never throws. */
+async function probe($: EngineInterface): Promise<void> {
+  let isTracked = false
+  try {
+    const where = await $.process.run(['bd', 'where'], { timeoutMs: BD_TIMEOUT_MS })
+    isTracked = where.exitCode === 0
+  } catch {
+    // No bd on PATH, or it did not answer in time: the same as no tracker.
+  }
+  await update($, band, state => applyProbe(state, isTracked)).catch(() => {})
+}
+
 let home = ''
 
 /**
@@ -51,6 +63,7 @@ async function observe($: EngineInterface, call: Record<string, unknown>): Promi
     if (home === '') home = (await $.env.get('HOME')) ?? ''
     if (isExempt(event.path, home)) return
     const before = await read($, band)
+    if (before.isTracked === false) return
     await update($, band, state => touch(applyEvent(state, event, now), now))
     if (Object.keys(before.issues).length === 0 && before.edits === 0) {
       $.ui.toast('Editing with no bd issue claimed')
@@ -77,6 +90,8 @@ export const register: Register = (on, options) => {
       name: 'issue',
       description: 'Show the bd issue band, or adopt an issue: /issue app-abc',
     })
+    // Not awaited: start-up never waits for bd. Until it answers the band behaves as before.
+    void probe($)
 
     $.clock.every(TICK_MS, () => {
       void (async () => {
@@ -122,7 +137,11 @@ export const register: Register = (on, options) => {
     const id = e.args.trim()
     if (id === '') {
       await update($, band, state => ({ ...state, isHidden: false }))
-      const held = Object.keys((await read($, band)).issues)
+      const state = await read($, band)
+      const held = Object.keys(state.issues)
+      if (held.length === 0 && state.isTracked === false) {
+        return { text: 'No bd tracker found from this directory; the band is dormant.' }
+      }
       return { text: held.length === 0 ? 'No bd issue held by this session.' : `Holding ${held.join(', ')}.` }
     }
     if (!/^[a-z][a-z0-9]*-[a-z0-9]+(\.[0-9]+)*$/.test(id)) {

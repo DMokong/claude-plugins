@@ -21,6 +21,11 @@ export type BandState = {
   error: string | null
   /** Minute counter; written by the redraw timer so the band re-renders. */
   tick: number
+  /**
+   * Whether a bd tracker resolves from the session's directory. Null until the start-up probe
+   * answers; while null the band behaves as if there is one.
+   */
+  isTracked: boolean | null
 }
 
 declare module 'claude-code' {

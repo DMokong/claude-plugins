@@ -12,6 +12,7 @@ export const EMPTY: BandState = {
   isHidden: false,
   error: null,
   tick: 0,
+  isTracked: null,
 }
 
 export type BandModel =
@@ -43,6 +44,8 @@ function without(state: BandState, ids: readonly string[]): BandState {
 
 export function applyEvent(state: BandState, event: BdEvent, now: number): BandState {
   if (event.kind === 'edit') {
+    // Where bd is not in use an edit is nobody's unclaimed work.
+    if (state.isTracked === false) return state
     return Object.keys(state.issues).length === 0 ? { ...state, edits: state.edits + 1 } : state
   }
   if (event.kind === 'close') return without(state, event.ids)
@@ -51,7 +54,9 @@ export function applyEvent(state: BandState, event: BdEvent, now: number): BandS
     const held = issues[id] ?? fresh(id, now)
     issues[id] = event.kind === 'comment' ? { ...held, lastCommentAt: now, toastedMark: null } : held
   }
-  return { ...state, issues, focus: event.ids[event.ids.length - 1] ?? null, edits: 0, isHidden: false }
+  // A claim that went through proves a tracker, whatever the probe said.
+  const isTracked = event.kind === 'claim' ? true : state.isTracked
+  return { ...state, issues, focus: event.ids[event.ids.length - 1] ?? null, edits: 0, isHidden: false, isTracked }
 }
 
 export function applyRefresh(
@@ -71,6 +76,12 @@ export function applyRefresh(
     error: null,
     issues: { ...state.issues, [id]: { ...held, title: info.title, lastCommentAt: newest } },
   }
+}
+
+/** The start-up probe's answer. A claim seen first already proved a tracker, so false never overrides true. */
+export function applyProbe(state: BandState, isTracked: boolean): BandState {
+  if (isTracked || state.isTracked === true) return { ...state, isTracked: true }
+  return { ...state, isTracked: false, edits: 0 }
 }
 
 /** Records that the session did something while holding the focus issue. */

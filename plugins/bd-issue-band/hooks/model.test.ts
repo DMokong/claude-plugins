@@ -1,7 +1,7 @@
 import { test, expect } from 'claude-code/testing'
 
 import type { BandState, Issue } from '../types'
-import { EMPTY, STALE_MS, applyEvent, applyRefresh, bandModel, fit, isStale, takeStaleToast, touch } from './lib/model'
+import { EMPTY, STALE_MS, applyEvent, applyProbe, applyRefresh, bandModel, fit, isStale, takeStaleToast, touch } from './lib/model'
 
 const T0 = 1_000_000_000
 const MIN = 60_000
@@ -123,4 +123,25 @@ test('a stale episode is announced once, and again only after a new comment goes
   let again = applyEvent(first.state, { kind: 'comment', ids: ['app-1'] }, T0 + 41 * MIN)
   again = touch(again, T0 + 50 * MIN)
   expect(takeStaleToast(again, T0 + 72 * MIN).id).toBe('app-1')
+})
+
+test('where no tracker is found edits are not counted, and a claim wakes the band', () => {
+  const counted = applyEvent(EMPTY, { kind: 'edit', path: '/a' }, T0)
+  expect(counted.edits).toBe(1)
+  const dormant = applyProbe(counted, false)
+  expect(dormant.isTracked).toBe(false)
+  expect(dormant.edits).toBe(0)
+  expect(bandModel(dormant, T0)).toEqual({ kind: 'none' })
+  expect(applyEvent(dormant, { kind: 'edit', path: '/a' }, T0).edits).toBe(0)
+
+  const woken = applyEvent(dormant, { kind: 'claim', ids: ['app-1'] }, T0)
+  expect(woken.isTracked).toBe(true)
+  const closed = applyEvent(woken, { kind: 'close', ids: ['app-1'] }, T0)
+  expect(applyEvent(closed, { kind: 'edit', path: '/a' }, T0).edits).toBe(1)
+})
+
+test('a probe that finds no tracker does not undo a claim seen first', () => {
+  const claimed = applyEvent(EMPTY, { kind: 'claim', ids: ['app-1'] }, T0)
+  expect(applyProbe(claimed, false).isTracked).toBe(true)
+  expect(applyProbe(EMPTY, true).isTracked).toBe(true)
 })

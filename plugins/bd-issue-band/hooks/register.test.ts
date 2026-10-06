@@ -342,3 +342,123 @@ test('Hide takes the band down', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /app-1/ })).toBeUndefined()
   await ui.unmount()
 })
+
+const START = { cwd: '/repo', surface: 'terminal', isInteractive: true } as const
+const EDIT = { tool: 'Edit', file_path: '/home/me/projects/app/a.ts', old_string: 'a', new_string: 'b' } as const
+
+/** bd as it answers where no tracker resolves: `bd where` exits 1, and so does everything else. */
+function untracked(on: On) {
+  on('process.run', async () => ran('Error: No active beads workspace found.', 1))
+}
+
+test('with no bd tracker an edit draws nothing and raises no toast', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000_000 })
+  mock.env(on, { HOME: '/home/me' })
+  booted(on)
+  blank(on)
+  const shown = toasts(on)
+  untracked(on)
+  on('tool.call', async () => ({ result: {} }))
+  await $.session.start(START)
+  await clock.settle()
+  const answer = await $.tool.call(EDIT)
+  expect(answer.deny).toBeUndefined()
+  const ui = await $.ui.mount(BAND)
+  expect(await ui.find({ type: 'Text', text: /No bd issue claimed/ })).toBeUndefined()
+  expect(shown).toEqual([])
+  await ui.unmount()
+})
+
+test('with no bd tracker /issue says the band is dormant', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000_000 })
+  mock.env(on, {})
+  booted(on)
+  untracked(on)
+  await $.session.start(START)
+  await clock.settle()
+  expect((await $.command.run(issue(''))).text).toBe('No bd tracker found from this directory; the band is dormant.')
+})
+
+test('bd missing from PATH leaves the band dormant and the tool call untouched', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000_000 })
+  mock.env(on, { HOME: '/home/me' })
+  booted(on)
+  blank(on)
+  const shown = toasts(on)
+  on('process.run', async () => {
+    throw new Error('spawn bd ENOENT')
+  })
+  on('tool.call', async () => ({ result: {} }))
+  await $.session.start(START)
+  await clock.settle()
+  const answer = await $.tool.call(EDIT)
+  expect(answer.deny).toBeUndefined()
+  expect(shown).toEqual([])
+})
+
+test('a claim wakes a dormant band, and edits count again once it closes', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000_000 })
+  mock.env(on, { HOME: '/home/me' })
+  booted(on)
+  const shown = toasts(on)
+  on('process.run', async (_$, e) => {
+    const argv = (e as { argv: string[] }).argv
+    if (argv[1] === 'where') return ran('', 1)
+    if (argv[1] === 'show') return ran(JSON.stringify([{ title: 'Fix it', status: 'in_progress' }]))
+    return ran('[]')
+  })
+  on('tool.call', async () => ({ result: {} }))
+  await $.session.start(START)
+  await clock.settle()
+  await $.tool.call({ tool: 'mcp__beads__claim', issue_id: 'app-1' })
+  await clock.settle()
+  const ui = await $.ui.mount(BAND)
+  expect((await ui.find({ type: 'Text', text: /app-1/ }))?.text).toContain('Fix it')
+  await $.tool.call({ tool: 'Bash', command: 'bd close app-1 --reason=done' })
+  await $.tool.call(EDIT)
+  expect((await ui.find({ type: 'Text', text: /No bd issue claimed/ }))?.text).toContain('1 edit')
+  expect(shown).toEqual(['app-1 closed', 'Editing with no bd issue claimed'])
+  await ui.unmount()
+})
+
+test('with a tracker the nudge still appears', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000_000 })
+  mock.env(on, { HOME: '/home/me' })
+  booted(on)
+  const shown = toasts(on)
+  on('process.run', async () => ran('/repo/.beads'))
+  on('tool.call', async () => ({ result: {} }))
+  await $.session.start(START)
+  await clock.settle()
+  await $.tool.call(EDIT)
+  const ui = await $.ui.mount(BAND)
+  expect((await ui.find({ type: 'Text', text: /No bd issue claimed/ }))?.text).toContain('1 edit')
+  expect(shown).toEqual(['Editing with no bd issue claimed'])
+  await ui.unmount()
+})
+
+test('a probe that has not answered holds nothing up, and its answer forgets earlier edits', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000_000 })
+  mock.env(on, { HOME: '/home/me' })
+  booted(on)
+  blank(on)
+  toasts(on)
+  let answerProbe: (run: { value: Run }) => void = () => {}
+  const pending = new Promise<{ value: Run }>(resolve => {
+    answerProbe = resolve
+  })
+  on('process.run', async () => pending)
+  on('tool.call', async () => ({ result: {} }))
+  // Returns while `bd where` is still unanswered: start-up never waits for bd.
+  await $.session.start(START)
+  await $.tool.call(EDIT)
+  const before = await $.ui.mount(BAND)
+  expect(await before.find({ type: 'Text', text: /No bd issue claimed/ })).toBeDefined()
+  await before.unmount()
+
+  answerProbe(ran('', 1))
+  await clock.settle()
+  const after = await $.ui.mount(BAND)
+  expect(await after.find({ type: 'Text', text: /No bd issue claimed/ })).toBeUndefined()
+  await after.unmount()
+})
