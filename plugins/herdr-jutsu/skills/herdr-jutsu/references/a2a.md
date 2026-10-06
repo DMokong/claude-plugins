@@ -45,8 +45,12 @@ member tool:
 ```bash
 node <skill-dir>/scripts/jutsu-a2a.mjs send \
   --a2a-dir <state-dir>/a2a --stream inbox \
-  --from inbox-parent --to inbox-review-cdx --body 'The API returns 409.'
+  --from inbox-parent --to inbox-review-cdx --codex "$(command -v codex)" \
+  --body 'The API returns 409.'
 ```
+
+`--codex <absolute path>` is required when the recipient is a Codex member: the relay never
+searches `PATH`, so without it the send fails. A Claude recipient does not need it.
 
 For multiline or shell-sensitive text, put the body in a file and use `--body-file <path>`.
 The parent command checks that `--from` is the recorded parent name and that the current
