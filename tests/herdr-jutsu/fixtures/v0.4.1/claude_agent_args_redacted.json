@@ -1,5 +1,5 @@
 {
-  "name": "b-claude",
+  "name": "b-redact",
   "kind": "claude",
   "stream": "b",
   "issue": "",
@@ -9,14 +9,20 @@
   "cwd": "<SCRATCH>/repo",
   "worktree": "",
   "branch": "",
+  "worktree_where": "",
   "session_id": "sess-1",
   "status": "idle",
   "parent": "",
   "parent_pane": "<PANE>",
-  "agent_args": [],
+  "agent_args": [
+    "--api-key",
+    "<redacted>"
+  ],
   "effective_agent_args": [
     "-n",
-    "b-claude",
+    "b-redact",
+    "--api-key",
+    "<redacted>",
     "--disallowedTools",
     "Bash(*herdr*)",
     "ListAgents"

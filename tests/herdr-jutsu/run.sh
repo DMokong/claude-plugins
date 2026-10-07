@@ -19,7 +19,7 @@ REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 SPAWN="$REPO_ROOT/plugins/herdr-jutsu/skills/herdr-jutsu/scripts/jutsu-spawn.sh"
 STUB_DIR="$HERE/stub"
 NORMALISE_JQ="$HERE/lib/normalise.jq"
-FIXTURES_DIR="$HERE/fixtures/v0.4.0"
+FIXTURES_DIR="$HERE/fixtures/v0.4.1"
 
 # --- run.sh's own argv (NOT jutsu-spawn.sh's): --only <group> / --list --------------------
 ONLY_GROUP=""
@@ -173,13 +173,109 @@ test_ac13_pane_closed_on_failure_after_split() {
   teardown_case
 }
 
+# --- trk-7yd: a --worktree member lands in the CALLER'S workspace, not a new one --------
+
+test_trk7yd_worktree_defaults_to_tab_in_callers_workspace() {
+  CURRENT_TEST="trk7yd_worktree_defaults_to_tab_in_callers_workspace"
+  setup_case
+  export HERDR_WORKSPACE_ID="w7" HERDR_PANE_ID="w7:p1"
+  run_spawn --name t7-impl --kind shell --cwd "$REPO_DIR" --worktree t7-branch
+  [ "$CODE" -eq 0 ] || { fail_case "spawn failed ($CODE): $(cat "$ERR_FILE")"; teardown_case; return; }
+  grep -qE '^(worktree create|workspace create)' "$STUB_LOG" \
+    && { fail_case "a new herdr workspace was created for the worktree: $(cat "$STUB_LOG")"; teardown_case; return; }
+  local wt ws where branch
+  wt="$(jq -r '.worktree // empty' "$OUT_FILE")"
+  ws="$(jq -r '.workspace_id // empty' "$OUT_FILE")"
+  where="$(jq -r '.worktree_where // empty' "$OUT_FILE")"
+  branch="$(jq -r '.branch // empty' "$OUT_FILE")"
+  [ "$ws" = "w7" ] || { fail_case "member workspace is '$ws', expected the caller's w7: $(cat "$OUT_FILE")"; teardown_case; return; }
+  [ "$where" = "tab" ] || { fail_case "worktree_where is '$where', expected tab"; teardown_case; return; }
+  [ "$branch" = "t7-branch" ] || { fail_case "branch is '$branch', expected t7-branch"; teardown_case; return; }
+  [ -n "$wt" ] && [ -d "$wt" ] || { fail_case "worktree path missing on disk: '$wt'"; teardown_case; return; }
+  git -C "$REPO_DIR" worktree list | grep -qF "$wt" \
+    || { fail_case "git worktree list does not show $wt"; teardown_case; return; }
+  [ "$(git -C "$wt" rev-parse --abbrev-ref HEAD)" = "t7-branch" ] \
+    || { fail_case "worktree is not on branch t7-branch"; teardown_case; return; }
+  jq -e --arg wt "$wt" 'select(.[0]=="tab" and .[1]=="create")
+      | (index("--workspace") as $i | .[$i+1] == "w7") and (index("--cwd") as $j | .[$j+1] == $wt)' \
+    "$STUB_HERDR_JSON_LOG" | grep -q true \
+    || { fail_case "no 'tab create --workspace w7 --cwd <worktree>' call: $(cat "$STUB_LOG")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_trk7yd_worktree_where_workspace_keeps_own_workspace() {
+  CURRENT_TEST="trk7yd_worktree_where_workspace_keeps_own_workspace"
+  setup_case
+  run_spawn --name t7-ws --kind shell --cwd "$REPO_DIR" --worktree t7-ws-branch --worktree-where workspace
+  [ "$CODE" -eq 0 ] || { fail_case "spawn failed ($CODE): $(cat "$ERR_FILE")"; teardown_case; return; }
+  grep -q '^worktree create' "$STUB_LOG" \
+    || { fail_case "expected herdr worktree create: $(cat "$STUB_LOG")"; teardown_case; return; }
+  [ "$(jq -r '.worktree_where // empty' "$OUT_FILE")" = "workspace" ] \
+    || { fail_case "worktree_where is not workspace: $(cat "$OUT_FILE")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_trk7yd_worktree_without_caller_workspace_falls_back() {
+  CURRENT_TEST="trk7yd_worktree_without_caller_workspace_falls_back"
+  setup_case
+  unset HERDR_WORKSPACE_ID
+  run_spawn --name t7-fb --kind shell --cwd "$REPO_DIR" --worktree t7-fb-branch
+  [ "$CODE" -eq 0 ] || { fail_case "spawn failed ($CODE): $(cat "$ERR_FILE")"; teardown_case; return; }
+  grep -q '^worktree create' "$STUB_LOG" \
+    || { fail_case "expected fallback to herdr worktree create: $(cat "$STUB_LOG")"; teardown_case; return; }
+  [ "$(jq -r '.worktree_where // empty' "$OUT_FILE")" = "workspace" ] \
+    || { fail_case "worktree_where is not workspace after fallback: $(cat "$OUT_FILE")"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_trk7yd_tab_worktree_orphaned_never_removed() {
+  CURRENT_TEST="trk7yd_tab_worktree_orphaned_never_removed"
+  setup_case
+  export JUTSU_STATE_DIR="$SCRATCH/state"
+  STUB_FAIL="tab create"
+  export STUB_FAIL
+  run_spawn --name t7-orph --kind shell --cwd "$REPO_DIR" --worktree t7-orph-branch
+  [ "$CODE" -ne 0 ] || { fail_case "expected nonzero exit when tab create fails after the worktree exists"; teardown_case; return; }
+  local line wt cleanup
+  line="$(grep -m1 '"recovery"' "$ERR_FILE" || true)"
+  [ -n "$line" ] || { fail_case "no recovery JSON line on stderr: $(cat "$ERR_FILE")"; teardown_case; return; }
+  wt="$(echo "$line" | jq -r '.recovery.worktree // empty')"
+  cleanup="$(echo "$line" | jq -r '.recovery.cleanup // empty')"
+  [ -n "$wt" ] && [ -d "$wt" ] || { fail_case "orphaned worktree is not on disk: '$wt'"; teardown_case; return; }
+  git -C "$REPO_DIR" worktree list | grep -qF "$wt" \
+    || { fail_case "git worktree list does not show $wt"; teardown_case; return; }
+  case "$cleanup" in
+    *"herdr worktree remove"*) fail_case "tab-mode cleanup must not point at 'herdr worktree remove --workspace' (it would name the caller's workspace): $cleanup"; teardown_case; return ;;
+    *"worktree remove"*"$wt"*) ;;
+    *) fail_case "cleanup does not name 'git worktree remove <path>': $cleanup"; teardown_case; return ;;
+  esac
+  [ "$(tail -n1 "$(find "$JUTSU_STATE_DIR" -name '*.jsonl' | head -n1)" | jq -r '.status // empty')" = "orphaned" ] \
+    || { fail_case "registry row is not 'orphaned'"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_trk7yd_invalid_worktree_where_rejected() {
+  CURRENT_TEST="trk7yd_invalid_worktree_where_rejected"
+  setup_case
+  run_spawn --name t7-bad --kind shell --cwd "$REPO_DIR" --worktree t7-bad-branch --worktree-where pane
+  [ "$CODE" -eq 4 ] || { fail_case "expected exit 4 for --worktree-where pane, got $CODE"; teardown_case; return; }
+  git -C "$REPO_DIR" worktree list | grep -q t7-bad-branch \
+    && { fail_case "a worktree was created despite the invalid option"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
 test_ac13_worktree_orphaned_never_removed() {
   CURRENT_TEST="ac13_worktree_orphaned_never_removed"
   setup_case
   export JUTSU_STATE_DIR="$SCRATCH/state"
   STUB_FAIL="tab rename"
   export STUB_FAIL
-  run_spawn --name ac13b-role --kind shell --cwd "$REPO_DIR" --worktree ac13b-branch
+  run_spawn --name ac13b-role --kind shell --cwd "$REPO_DIR" --worktree ac13b-branch --worktree-where workspace
   [ "$CODE" -ne 0 ] || { fail_case "expected nonzero exit when tab rename fails after worktree create, got 0"; teardown_case; return; }
 
   grep -q '"recovery"' "$ERR_FILE" || { fail_case "no recovery JSON line on stderr: $(cat "$ERR_FILE")"; teardown_case; return; }
@@ -312,7 +408,7 @@ test_ac15_other_start_error_cleaned_up_exit1() {
   teardown_case
 }
 
-VALUE_OPTIONS="--name --kind --where --worktree --base --in-pane --beside --direction --ratio --cwd --stream --issue --cmd --timeout"
+VALUE_OPTIONS="--name --kind --where --worktree --worktree-where --base --in-pane --beside --direction --ratio --cwd --stream --issue --cmd --timeout"
 
 test_ac15_missing_value_for_every_option() {
   CURRENT_TEST="ac15_missing_value_for_every_option"
@@ -2326,6 +2422,11 @@ register_test() { # register_test <function_name>
 register_test test_ac12_bash_n_under_bash32
 register_test test_ac13_pane_closed_on_failure_after_split
 register_test test_ac13_worktree_orphaned_never_removed
+register_test test_trk7yd_worktree_defaults_to_tab_in_callers_workspace
+register_test test_trk7yd_worktree_where_workspace_keeps_own_workspace
+register_test test_trk7yd_worktree_without_caller_workspace_falls_back
+register_test test_trk7yd_tab_worktree_orphaned_never_removed
+register_test test_trk7yd_invalid_worktree_where_rejected
 register_test test_ac13_in_pane_never_closed_rename_reverted
 register_test test_ac14_in_pane_refuses_vim_foreground
 register_test test_ac14_in_pane_refuses_agent_occupied

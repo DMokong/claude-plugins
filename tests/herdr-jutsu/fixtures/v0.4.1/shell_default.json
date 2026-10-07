@@ -1,7 +1,7 @@
 {
-  "name": "b-ws",
+  "name": "b-shell",
   "kind": "shell",
-  "stream": "bstream",
+  "stream": "b",
   "issue": "",
   "pane_id": "<PANE>",
   "tab_id": "<TAB>",
@@ -9,6 +9,7 @@
   "cwd": "<SCRATCH>/repo",
   "worktree": "",
   "branch": "",
+  "worktree_where": "",
   "session_id": "",
   "status": "shell",
   "parent": "",
@@ -18,7 +19,7 @@
   "resume_args": [],
   "dangerous_override": false,
   "registry": "home",
-  "registry_path": "<SCRATCH>/home/.local/state/herdr-jutsu/bstream.jsonl",
+  "registry_path": "<SCRATCH>/home/.local/state/herdr-jutsu/b.jsonl",
   "outbound_isolation": "none",
   "isolation_detail": "shell members are not isolated",
   "spawned_at": "<TS>"

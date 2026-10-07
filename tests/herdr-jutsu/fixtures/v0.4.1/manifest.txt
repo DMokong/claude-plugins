@@ -3,7 +3,7 @@ claude_default: --name b-claude --kind claude --cwd <repo> (default --where pane
 codex_default: --name b-codex --kind codex --cwd <repo> (default --where pane; captures the Codex deny-policy isolation_detail and effective_agent_args -a never/--disable/-c surface; the deny-rules FILE content itself is excluded per AC-28)
 shell_where_workspace: --name b-ws --kind shell --cwd <repo> --where workspace --stream bstream (new workspace+tab+root pane)
 shell_where_tab: --name b-tab --kind shell --cwd <repo> --where tab (new tab in HERDR_WORKSPACE_ID)
-shell_worktree: --name b-wt-role --kind shell --cwd <repo> --worktree baseline-branch (git worktree creation; cwd/worktree become the new worktree path)
+shell_worktree: --name b-wt-role --kind shell --cwd <repo> --worktree baseline-branch (git worktree creation; cwd/worktree become the new worktree path; 0.4.1 default placement: a tab in the caller's workspace, worktree_where "tab")
 shell_in_pane: --name b-inpane --kind shell --cwd <repo> --in-pane w0:p9 (default idle-shell process-info/empty agent list; no pane created)
 claude_agent_args_redacted: --name b-redact --kind claude --cwd <repo> -- --api-key SECRET123 (agent_args/effective_agent_args carry <redacted>, never the secret)
 claude_dangerous_override: --name b-danger --kind claude --cwd <repo> --allow-dangerous-agent-flags -- --dangerously-skip-permissions (dangerous_override:true)

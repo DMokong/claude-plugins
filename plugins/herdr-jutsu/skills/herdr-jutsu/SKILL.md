@@ -51,11 +51,13 @@ let the user decide. The launcher's project policy is scoped to the child checko
 | Helper tool, reviewer, reader | `--where pane` (default, sibling of you) |
 | A member the human will focus on for a while | `--where tab` |
 | A separate stream in the same checkout | `--where workspace` |
-| **A second writer on the same repo** | `--worktree <branch>` — always. Two writers, one checkout = clobbered work |
+| **A second writer on the same repo** | `--worktree <branch>` — always. Two writers, one checkout = clobbered work. Opens as a **tab in your workspace** |
 
    Readers and tooling share the writer's checkout (`--cwd <worktree path>`,
    `--beside <writer>`); every additional **writer** — Claude or Codex — gets its own
-   `--worktree`. A fresh worktree is a clean checkout of a commit: **no gitignored state**
+   `--worktree`. The member is a tab in *your* workspace, so the crew stays together; only
+   pass `--worktree-where workspace` if the user asks for a separate herdr workspace (herdr
+   groups those by repo, not by who spawned them). A fresh worktree is a clean checkout of a commit: **no gitignored state**
    (`logs/`, `.env`, `node_modules/`) and **none of your uncommitted changes** — point
    tooling at the main checkout by absolute path, and commit (or name in the brief) anything
    a member must see. Before spawning a writer into a **different repo**, compare its
@@ -220,8 +222,9 @@ first throws away the only copy of the context. Successor is `<name>-2`, same cw
 launch args — read them from the registry row's `agent_args` array. Full procedure,
 revive-by-resume (`resume_args` differs per kind), cleanup and parent-resume reconciliation:
 `references/comms-and-handoff.md`. Retire only what the registry says this crew created, and
-it lives wherever the spawn line's `registry_path` pointed. `herdr worktree remove` leaves
-the branch behind; check `git -C <worktree> status` first, and never reach for `--force`.
+it lives wherever the spawn line's `registry_path` pointed. Removing a worktree leaves the
+branch behind; check `git -C <worktree> status` first, and never reach for `--force`. Which
+remove command applies depends on the row's `worktree_where` — see the reference.
 
 ## Common mistakes
 

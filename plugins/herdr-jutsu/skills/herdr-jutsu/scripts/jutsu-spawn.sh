@@ -24,7 +24,13 @@ Usage: jutsu-spawn.sh --name <stream>-<role> --kind claude|codex|shell [options]
 
 Placement (pick one; default --where pane):
   --where pane|tab|workspace   sibling pane of the caller (default), new tab, or new workspace
-  --worktree BRANCH            new git worktree + its own herdr workspace (implies isolation)
+  --worktree BRANCH            new git worktree, opened as a tab in YOUR workspace (implies
+                               isolation); lives at ~/.herdr/worktrees/<repo>/<branch>
+  --worktree-where tab|workspace
+                               tab (default): the worktree member is a tab in the caller's
+                               workspace. workspace: herdr creates the worktree and gives it
+                               its own workspace, which herdr groups by repo, not by caller.
+                               Falls back to workspace when HERDR_WORKSPACE_ID is unset.
   --base REF                   base ref for --worktree (default: current HEAD)
   --in-pane PANE_ID            reuse an existing idle shell pane instead of creating one
   --beside PANE_ID|AGENT_NAME|REGISTERED_SHELL_NAME
@@ -126,7 +132,9 @@ Failure after creation (EXIT trap, disarmed on success and on the retained agent
   - a pane/tab/workspace this run created (and no worktree) is closed;
   - a worktree this run created is NEVER removed: a {"recovery":{"status":"orphaned",...}}
     line goes to stderr and, when the registry is writable, the row is appended with
-    "status":"orphaned". Clean up by hand with `herdr worktree remove --workspace <id>`;
+    "status":"orphaned". Clean up by hand with the record's "cleanup" command — it
+    differs by --worktree-where (never run `herdr worktree remove --workspace` against a
+    tab-mode record: its workspace_id is the CALLER'S workspace);
   - an --in-pane pane is never closed; a rename this run applied is reverted.
 
 kind=claude auto-adds `-n <name>` so ListAgents/SendMessage address == herdr agent name.
@@ -207,7 +215,7 @@ herdr_run() { # herdr_run <herdr args...>  -> stdout in $HERDR_OUT, one-line std
 # ---------------------------------------------------------------------------------------
 # argument parsing (arity checked before every $2 read)
 # ---------------------------------------------------------------------------------------
-NAME="" KIND="" WHERE="pane" WORKTREE="" BASE="" IN_PANE="" BESIDE="" DIRECTION="" RATIO=""
+NAME="" KIND="" WHERE="pane" WORKTREE="" WORKTREE_WHERE="tab" BASE="" IN_PANE="" BESIDE="" DIRECTION="" RATIO=""
 CWD="$PWD" STREAM="" ISSUE="" CMD="" TIMEOUT=60000
 FOCUS_ARG=(--no-focus)
 ALLOW_DANGEROUS=0 NO_ISOLATION=0 STRICT_ISOLATION=0 PREFLIGHT_ONLY=0 RECORD_SESSION=0 SESSION_ID_ARG=""
@@ -221,6 +229,7 @@ while [ $# -gt 0 ]; do
     --kind) need_value "$1" $#; KIND="$2"; shift 2 ;;
     --where) need_value "$1" $#; WHERE="$2"; shift 2 ;;
     --worktree) need_value "$1" $#; WORKTREE="$2"; shift 2 ;;
+    --worktree-where) need_value "$1" $#; WORKTREE_WHERE="$2"; shift 2 ;;
     --base) need_value "$1" $#; BASE="$2"; shift 2 ;;
     --in-pane) need_value "$1" $#; IN_PANE="$2"; shift 2 ;;
     --beside) need_value "$1" $#; BESIDE="$2"; shift 2 ;;
@@ -356,6 +365,7 @@ ver_ge "$HERDR_VERSION" "$HERDR_MIN" || fail herdr_version_too_old \
 if [ "$RECORD_SESSION" -ne 1 ]; then
   case "$KIND" in claude|codex|shell) ;; *) fail invalid_kind "--kind must be claude, codex, or shell" 4 ;; esac
   case "$WHERE" in pane|tab|workspace) ;; *) fail invalid_where "--where must be pane, tab, or workspace" 4 ;; esac
+  case "$WORKTREE_WHERE" in tab|workspace) ;; *) fail invalid_where "--worktree-where must be tab or workspace" 4 ;; esac
 fi
 [ -n "$STREAM" ] || STREAM="${NAME%%-*}"
 [[ "$STREAM" =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || fail unsafe_registry_path \
@@ -1085,7 +1095,7 @@ if [ "$ALLOW_DANGEROUS" -eq 1 ]; then DANGEROUS_JSON=true; else DANGEROUS_JSON=f
 # ---------------------------------------------------------------------------------------
 # resource tracking + EXIT trap
 # ---------------------------------------------------------------------------------------
-WORKSPACE_ID="" TAB_ID="" PANE_ID="" WT_PATH="" WT_BRANCH=""
+WORKSPACE_ID="" TAB_ID="" PANE_ID="" WT_PATH="" WT_BRANCH="" WT_WHERE="" WT_REPO=""
 CREATED_PANE=""          # a pane/tab/workspace root THIS run created -> closable
 IN_PANE_ID="" IN_PANE_LABEL="" IN_PANE_RENAMED=0
 SESSION_ID="" STATUS=""
@@ -1263,7 +1273,7 @@ build_line() { # build_line <status>
   jq -cn \
     --arg name "$NAME" --arg kind "$KIND" --arg stream "$STREAM" --arg issue "$ISSUE" \
     --arg pane "$PANE_ID" --arg tab "$TAB_ID" --arg ws "$WORKSPACE_ID" --arg cwd "$CWD" \
-    --arg wt "$WT_PATH" --arg branch "$WT_BRANCH" --arg session "$SESSION_ID" \
+    --arg wt "$WT_PATH" --arg branch "$WT_BRANCH" --arg wtw "$WT_WHERE" --arg session "$SESSION_ID" \
     --arg status "$1" --arg parent "$PARENT" --arg parent_pane "${HERDR_PANE_ID:-}" \
     --argjson args "$ARGS_JSON" --argjson effective_args "$EFFECTIVE_ARGS_JSON" \
     --argjson resume "$RESUME_JSON" \
@@ -1272,7 +1282,8 @@ build_line() { # build_line <status>
     --arg oi "$OUTBOUND_ISOLATION" --arg id "$ISOLATION_DETAIL" \
     --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{name:$name, kind:$kind, stream:$stream, issue:$issue, pane_id:$pane, tab_id:$tab,
-      workspace_id:$ws, cwd:$cwd, worktree:$wt, branch:$branch, session_id:$session,
+      workspace_id:$ws, cwd:$cwd, worktree:$wt, branch:$branch, worktree_where:$wtw,
+      session_id:$session,
       status:$status, parent:$parent, parent_pane:$parent_pane, agent_args:$args,
       effective_agent_args:$effective_args,
       resume_args:$resume, dangerous_override:$danger, registry:$registry,
@@ -1385,11 +1396,18 @@ on_exit() {
     release_policy_lock
     if [ -n "$WT_PATH" ]; then
       # NEVER auto-remove a worktree: silently deleting work is the scarier failure.
+      local wt_cleanup="herdr worktree remove --workspace $WORKSPACE_ID"
+      if [ "$WT_WHERE" = tab ]; then
+        # workspace_id here is the CALLER'S workspace: never point herdr's worktree
+        # removal at it. The tab (if it got that far) is left open, like the workspace is.
+        wt_cleanup="git -C $WT_REPO worktree remove $WT_PATH"
+        [ -z "$PANE_ID" ] || wt_cleanup="herdr pane close $PANE_ID && $wt_cleanup"
+      fi
       jq -cn --arg wt "$WT_PATH" --arg br "$WT_BRANCH" --arg ws "$WORKSPACE_ID" \
         --arg pane "$PANE_ID" --arg reason "${FAIL_REASON:-unknown_failure}" \
-        --arg cleanup "herdr worktree remove --workspace $WORKSPACE_ID" \
-        '{recovery:{status:"orphaned", worktree:$wt, branch:$br, workspace_id:$ws,
-          pane_id:$pane, reason:$reason, cleanup:$cleanup}}' >&2
+        --arg cleanup "$wt_cleanup" --arg wtw "$WT_WHERE" \
+        '{recovery:{status:"orphaned", worktree:$wt, branch:$br, worktree_where:$wtw,
+          workspace_id:$ws, pane_id:$pane, reason:$reason, cleanup:$cleanup}}' >&2
       append_registry "$(build_line orphaned)"
     elif [ -n "$CREATED_PANE" ]; then
       herdr pane close "$CREATED_PANE" >/dev/null 2>&1
@@ -1790,20 +1808,59 @@ if [ -n "$WORKTREE" ]; then
         "base ref $BASE tracks a differing Codex isolation policy; refusing to create the worktree"
     fi
   fi
-  herdr_run worktree create --cwd "$CWD" --branch "$WORKTREE" --base "$BASE" --label "$STREAM" "${FOCUS_ARG[@]}" \
-    || fail worktree_create_failed "herdr worktree create failed for branch $WORKTREE: ${HERDR_ERRTEXT:-no error output}" 1
-  R="$HERDR_OUT"
-  WORKSPACE_ID="$(jq -r '.result.workspace.workspace_id // empty' <<<"$R")"
-  TAB_ID="$(jq -r '.result.tab.tab_id // empty' <<<"$R")"
-  PANE_ID="$(jq -r '.result.root_pane.pane_id // empty' <<<"$R")"
-  WT_PATH="$(jq -r '.result.worktree.path // empty' <<<"$R")"
-  WT_BRANCH="$(jq -r '.result.worktree.branch // empty' <<<"$R")"
-  CREATED_PANE="$PANE_ID"
-  TRAP_ARMED=1
-  [ -n "$WT_PATH" ] || fail worktree_create_failed "herdr worktree create returned no worktree path" 1
-  CWD="$WT_PATH"
-  herdr_run tab rename "$TAB_ID" "$NAME" \
-    || fail tab_rename_failed "herdr tab rename $TAB_ID failed: ${HERDR_ERRTEXT:-no error output}" 1
+  WT_WHERE="$WORKTREE_WHERE"
+  # A tab needs a workspace to live in; outside a herdr pane there is none to anchor on.
+  [ -n "${HERDR_WORKSPACE_ID:-}" ] || WT_WHERE="workspace"
+  if [ "$WT_WHERE" = tab ]; then
+    # herdr's own `worktree create` always opens a NEW workspace and groups it by repo,
+    # not by caller (trk-7yd) — so the member showed up beside whichever workspace held
+    # the main checkout. Create the worktree with git, in herdr's usual location, and open
+    # it as a tab in the caller's workspace instead.
+    WT_COMMON="$(git -C "$CWD" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    [ -n "$WT_COMMON" ] || fail worktree_create_failed "--worktree: $CWD is not inside a git repository" 1
+    WT_REPO="$(dirname "$WT_COMMON")"
+    WT_TARGET="${JUTSU_WORKTREE_ROOT:-$HOME/.herdr/worktrees}/$(basename "$WT_REPO")/$WORKTREE"
+    [ ! -e "$WT_TARGET" ] || fail worktree_create_failed \
+      "worktree path already exists: $WT_TARGET (remove it, or pick another branch name)" 1
+    mkdir -p "$(dirname "$WT_TARGET")" 2>/dev/null \
+      || fail worktree_create_failed "could not create $(dirname "$WT_TARGET")" 1
+    if git -C "$CWD" show-ref --verify --quiet "refs/heads/$WORKTREE"; then
+      # an existing branch is checked out as-is (git refuses if another worktree has it)
+      WT_ERR="$(git -C "$CWD" worktree add -q "$WT_TARGET" "$WORKTREE" 2>&1)" \
+        || fail worktree_create_failed "git worktree add failed for existing branch $WORKTREE: $(oneline "$WT_ERR")" 1
+    else
+      WT_ERR="$(git -C "$CWD" worktree add -q -b "$WORKTREE" "$WT_TARGET" "$BASE" 2>&1)" \
+        || fail worktree_create_failed "git worktree add failed for branch $WORKTREE: $(oneline "$WT_ERR")" 1
+    fi
+    WT_PATH="$WT_TARGET"
+    WT_BRANCH="$WORKTREE"
+    WORKSPACE_ID="$HERDR_WORKSPACE_ID"
+    TRAP_ARMED=1
+    herdr_run tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$WT_PATH" --label "$NAME" "${FOCUS_ARG[@]}" \
+      || fail tab_create_failed "herdr tab create failed for worktree $WT_PATH: ${HERDR_ERRTEXT:-no error output}" 1
+    R="$HERDR_OUT"
+    TAB_ID="$(jq -r '.result.tab.tab_id // empty' <<<"$R")"
+    PANE_ID="$(jq -r '.result.root_pane.pane_id // empty' <<<"$R")"
+    WORKSPACE_ID="$(jq -r '.result.root_pane.workspace_id // empty' <<<"$R")"
+    [ -n "$WORKSPACE_ID" ] || WORKSPACE_ID="$HERDR_WORKSPACE_ID"
+    CREATED_PANE="$PANE_ID"
+    CWD="$WT_PATH"
+  else
+    herdr_run worktree create --cwd "$CWD" --branch "$WORKTREE" --base "$BASE" --label "$STREAM" "${FOCUS_ARG[@]}" \
+      || fail worktree_create_failed "herdr worktree create failed for branch $WORKTREE: ${HERDR_ERRTEXT:-no error output}" 1
+    R="$HERDR_OUT"
+    WORKSPACE_ID="$(jq -r '.result.workspace.workspace_id // empty' <<<"$R")"
+    TAB_ID="$(jq -r '.result.tab.tab_id // empty' <<<"$R")"
+    PANE_ID="$(jq -r '.result.root_pane.pane_id // empty' <<<"$R")"
+    WT_PATH="$(jq -r '.result.worktree.path // empty' <<<"$R")"
+    WT_BRANCH="$(jq -r '.result.worktree.branch // empty' <<<"$R")"
+    CREATED_PANE="$PANE_ID"
+    TRAP_ARMED=1
+    [ -n "$WT_PATH" ] || fail worktree_create_failed "herdr worktree create returned no worktree path" 1
+    CWD="$WT_PATH"
+    herdr_run tab rename "$TAB_ID" "$NAME" \
+      || fail tab_rename_failed "herdr tab rename $TAB_ID failed: ${HERDR_ERRTEXT:-no error output}" 1
+  fi
 elif [ -n "$IN_PANE" ]; then
   herdr_run pane get "$IN_PANE" \
     || fail unknown_anchor "--in-pane $IN_PANE: no such pane (${HERDR_ERRTEXT:-no error output})" 2

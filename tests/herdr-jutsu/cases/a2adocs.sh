@@ -120,8 +120,9 @@ test_a2adocs_skill_pointer_and_line_budget() {
   CURRENT_TEST="a2adocs_skill_pointer_and_line_budget"
   local lines
   lines="$(wc -l <"$A2ASKILL" | tr -d ' ')"
-  [ "$lines" -le 240 ] || {
-    fail_case "SKILL.md is $lines lines; line budget is 240"
+  # AC-20: the A2A pointer may add at most 6 lines. Released 0.4.1 SKILL.md is 239 lines.
+  [ "$lines" -le 245 ] || {
+    fail_case "SKILL.md is $lines lines; line budget is 245 (0.4.1's 239 + 6)"
     return
   }
   a2adocs_require "$A2ASKILL" 'references/a2a.md' 'required brief clause' \

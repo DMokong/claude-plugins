@@ -104,7 +104,7 @@ $J --preflight --name inbox-impl --kind claude --cwd "$PWD"
 # read-only Codex reviewer beside you
 $J --name inbox-review-cdx --kind codex -- -s read-only -a never
 
-# Sonnet implementer in its own git worktree + herdr workspace
+# Sonnet implementer in its own git worktree, opened as a tab in your workspace
 $J --name inbox-impl --kind claude --worktree inbox-drain -- \
    --model sonnet --effort medium --permission-mode acceptEdits
 
@@ -171,7 +171,7 @@ its startup dialog.
 | What | Where |
 |---|---|
 | Crew registry (one JSONL per stream) | first writable of `$JUTSU_STATE_DIR` → `${XDG_STATE_HOME:-~/.local/state}/herdr-jutsu/<stream>.jsonl` → `<repo>/.jutsu/state/<stream>.jsonl` → nowhere |
-| Worktrees | wherever herdr puts them — `~/.herdr/worktrees/<repo>/<branch>` |
+| Worktrees | `~/.herdr/worktrees/<repo>/<branch>` (herdr's own location; override the root with `$JUTSU_WORKTREE_ROOT`) |
 | Handoff notes | `<member cwd>/.jutsu/handoff-<name>.md` (add `.jutsu/` to your global gitignore) |
 
 The state directory is created `0700` and the registry file `0600`, and a symlinked one is
@@ -190,8 +190,9 @@ Ask the parent to retire the crew, or by hand:
 ```bash
 herdr pane close <pane_id>                          # a member or helper
 git -C <worktree> status --short                    # look before removing
-herdr worktree remove --workspace <workspace_id>    # a worktree stream
-git branch -d <branch>                              # herdr leaves the branch behind
+git worktree remove <worktree>                      # a worktree member (default: a tab in your workspace)
+herdr worktree remove --workspace <workspace_id>    # only for --worktree-where workspace
+git branch -d <branch>                              # the branch is left behind either way
 ```
 
 ## Known limits

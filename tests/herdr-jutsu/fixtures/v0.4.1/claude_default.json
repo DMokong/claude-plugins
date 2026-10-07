@@ -1,5 +1,5 @@
 {
-  "name": "b-danger",
+  "name": "b-claude",
   "kind": "claude",
   "stream": "b",
   "issue": "",
@@ -9,17 +9,15 @@
   "cwd": "<SCRATCH>/repo",
   "worktree": "",
   "branch": "",
+  "worktree_where": "",
   "session_id": "sess-1",
   "status": "idle",
   "parent": "",
   "parent_pane": "<PANE>",
-  "agent_args": [
-    "--dangerously-skip-permissions"
-  ],
+  "agent_args": [],
   "effective_agent_args": [
     "-n",
-    "b-danger",
-    "--dangerously-skip-permissions",
+    "b-claude",
     "--disallowedTools",
     "Bash(*herdr*)",
     "ListAgents"
@@ -28,10 +26,10 @@
     "--resume",
     "sess-1"
   ],
-  "dangerous_override": true,
+  "dangerous_override": false,
   "registry": "home",
   "registry_path": "<SCRATCH>/home/.local/state/herdr-jutsu/b.jsonl",
   "outbound_isolation": "partial",
-  "isolation_detail": "Claude string-pattern deny for herdr, plus ListAgents denied; SendMessage stays available, so the member can message sessions it is given the name of; permission mode from launch args: dangerously-skip-permissions; the string-pattern deny is the ONLY barrier because this mode does not prompt for Bash",
+  "isolation_detail": "Claude string-pattern deny for herdr, plus ListAgents denied; SendMessage stays available, so the member can message sessions it is given the name of; no permission mode in the launch args, so the member's own settings decide it — if they select auto, dontAsk or bypassPermissions, the string-pattern deny may be the ONLY barrier",
   "spawned_at": "<TS>"
 }

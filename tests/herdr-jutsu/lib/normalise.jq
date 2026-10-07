@@ -1,7 +1,7 @@
 # tests/herdr-jutsu/lib/normalise.jq — mask volatile fields in a jutsu-spawn.sh stdout /
 # registry-row JSON object so two runs of the identical scenario, each in its own
 # `mktemp -d` scratch tree, normalise to byte-identical JSON. Used both to capture
-# tests/herdr-jutsu/fixtures/v0.4.0/*.json and, later, by tests/herdr-jutsu/cases/*.sh to
+# tests/herdr-jutsu/fixtures/v0.4.1/*.json and, later, by tests/herdr-jutsu/cases/*.sh to
 # re-normalise a fresh run for comparison against those fixtures (AC-1).
 #
 # Usage: jq -c -f lib/normalise.jq --arg scratch "<absolute scratch dir for this case>" <in.json

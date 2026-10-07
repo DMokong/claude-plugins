@@ -38,7 +38,7 @@
         "url": "https://github.com/DMokong/speculator.git"
       },
       "description": "Speculator — spec quality scoring and a 7-gate pipeline (4 required + 3 opt-in: eval intent, eval quality, comprehension — each bindable to spec risk levels) with LLM-as-judge evaluation, git worktree isolation, and beads issue tracking. Includes asbuilt-quiz: a human-facing comprehension quiz generator built on the As-Built knowledge system. Quality In, Quality Out.",
-      "version": "2.21.1",
+      "version": "2.21.3",
       "author": {
         "name": "Dustin Cheng"
       },
@@ -95,7 +95,7 @@
       "name": "herdr-jutsu",
       "source": "./plugins/herdr-jutsu",
       "description": "Raise an isolated crew inside Herdr — brief once, wait on a literal pane id, pull bounded results, handle blocked members, and hand long jobs to a fresh session.",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "author": {
         "name": "Dustin Cheng"
       },

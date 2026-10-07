@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# tests/herdr-jutsu/cases/baseline.sh — AC-1: freezes 0.4.0 normalised effective-argv /
-# registry-row fixtures for jutsu-spawn.sh's non-`--a2a` spawn scenarios (0.4.0 has no
+# tests/herdr-jutsu/cases/baseline.sh — AC-1: freezes 0.4.1 normalised effective-argv /
+# registry-row fixtures for jutsu-spawn.sh's non-`--a2a` spawn scenarios (0.4.1 has no
 # `--a2a` at all; this file is the regression net every later task in this stream diffs
 # against). Sourced by tests/herdr-jutsu/run.sh's case-discovery loop, which sets
 # CASE_GROUP="baseline" (this file's stem) before sourcing it and provides every helper used
@@ -10,9 +10,9 @@
 # "test_" prefix.
 #
 # Fixtures and normalisation:
-#   - tests/herdr-jutsu/fixtures/v0.4.0/manifest.txt lists every captured scenario with its
+#   - tests/herdr-jutsu/fixtures/v0.4.1/manifest.txt lists every captured scenario with its
 #     invocation, one line each: "<name>: <one-line description>".
-#   - tests/herdr-jutsu/fixtures/v0.4.0/<name>.json is that scenario's normalised stdout line
+#   - tests/herdr-jutsu/fixtures/v0.4.1/<name>.json is that scenario's normalised stdout line
 #     (== the registry row jutsu-spawn.sh appends, per build_line() in jutsu-spawn.sh) with
 #     spawned_at, pane/tab/workspace ids and any scratch-dir path masked by
 #     tests/herdr-jutsu/lib/normalise.jq.
@@ -21,11 +21,11 @@
 # NORMALISE_JQ / FIXTURES_DIR default relative to $HERE (set by run.sh); resolved here too so
 # this file stays runnable if ever sourced standalone.
 NORMALISE_JQ="${NORMALISE_JQ:-$HERE/lib/normalise.jq}"
-FIXTURES_DIR="${FIXTURES_DIR:-$HERE/fixtures/v0.4.0}"
+FIXTURES_DIR="${FIXTURES_DIR:-$HERE/fixtures/v0.4.1}"
 
 # assert_baseline_fixture <fixture-name>
 # Call AFTER setup_case + run_spawn have produced $CODE/$OUT_FILE/$SCRATCH for the scenario
-# named <fixture-name> in fixtures/v0.4.0/manifest.txt. Normalises $OUT_FILE and diffs it
+# named <fixture-name> in fixtures/v0.4.1/manifest.txt. Normalises $OUT_FILE and diffs it
 # byte-exact (as parsed JSON, via jq -c on both sides) against the checked-in fixture. Always
 # tears the case down before returning.
 assert_baseline_fixture() {
@@ -50,7 +50,7 @@ assert_baseline_fixture() {
   fi
   expected="$(jq -c . "$fixture_file" 2>/dev/null)"
   if [ "$normalized" != "$expected" ]; then
-    fail_case "scenario $fixture_name: normalised 0.4.0 output changed -- got: $normalized -- expected: $expected"
+    fail_case "scenario $fixture_name: normalised 0.4.1 output changed -- got: $normalized -- expected: $expected"
     teardown_case
     return
   fi
