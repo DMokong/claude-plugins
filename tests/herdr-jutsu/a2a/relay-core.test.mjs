@@ -24,7 +24,14 @@ test('AC-8: MCP initialize, exact tool schema, and unknown tools have no side ef
     const initialized = await client.request('initialize', { protocolVersion: '2025-06-18' });
     assert.equal(initialized.result.protocolVersion, '2025-06-18');
     const listed = await client.request('tools/list');
-    assert.deepEqual(listed.result.tools, [{
+    // The description steers a Codex member to this tool and away from Codex's built-in
+    // collaboration.send_message, which cannot reach crew peers (found live, gate L3).
+    const { description, ...tool } = listed.result.tools[0];
+    assert.match(description, /herdr_jutsu_a2a/);
+    assert.match(description, /agent_name/);
+    assert.equal(initialized.result.instructions, description);
+    assert.equal(listed.result.tools.length, 1);
+    assert.deepEqual([tool], [{
       name: 'send_message',
       inputSchema: {
         type: 'object', properties: { to: { type: 'string' }, body: { type: 'string' } },

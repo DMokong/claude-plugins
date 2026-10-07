@@ -654,6 +654,13 @@ function requireOptions(options, names) {
   }
 }
 
+// Codex also ships a built-in collaboration.send_message (sub-agents, addressed by agent_name)
+// that no feature flag removes; a member that picks it never reaches the relay (found live).
+const TOOL_DESCRIPTION = 'Send a message to a herdr-jutsu crew peer: `to` is the peer\'s member name, '
+  + '`body` is the text. This herdr_jutsu_a2a tool is the only way to reach a crew peer. A built-in '
+  + 'collaboration or sub-agent send_message tool (one that takes agent_name) addresses sub-agents, '
+  + 'cannot reach crew peers, and must not be used for them.';
+
 const toolSchema = {
   type: 'object',
   properties: { to: { type: 'string' }, body: { type: 'string' } },
@@ -688,10 +695,11 @@ async function mcpMode(args) {
       writeRpc({ jsonrpc: '2.0', id: request.id, result: {
         protocolVersion: request.params?.protocolVersion,
         capabilities: { tools: {} }, serverInfo: { name: 'herdr_jutsu_a2a', version: '0.5.0' },
+        instructions: TOOL_DESCRIPTION,
       } });
     } else if (request.method === 'tools/list') {
       writeRpc({ jsonrpc: '2.0', id: request.id, result: { tools: [
-        { name: 'send_message', inputSchema: toolSchema },
+        { name: 'send_message', description: TOOL_DESCRIPTION, inputSchema: toolSchema },
       ] } });
     } else if (request.method === 'tools/call') {
       if (request.params?.name !== 'send_message') {
