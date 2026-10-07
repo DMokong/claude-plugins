@@ -659,7 +659,9 @@ function requireOptions(options, names) {
 const TOOL_DESCRIPTION = 'Send a message to a herdr-jutsu crew peer: `to` is the peer\'s member name, '
   + '`body` is the text. This herdr_jutsu_a2a tool is the only way to reach a crew peer. A built-in '
   + 'collaboration or sub-agent send_message tool (one that takes agent_name) addresses sub-agents, '
-  + 'cannot reach crew peers, and must not be used for them.';
+  + 'cannot reach crew peers, and must not be used for them. A reply arrives as a new turn only '
+  + 'after your current turn ends: to wait for one, finish your turn. Do not sleep, poll or loop '
+  + 'while waiting, or the reply can never be delivered.';
 
 const toolSchema = {
   type: 'object',

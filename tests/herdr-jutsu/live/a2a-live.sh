@@ -386,9 +386,9 @@ gate_l2() {
   spawn_member codex "$stream" "$codex" "$claude"; codex_pane="$LAST_PANE"
   spawn_member claude "$stream" "$claude" "$codex"; claude_pane="$LAST_PANE"
   audit="$(audit_file "$stream")"
-  prompt_member_wait "$claude_pane" "Wait for a peer question from $codex. When it arrives, answer with send_message to $codex using body 'L2 Claude answer: four', then ask it a new question with a second send_message using body 'L2 Claude question: spell five'. Wait for its reply. Afterwards join L2_ and CLAUDE_DONE with no spaces."
+  prompt_member_wait "$claude_pane" "Wait for a peer question from $codex. When it arrives, answer with send_message to $codex using body 'L2 Claude answer: four', then ask it a new question with a second send_message using body 'L2 Claude question: spell five'. Then end your turn; its reply arrives as a later turn. When it has arrived, join L2_ and CLAUDE_DONE with no spaces."
   wait_idle "$claude_pane" l2-claude-ready
-  prompt_member "$codex_pane" "Use send_message to ask $claude with body 'L2 Codex question: two plus two?'. Wait for its answer and its question. Answer its question with send_message to $claude using body 'L2 Codex answer: five'. Then join L2_ and CODEX_DONE with no spaces."
+  prompt_member "$codex_pane" "Use send_message to ask $claude with body 'L2 Codex question: two plus two?'. Then end your turn; its answer and its question arrive as later turns. When both have arrived, answer its question with send_message to $claude using body 'L2 Codex answer: five'. Then join L2_ and CODEX_DONE with no spaces."
   wait_audit_count "$audit" "$codex" "$claude" delivered "" 1 l2-codex-question
   wait_audit_count "$audit" "$claude" "$codex" queued "" 2 l2-claude-answer-and-question
   wait_audit_count "$audit" "$codex" "$claude" delivered "" 2 l2-codex-answer

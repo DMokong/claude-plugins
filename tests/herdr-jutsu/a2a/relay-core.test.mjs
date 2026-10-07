@@ -29,6 +29,7 @@ test('AC-8: MCP initialize, exact tool schema, and unknown tools have no side ef
     const { description, ...tool } = listed.result.tools[0];
     assert.match(description, /herdr_jutsu_a2a/);
     assert.match(description, /agent_name/);
+    assert.match(description, /finish your turn/);
     assert.equal(initialized.result.instructions, description);
     assert.equal(listed.result.tools.length, 1);
     assert.deepEqual([tool], [{
