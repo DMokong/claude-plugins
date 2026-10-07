@@ -1615,12 +1615,18 @@ acquire_policy_lock() {
       # trap. Break the lock only when the RECORDED holder is provably gone; a lock with no
       # readable pid is left alone (it may be mid-creation) and simply times out.
       holder=""
+      # The holder may release the lock between the -f test and the read: a failed read
+      # means "holder unknown", never a launcher failure (pipefail + set -e would exit 1
+      # here with no message).
       [ ! -f "$POLICY_LOCK_DIR/pid" ] || [ -L "$POLICY_LOCK_DIR/pid" ] \
-        || holder="$(head -n1 "$POLICY_LOCK_DIR/pid" 2>/dev/null | tr -cd '0-9')"
+        || holder="$(head -n1 "$POLICY_LOCK_DIR/pid" 2>/dev/null | tr -cd '0-9')" \
+        || holder=""
       if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
         rm -f "$POLICY_LOCK_DIR/pid" 2>/dev/null || true
         rmdir "$POLICY_LOCK_DIR" 2>/dev/null || true
-        continue
+        # Retry at once only when the stale lock is really gone; a lock that cannot be
+        # removed must fall through to the sleep and the timeout, never spin.
+        [ -e "$POLICY_LOCK_DIR" ] || continue
       fi
     fi
     [ "$waited" -lt "$timeout_ms" ] || break
