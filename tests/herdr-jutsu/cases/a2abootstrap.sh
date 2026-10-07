@@ -164,7 +164,7 @@ test_a2abootstrap_incomplete_member_is_not_ready() {
   local relay_out="$SCRATCH/relay.out"
   printf '%s\n' \
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_message","arguments":{"to":"parent","body":"hello"}}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"crew_send","arguments":{"to":"parent","body":"hello"}}}' \
     | node "$A2A_BOOTSTRAP_RELAY" mcp --self boot-codex --stream boot \
         --a2a-dir "$JUTSU_STATE_DIR/a2a" --node "$(command -v node)" \
         --codex "$(command -v codex)" --herdr "$(command -v herdr)" --peer parent \

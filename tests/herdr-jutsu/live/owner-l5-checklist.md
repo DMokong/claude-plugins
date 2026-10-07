@@ -7,7 +7,7 @@ modify the parent's input line.
   conventions; the automated script itself closes its members during cleanup.
 - In the Claude parent's input line, type a distinctive string such as
   `L5-half-typed-DO-NOT-SEND`, but do not press Enter.
-- Cause the member to call `send_message` to the parent with a harmless body such as
+- Cause the member to call `crew_send` to the parent with a harmless body such as
   `L5 inbound check`.
 - Confirm the inbound peer message wakes the idle parent and is visibly labelled as a peer
   message.

@@ -15,7 +15,7 @@ async function withFixture(run) {
 }
 
 async function send(client, to = 'bob', body = 'hello from a peer') {
-  return client.request('tools/call', { name: 'send_message', arguments: { to, body } });
+  return client.request('tools/call', { name: 'crew_send', arguments: { to, body } });
 }
 
 test('AC-8: MCP initialize, exact tool schema, and unknown tools have no side effect', async () => {
@@ -33,7 +33,7 @@ test('AC-8: MCP initialize, exact tool schema, and unknown tools have no side ef
     assert.equal(initialized.result.instructions, description);
     assert.equal(listed.result.tools.length, 1);
     assert.deepEqual([tool], [{
-      name: 'send_message',
+      name: 'crew_send',
       inputSchema: {
         type: 'object', properties: { to: { type: 'string' }, body: { type: 'string' } },
         required: ['to', 'body'], additionalProperties: false,

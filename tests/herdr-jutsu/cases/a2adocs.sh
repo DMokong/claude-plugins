@@ -22,8 +22,8 @@ test_a2adocs_enable_brief_and_reply_rule() {
   CURRENT_TEST="a2adocs_enable_brief_and_reply_rule"
   a2adocs_require "$A2ADOC" '--a2a' '--peer <name>' \
     'For a mid-task question that blocks progress' \
-    'Reply to it with your `send_message` tool, addressed to the sender' \
-    'reply with `send_message`, `to` the labelled sender' \
+    'Reply to it with your `crew_send` tool, addressed to the sender' \
+    'reply with `crew_send`, `to` the labelled sender' \
     '`--codex <absolute path>` is required when the recipient is a Codex member' || return
   ok "$CURRENT_TEST"
 }

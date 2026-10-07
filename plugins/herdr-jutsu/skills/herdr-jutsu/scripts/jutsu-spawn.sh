@@ -987,7 +987,7 @@ if [ "$A2A" -eq 1 ]; then
       array_has "$A2A_DENY" ${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"} || LAUNCH_ARGS+=("$A2A_DENY")
     done
     LAUNCH_ARGS+=(--messaging-socket-path "$A2A_SOCKET" --mcp-config "$A2A_MCP_JSON" \
-      --allowedTools mcp__herdr_jutsu_a2a__send_message)
+      --allowedTools mcp__herdr_jutsu_a2a__crew_send)
   else
     A2A_TOML_COMMAND="$(jq -Rn --arg v "$A2A_NODE" '$v')"
     A2A_TOML_ARGS="$(jq -cn '$ARGS.positional' --args -- "${A2A_SERVER_ARGS[@]}")"

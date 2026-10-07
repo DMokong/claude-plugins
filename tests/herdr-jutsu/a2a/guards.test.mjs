@@ -56,7 +56,7 @@ async function invoke(mode, value, options = {}) {
       peers: options.peers, herdr: options.herdr,
     }, env);
     const response = await client.request('tools/call', {
-      name: 'send_message', arguments: { to, body },
+      name: 'crew_send', arguments: { to, body },
     });
     await client.close();
     return toolResult(response);
@@ -93,7 +93,7 @@ async function invokeMcpProcess(value, self, env) {
   child.stdout.on('data', (chunk) => { stdout += chunk; });
   child.stdin.end(`${JSON.stringify({
     jsonrpc: '2.0', id: 1, method: 'tools/call',
-    params: { name: 'send_message', arguments: { to: 'bob', body: `global-${self}` } },
+    params: { name: 'crew_send', arguments: { to: 'bob', body: `global-${self}` } },
   })}\n`);
   const [code] = await once(child, 'exit');
   assert.equal(code, 0);
