@@ -9,7 +9,7 @@ a2a_parent_fixture() {
   local socket_dir="$SCRATCH"
   chmod 700 "$socket_dir"
   export CLAUDE_CODE_MESSAGING_SOCKET="$socket_dir/p.sock"
-  : >"$CLAUDE_CODE_MESSAGING_SOCKET"
+  make_unix_socket "$CLAUDE_CODE_MESSAGING_SOCKET"
 }
 
 a2a_cleanup() {
@@ -149,6 +149,23 @@ test_a2acompat_untrusted_codex_refused() {
   a2a_assert_refusal 5 a2a_untrusted_executable
 }
 
+test_a2acompat_untrusted_codex_directory_refused() {
+  CURRENT_TEST="a2acompat_untrusted_codex_directory_refused"; a2a_begin
+  mkdir -p "$SCRATCH/baddir"
+  cp "$STUB_DIR/codex" "$SCRATCH/baddir/codex"; chmod 700 "$SCRATCH/baddir/codex"
+  chmod 770 "$SCRATCH/baddir"
+  export PATH="$SCRATCH/baddir:$PATH"
+  run_spawn --name c --kind claude --cwd "$REPO_DIR" --a2a
+  a2a_assert_refusal 5 a2a_untrusted_executable
+}
+
+test_a2acompat_parent_path_must_be_a_socket() {
+  CURRENT_TEST="a2acompat_parent_path_must_be_a_socket"; a2a_begin
+  rm -f "$CLAUDE_CODE_MESSAGING_SOCKET"; : >"$CLAUDE_CODE_MESSAGING_SOCKET"
+  run_spawn --name c --kind claude --cwd "$REPO_DIR" --a2a
+  a2a_assert_refusal 4 a2a_parent_unreachable
+}
+
 test_a2acompat_socket_path_limit() {
   CURRENT_TEST="a2acompat_socket_path_limit"; a2a_begin
   export JUTSU_STATE_DIR="$SCRATCH/$(printf 'x%.0s' {1..90})"
@@ -207,8 +224,12 @@ test_a2acompat_unsafe_parent_directory_refused() {
 test_a2acompat_strict_claude_and_safe_external_socket_allowed() {
   CURRENT_TEST="a2acompat_strict_claude_and_safe_external_socket_allowed"; a2a_begin
   run_spawn --name c --kind claude --cwd "$REPO_DIR" --a2a --strict-isolation
+  local args; args="$(jq -c '.effective_agent_args' "$OUT_FILE" 2>/dev/null || true)"
   if [ "$CODE" -ne 0 ]; then
     fail_case "expected strict isolated Claude A2A spawn to be allowed, got $CODE: $(cat "$ERR_FILE")"
+  elif ! printf '%s' "$args" | jq -e 'index("SendMessage") != null
+      and (index("--allowedTools") as $i | $i != null and .[$i + 1] == "mcp__herdr_jutsu_a2a__crew_send")' >/dev/null; then
+    fail_case "strict A2A spawn must keep SendMessage denied and allow only crew_send: $args"
   else
     ok "$CURRENT_TEST"
   fi
@@ -229,6 +250,8 @@ register_test test_a2acompat_registry_workspace_refused
 register_test test_a2acompat_parent_socket_required
 register_test test_a2acompat_node_20_required
 register_test test_a2acompat_untrusted_codex_refused
+register_test test_a2acompat_untrusted_codex_directory_refused
+register_test test_a2acompat_parent_path_must_be_a_socket
 register_test test_a2acompat_socket_path_limit
 register_test test_a2acompat_parent_must_be_named
 register_test test_a2acompat_record_session_not_applicable

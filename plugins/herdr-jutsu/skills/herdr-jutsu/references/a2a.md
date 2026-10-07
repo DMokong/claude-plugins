@@ -52,7 +52,9 @@ node <skill-dir>/scripts/jutsu-a2a.mjs send \
 ```
 
 `--codex <absolute path>` is required when the recipient is a Codex member: the relay never
-searches `PATH`, so without it the send fails. A Claude recipient does not need it.
+looks `codex` up, so without it the send fails. A Claude recipient does not need it. `send`
+runs in the parent's own shell and finds `herdr` on the parent's `PATH`, as the launcher does;
+pass `--herdr <absolute path>` to pin it.
 
 For multiline or shell-sensitive text, put the body in a file and use `--body-file <path>`.
 The parent command checks that `--from` is the recorded parent name and that the current
@@ -98,7 +100,7 @@ Every refusal below happens before a pane, worktree, registry row, or A2A file i
 | `--a2a --no-isolation` | exit 5 `a2a_requires_isolation` |
 | `--a2a` plus caller `--mcp-config`, `--strict-mcp-config`, `--allowedTools`, or any `mcp_servers.*` key | exit 5 `a2a_arg_conflict` |
 | `--a2a` plus registry `workspace` or `none` | exit 4 `a2a_registry_unsuitable` |
-| `--a2a` without a parent inbox socket | exit 4 `a2a_parent_unreachable` |
+| `--a2a` without a parent inbox socket, or with one that is not a Unix socket owned by you in a directory only you can write | exit 4 `a2a_parent_unreachable` |
 | `--a2a` without Node ≥ 20 | exit 4 `a2a_runtime_missing` |
 | member socket path over 100 bytes | exit 5 `socket_path_too_long` |
 | parent pane has no herdr agent name | exit 4 `a2a_parent_unnamed` |
@@ -108,7 +110,7 @@ Every refusal below happens before a pane, worktree, registry row, or A2A file i
 
 The launcher also rejects a group/world-writable `node`, `codex`, or `herdr` executable (or
 containing directory) as `a2a_untrusted_executable`. It resolves absolute executable paths at
-launch; the relay never consults `PATH`.
+launch; a member's relay never consults `PATH`.
 
 ## Kill switch
 
@@ -144,7 +146,8 @@ The residuals are:
   other side effects are intended.
 
 Messages are not durable or replayed and have no acknowledgement beyond `delivered` or
-`queued`. Successor handoff does not readdress them. Broadcast, engines other than Claude and
+`queued`. `delivered` means the recipient's inbox socket accepted the bytes, not that the
+session has read them: a session that never reads its inbox still reports `delivered`. Successor handoff does not readdress them. Broadcast, engines other than Claude and
 Codex, Codex parents receiving messages, Windows/Linux support, and stronger parent
 authentication are out of scope.
 

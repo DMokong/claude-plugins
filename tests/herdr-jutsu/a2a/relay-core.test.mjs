@@ -14,6 +14,11 @@ async function withFixture(run) {
   try { await run(value); } finally { await cleanup(value.root); }
 }
 
+async function auditCount(a2aDir, stream) {
+  const text = await fs.readFile(path.join(a2aDir, `${stream}.audit.jsonl`), 'utf8').catch(() => '');
+  return text.split('\n').filter(Boolean).length;
+}
+
 async function send(client, to = 'bob', body = 'hello from a peer') {
   return client.request('tools/call', { name: 'crew_send', arguments: { to, body } });
 }
@@ -159,6 +164,7 @@ test('AC-23: FIFO members file is refused', async (t) => {
     const client = new McpClient({ a2aDir, stream });
     assert.equal(toolResult(await send(client)).reason, 'storage_unsafe');
     await client.close();
+    assert.equal(await auditCount(a2aDir, stream), 1);
   });
 });
 
@@ -170,6 +176,7 @@ test('AC-23: simulated foreign-owned members file is refused', async () => {
     });
     assert.equal(toolResult(await send(client)).reason, 'storage_unsafe');
     await client.close();
+    assert.equal(await auditCount(a2aDir, stream), 1);
   });
 });
 
@@ -180,6 +187,7 @@ test('AC-23: member socket outside a2a sock directory is refused', async () => {
     const client = new McpClient({ a2aDir, stream });
     assert.equal(toolResult(await send(client)).reason, 'storage_unsafe');
     await client.close();
+    assert.equal(await auditCount(a2aDir, stream), 1);
   });
 });
 
@@ -205,6 +213,22 @@ test('stream lock recovers a missing owner only after its 30 second orphan windo
     await client.close();
   });
 });
+
+for (const [name, owner] of [['missing', null], ['malformed', '{not json']]) {
+  test(`AC-31: a lock with ${name} owner.json is not recovered at 29 seconds`, async () => {
+    await withFixture(async ({ a2aDir, stream }) => {
+      const lockDir = path.join(a2aDir, `${stream}.lock`);
+      await fs.mkdir(lockDir, { mode: 0o700 });
+      if (owner !== null) await writePrivate(path.join(lockDir, 'owner.json'), owner);
+      const old = new Date(1_000);
+      await fs.utimes(lockDir, old, old);
+      const client = new McpClient({ a2aDir, stream }, { A2A_TEST_MODE: '1', A2A_NOW_MS: '30000' });
+      assert.equal(toolResult(await send(client)).reason, 'busy_retry');
+      await client.close();
+      await fs.stat(lockDir);
+    });
+  });
+}
 
 test('mcp argv rejects unknown flags with exit 2', async () => {
   await assert.rejects(

@@ -13,7 +13,7 @@ a2abootstrap_begin() {
   unset A2A_TEST_LIVE_ROLLOUT 2>/dev/null
   export STUB_AGENTS='{"result":{"agents":[{"name":"parent","kind":"claude","pane_id":"w0:p1","agent_status":"idle"}]}}'
   export CLAUDE_CODE_MESSAGING_SOCKET="$SCRATCH/p.sock"
-  : >"$CLAUDE_CODE_MESSAGING_SOCKET"
+  make_unix_socket "$CLAUDE_CODE_MESSAGING_SOCKET"
   chmod 700 "$SCRATCH"
 
   local wrapper_dir="$SCRATCH/herdr-wrapper"

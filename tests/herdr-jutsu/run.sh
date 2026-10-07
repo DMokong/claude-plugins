@@ -76,6 +76,12 @@ fi
 SCRATCH=""
 REPO_DIR=""
 
+# The launcher requires the parent inbox to be a real Unix socket. A bound socket file
+# outlives the process that made it, so no listener has to stay up.
+make_unix_socket() { # make_unix_socket <path>
+  node -e 'require("net").createServer().listen(process.argv[1],()=>process.exit(0))' "$1"
+}
+
 setup_case() {
   SCRATCH="$(mktemp -d)"
   REPO_DIR="$SCRATCH/repo"
@@ -2563,6 +2569,16 @@ while [ "$i" -lt "${#TEST_FUNCS[@]}" ]; do
   fi
   i=$((i + 1))
 done
+
+# The relay's own tests are node:test files; run them here so one command covers both.
+if [ -z "$ONLY_GROUP" ] || [ "$ONLY_GROUP" = relay ]; then
+  CURRENT_TEST="relay_node_tests"
+  if RELAY_OUT="$(node --test "$HERE"/a2a/*.test.mjs 2>&1)"; then
+    ok "$CURRENT_TEST"
+  else
+    fail_case "node --test a2a/*.test.mjs failed: $(printf '%s\n' "$RELAY_OUT" | grep -E '^not ok|^ℹ (pass|fail)' | tr '\n' ' ')"
+  fi
+fi
 
 TOTAL=$((PASS + FAIL))
 if [ "$FAIL" -eq 0 ]; then

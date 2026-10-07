@@ -959,6 +959,8 @@ if [ "$A2A" -eq 1 ]; then
   A2A_PARENT_DIR="$(dirname "$A2A_PARENT_SOCKET")"
   [ -d "$A2A_PARENT_DIR" ] || fail a2a_parent_unreachable \
     "parent inbox directory does not exist: $A2A_PARENT_DIR" 4
+  [ -S "$A2A_PARENT_SOCKET" ] || fail a2a_parent_unreachable \
+    "parent inbox is not a Unix socket: $A2A_PARENT_SOCKET" 4
   A2A_PARENT_MODE="$(path_mode "$A2A_PARENT_DIR" || true)"
   A2A_PARENT_PAIR="${A2A_PARENT_MODE#${A2A_PARENT_MODE%??}}"
   A2A_PARENT_GROUP="${A2A_PARENT_PAIR%?}"; A2A_PARENT_WORLD="${A2A_PARENT_PAIR#?}"

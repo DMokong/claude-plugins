@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import net from 'node:net';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -293,6 +294,35 @@ test('AC-25: parent lookup uses the parent record and checks its pane agent', as
       to: 'parent', env: { A2A_TEST_SOCKET_PATH: value.members.parent.socket },
     });
     assert.deepEqual(result, { outcome: 'delivered', transport: 'claude', reason: null });
+  });
+});
+
+test('AC-25: a parent pane that no longer hosts an agent is unavailable', async () => {
+  await assertOneRefusal('mcp', async () => {}, 'recipient_unavailable', {
+    to: 'parent', env: { A2A_STUB_HERDR_AGENTS: JSON.stringify({ p1: { name: 'alice', kind: 'codex' } }) },
+  });
+});
+
+test('spec 2.3: a parent socket in a group-writable directory is storage_unsafe', async (t) => {
+  await withFixture(async (value) => {
+    const dir = path.join(value.root, 'shared');
+    await fs.mkdir(dir, { mode: 0o700 });
+    value.members.parent.socket = path.join(dir, 'parent.sock');
+    const server = net.createServer((socket) => socket.resume());
+    server.listen(value.members.parent.socket);
+    try {
+      await once(server, 'listening');
+    } catch (error) {
+      if (error.code === 'EPERM') return t.skip('Unix-domain listeners are denied by this sandbox');
+      throw error;
+    }
+    await fs.chmod(dir, 0o770);
+    await writePrivate(path.join(value.a2aDir, `${value.stream}.members.json`), JSON.stringify(value.members));
+    const result = await invoke('mcp', value, { to: 'parent' });
+    await new Promise((resolve) => server.close(resolve));
+    assert.equal(result.reason, 'storage_unsafe');
+    const lines = await auditLines(value.a2aDir, value.stream);
+    assert.equal(lines.length, 1);
   });
 });
 

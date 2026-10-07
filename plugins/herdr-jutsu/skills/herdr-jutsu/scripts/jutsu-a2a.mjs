@@ -365,6 +365,22 @@ async function validateMemberSocket(config, recipient, isParent) {
     if (resolved === socketRoot || !resolved.startsWith(`${socketRoot}${path.sep}`)) {
       throw storageUnsafe('member socket escapes the a2a socket directory');
     }
+    return;
+  }
+  // The parent inbox lives outside the a2a directory, so it gets its own checks: owned by
+  // this user, in a directory that is this user's and not group/world-writable. A missing
+  // or non-socket path is left to the liveness check (recipient_unavailable).
+  let socketStat;
+  try {
+    socketStat = await fsp.lstat(recipient.socket);
+  } catch {
+    return;
+  }
+  if (!socketStat.isSocket()) return;
+  const uid = process.getuid();
+  const directoryStat = await fsp.stat(path.dirname(recipient.socket));
+  if (socketStat.uid !== uid || directoryStat.uid !== uid || (directoryStat.mode & 0o022) !== 0) {
+    throw storageUnsafe('parent socket or its directory is not private to this user');
   }
 }
 
@@ -750,9 +766,9 @@ async function sendMode(args) {
   requireOptions(config, ['a2aDir', 'stream', 'from', 'to']);
   if ((config.body === undefined) === (config.bodyFile === undefined)) throw new RelayError('bad_arguments');
   config.mode = 'send';
-  // The documented parent CLI deliberately has no executable-path flag. The
-  // launcher supplies an absolute path to MCP children; an interactive parent
-  // resolves its own trusted herdr command in the normal shell environment.
+  // The launcher supplies absolute paths to MCP children, which never consult PATH. The
+  // parent runs `send` in its own shell, so herdr comes from the parent's own PATH — the
+  // same lookup the launcher makes at spawn. codex is never looked up: pass --codex.
   config.herdr ??= 'herdr';
   let body;
   try {

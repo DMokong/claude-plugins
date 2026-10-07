@@ -40,6 +40,13 @@ class DeliveryClient {
   }
 }
 
+async function assertOneFailureLine({ a2aDir, stream }) {
+  const text = await fs.readFile(path.join(a2aDir, `${stream}.audit.jsonl`), 'utf8');
+  const lines = text.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].reason, 'delivery_failed');
+}
+
 async function withFixture(run) {
   const value = await fixture();
   try { await run(value); } finally { await cleanup(value.root); }
@@ -134,6 +141,7 @@ test('AC-30: sleeping Codex is killed at timeout and PATH codex is never used', 
     assert.deepEqual(await client.send('bob', 'timeout body'), { outcome: 'failed', reason: 'delivery_failed' });
     assert.ok(Date.now() - started >= 75);
     await client.close();
+    await assertOneFailureLine(value);
     await assert.rejects(fs.stat(marker), { code: 'ENOENT' });
     assert.equal(await fs.readFile(path.join(value.root, 'trusted-ran'), 'utf8'), 'executed');
   });
@@ -155,6 +163,7 @@ test('AC-30: unreachable Claude socket becomes delivery_failed', async () => {
     });
     assert.deepEqual(await client.send('charlie', 'timeout body'), { outcome: 'failed', reason: 'delivery_failed' });
     await client.close();
+    await assertOneFailureLine(value);
   });
 });
 
@@ -182,6 +191,7 @@ test('AC-30: a never-reading Claude listener is cut off by the write timeout', a
     assert.deepEqual(await client.send('charlie', 'timeout body'), { outcome: 'failed', reason: 'delivery_failed' });
     assert.ok(Date.now() - started >= 75);
     await client.close();
+    await assertOneFailureLine(value);
     for (const socket of sockets) socket.destroy();
     await new Promise((resolve) => server.close(resolve));
   });
