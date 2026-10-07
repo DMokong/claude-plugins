@@ -459,7 +459,9 @@ async function livenessCheck(config, recipient) {
     });
     const parsed = JSON.parse(stdout);
     const agent = parsed?.result?.agent;
-    if (!agent || agent.name !== recipient.name || (agent.engine ?? agent.kind) !== recipient.engine) {
+    // herdr reports the engine in `agent` ("claude" | "codex"); `kind` is tolerated for
+    // other herdr builds.
+    if (!agent || agent.name !== recipient.name || (agent.agent ?? agent.kind) !== recipient.engine) {
       throw new Error('agent mismatch');
     }
   } catch {

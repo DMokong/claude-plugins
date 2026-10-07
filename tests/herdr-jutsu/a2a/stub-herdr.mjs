@@ -18,4 +18,10 @@ const [group, command, paneId] = process.argv.slice(2);
 if (group !== 'agent' || command !== 'get' || typeof paneId !== 'string') process.exit(2);
 const agent = agents[paneId];
 if (!agent) process.exit(1);
-process.stdout.write(`${JSON.stringify({ result: { agent } })}\n`);
+// Emit the shape real herdr (0.8.2) returns from `agent get`: the engine is in the `agent`
+// field. There is no `kind` or `engine` field; a stub that invents one hides a relay that
+// reads the wrong key (found live: every real send was refused recipient_unavailable).
+const real = {
+  agent: agent.kind ?? agent.agent, agent_status: 'idle', name: agent.name, pane_id: paneId,
+};
+process.stdout.write(`${JSON.stringify({ result: { agent: real } })}\n`);
