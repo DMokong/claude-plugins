@@ -1274,7 +1274,9 @@ a2a_wait_shell_ready() {
 }
 
 a2a_bootstrap_codex() {
-  local prompt='A2A bootstrap: reply with exactly READY and do nothing else.' discovered=""
+  # The prompt names the member: the rollout lookup matches on it, and members bootstrapped
+  # at the same moment in one cwd would otherwise be indistinguishable from each other.
+  local prompt="A2A bootstrap for $NAME: reply with exactly READY and do nothing else." discovered=""
   local waited=0 budget="${JUTSU_A2A_THREAD_WAIT_MS:-5000}"
   case "$budget" in ''|*[!0-9]*) budget=5000 ;; esac
   # --wait returns at the first settled state AFTER the prompt changed the lifecycle. A

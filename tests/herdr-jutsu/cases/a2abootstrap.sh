@@ -52,16 +52,16 @@ a2abootstrap_begin() {
   export PATH="$wrapper_dir:$PATH"
 }
 
-A2A_BOOTSTRAP_PROMPT='A2A bootstrap: reply with exactly READY and do nothing else.'
+A2A_BOOTSTRAP_PROMPT='A2A bootstrap for boot-codex: reply with exactly READY and do nothing else.'
 
-a2abootstrap_rollout() { # id [session-timestamp] [with-prompt: 1|0]
-  local id="$1" ts="${2:-2999-01-01T00:00:00Z}" with_prompt="${3:-1}" dir="$HOME/.codex/sessions/2999/01/01"
+a2abootstrap_rollout() { # id [session-timestamp] [with-prompt: 1|0] [prompt-text]
+  local id="$1" ts="${2:-2999-01-01T00:00:00Z}" with_prompt="${3:-1}" text="${4:-$A2A_BOOTSTRAP_PROMPT}" dir="$HOME/.codex/sessions/2999/01/01"
   mkdir -p "$dir"
   jq -cn --arg id "$id" --arg cwd "$REPO_DIR" --arg ts "$ts" \
     '{timestamp:$ts,type:"session_meta",payload:{id:$id,timestamp:$ts,cwd:$cwd,originator:"codex-tui"}}' \
     >"$dir/rollout-$id.jsonl"
   [ "$with_prompt" = 1 ] || return 0
-  jq -cn --arg text "$A2A_BOOTSTRAP_PROMPT" \
+  jq -cn --arg text "$text" \
     '{type:"response_item",payload:{type:"message",role:"user",content:[{type:"input_text",text:$text}]}}' \
     >>"$dir/rollout-$id.jsonl"
 }
@@ -75,7 +75,7 @@ test_a2abootstrap_agent_session_recorded_after_fixed_prompt() {
   export A2A_TEST_GET_SESSION=thread-from-herdr
   a2abootstrap_spawn
   [ "$CODE" -eq 0 ] || { fail_case "spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
-  grep -Fqx 'agent prompt w0:p1 A2A bootstrap: reply with exactly READY and do nothing else. --wait --timeout 60000' "$STUB_LOG" \
+  grep -Fqx 'agent prompt w0:p1 A2A bootstrap for boot-codex: reply with exactly READY and do nothing else. --wait --timeout 60000' "$STUB_LOG" \
     || { fail_case "fixed bootstrap prompt was not sent with --wait: $(cat "$STUB_LOG")"; teardown_case; return; }
   grep -q '^agent wait w0:p1 --until idle' "$STUB_LOG" \
     && { fail_case "launcher waited for 'idle' only; a background member settles as 'done'"; teardown_case; return; }
@@ -117,6 +117,9 @@ test_a2abootstrap_other_sessions_in_the_same_cwd_are_ignored() {
   a2abootstrap_rollout rollout-stale 2001-01-01T00:00:00Z 1
   # an unrelated Codex session opened in this cwd afterwards: never saw the bootstrap prompt
   a2abootstrap_rollout rollout-foreign 2999-01-01T00:00:00Z 0
+  # a sibling bootstrapped at the same moment in this cwd: its prompt names the sibling
+  a2abootstrap_rollout rollout-sibling 2999-01-01T00:00:00Z 1 \
+    'A2A bootstrap for other-codex: reply with exactly READY and do nothing else.'
   a2abootstrap_spawn
   [ "$CODE" -eq 0 ] || { fail_case "spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
   jq -e '.members["boot-codex"].thread_id == "rollout-live"' \
