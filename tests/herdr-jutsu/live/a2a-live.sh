@@ -74,10 +74,11 @@ export JUTSU_STATE_DIR
 mkdir -p "$PRIVATE" "$JUTSU_STATE_DIR"
 chmod 700 "$RUNTIME" "$PRIVATE" "$JUTSU_STATE_DIR"
 
+GATES_COMPLETE=0
 CREATED_SCRATCH=0
 CREATED_PANES=()
 cleanup() {
-  local pane
+  local rc=$? pane
   trap - EXIT INT TERM HUP
   for pane in ${CREATED_PANES[@]+"${CREATED_PANES[@]}"}; do
     "$HERDR_BIN" pane close "$pane" >/dev/null 2>&1 || true
@@ -86,6 +87,10 @@ cleanup() {
     rm -rf -- "$SCRATCH"
   fi
   [ ! -d "$RUNTIME" ] || rm -rf -- "$RUNTIME"
+  # Never let cleanup turn a failed run into exit 0. bash 3.2 reports status 0 to the EXIT
+  # trap after an unbound-variable abort, so success is only what reached the last line.
+  [ "$GATES_COMPLETE" -eq 1 ] || [ "$rc" -ne 0 ] || rc=1
+  exit "$rc"
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
@@ -163,7 +168,10 @@ redact_transcript() {
 }
 
 capture_agent() {
-  local pane="$1" label="$2" raw="$PRIVATE/$CURRENT_GATE-$label.raw"
+  # bash expands every word of one `local` statement before assigning any of them, so a
+  # variable is never used in the statement that declares it.
+  local pane="$1" label="$2"
+  local raw="$PRIVATE/$CURRENT_GATE-$label.raw"
   local destination="$EVIDENCE/$CURRENT_GATE-$label.txt"
   "$HERDR_BIN" agent read "$pane" --source recent-unwrapped --lines 300 >"$raw" 2>&1 \
     || gate_fail "capture-$label" "could not read pane $pane"
@@ -173,7 +181,8 @@ capture_agent() {
 }
 
 capture_file() {
-  local source="$1" label="$2" destination="$EVIDENCE/$CURRENT_GATE-$label.txt"
+  local source="$1" label="$2"
+  local destination="$EVIDENCE/$CURRENT_GATE-$label.txt"
   redact_transcript "$source" "$destination"
 }
 
@@ -478,4 +487,5 @@ else
   run_gate "$REQUESTED_GATE"
 fi
 
+GATES_COMPLETE=1
 echo "live A2A gate(s) passed; evidence: $EVIDENCE"
