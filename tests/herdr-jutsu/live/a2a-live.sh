@@ -109,6 +109,26 @@ git -C "$SCRATCH" add README.md L6-KEEP
 git -C "$SCRATCH" commit -q -m 'initialize live gate scratch'
 INITIAL_HEAD="$(git -C "$SCRATCH" rev-parse HEAD)"
 
+# Claude Code offers every server in a .mcp.json found in a parent directory and stops at a
+# "new MCP servers found" dialog the gate must never answer. Reject them all for this
+# throwaway repository, in a file git ignores, so the Claude member starts with only the relay.
+reject_inherited_mcp_servers() {
+  local dir names='[]' found
+  dir="$(dirname "$SCRATCH")"
+  while :; do
+    if [ -f "$dir/.mcp.json" ]; then
+      found="$(jq -c '(.mcpServers // {}) | keys' "$dir/.mcp.json" 2>/dev/null)" || found='[]'
+      names="$(jq -cn --argjson a "$names" --argjson b "${found:-[]}" '$a + $b | unique')"
+    fi
+    [ "$dir" = / ] && break
+    dir="$(dirname "$dir")"
+  done
+  mkdir "$SCRATCH/.claude"
+  jq -n --argjson names "$names" '{disabledMcpjsonServers: $names}' >"$SCRATCH/.claude/settings.local.json"
+  printf '%s\n' '.claude/' >>"$SCRATCH/.git/info/exclude"
+}
+reject_inherited_mcp_servers
+
 [ -n "${HERDR_PANE_ID:-}" ] || { echo "HERDR_PANE_ID is required; run from a Claude parent in Herdr" >&2; exit 4; }
 PARENT_NAME="$("$HERDR_BIN" agent list | jq -r --arg pane "$HERDR_PANE_ID" '.result.agents[]? | select(.pane_id == $pane) | .name // empty' | head -n1)"
 [ -n "$PARENT_NAME" ] || { echo "the parent pane must have a herdr agent name before running live gates" >&2; exit 4; }
