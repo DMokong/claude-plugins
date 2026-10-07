@@ -60,6 +60,22 @@ async function privateLstat(file, expectedType) {
 }
 
 async function injectReplaceRace(file) {
+  if (process.env.A2A_TEST_MODE === '1' && process.env.A2A_TEST_RELEASE_AFTER_LSTAT === file) {
+    // Simulates a lock holder releasing between a waiter's lstat and its open.
+    delete process.env.A2A_TEST_RELEASE_AFTER_LSTAT;
+    await fsp.unlink(file);
+    await fsp.rmdir(path.dirname(file));
+    return;
+  }
+  if (process.env.A2A_TEST_MODE === '1' && process.env.A2A_TEST_REACQUIRE_AFTER_LSTAT === file) {
+    // Simulates release plus re-acquisition by another live holder in that same window.
+    delete process.env.A2A_TEST_REACQUIRE_AFTER_LSTAT;
+    await fsp.unlink(file);
+    await fsp.rmdir(path.dirname(file));
+    await fsp.mkdir(path.dirname(file), { mode: PRIVATE_DIR_MODE });
+    await fsp.writeFile(file, process.env.A2A_TEST_REACQUIRE_OWNER ?? '', { mode: PRIVATE_FILE_MODE });
+    return;
+  }
   if (process.env.A2A_TEST_MODE !== '1' || process.env.A2A_TEST_REPLACE_AFTER_LSTAT !== file) return;
   delete process.env.A2A_TEST_REPLACE_AFTER_LSTAT;
   const target = process.env.A2A_TEST_REPLACE_WITH_SYMLINK_TO;
@@ -80,13 +96,17 @@ async function safeOpenExisting(file, flags = C.O_RDONLY) {
   try {
     handle = await fsp.open(file, flags | O_NOFOLLOW);
     const after = await handle.stat();
-    if (!modeIsPrivate(after, 'file') || before.dev !== after.dev || before.ino !== after.ino) {
+    if (!modeIsPrivate(after, 'file')) throw storageUnsafe(`unsafe file: ${file}`);
+    if (before.dev !== after.dev || before.ino !== after.ino) {
       throw storageUnsafe(`file changed while opening: ${file}`);
     }
     return handle;
   } catch (error) {
     await handle?.close().catch(() => {});
     if (error instanceof RelayError) throw error;
+    // Removed between lstat and open: report it as missing, exactly as if lstat had not
+    // found it. A swapped-in symlink still fails O_NOFOLLOW (ELOOP) and stays unsafe.
+    if (error.code === 'ENOENT') throw error;
     throw storageUnsafe(`cannot safely open ${file}`);
   }
 }
@@ -178,6 +198,10 @@ async function readOwner(lockDir) {
   } catch (error) {
     if (error.code === 'ENOENT') return null;
     if (error.reason === 'storage_unsafe' && /invalid JSON/.test(error.message)) return null;
+    // The holder released and another process re-acquired between lstat and open: the
+    // owner file is a different, equally private file. That is "owner unknown, look
+    // again", not unsafe storage.
+    if (error.reason === 'storage_unsafe' && /file changed while opening/.test(error.message)) return null;
     throw error;
   }
 }
@@ -201,7 +225,13 @@ async function recoverLock(lockDir) {
   if (!lockStat) return true;
   const owner = await readOwner(lockDir);
   if (!owner) {
-    if (nowMs() - lockStat.mtimeMs <= 30_000) return false;
+    // The lock may have been released and re-acquired since lockStat was taken. Judge the
+    // age of the directory that is there NOW, and only if it is still the same directory:
+    // a different one belongs to a new, possibly live, holder.
+    const current = await privateLstat(lockDir, 'dir');
+    if (!current) return true;
+    if (current.dev !== lockStat.dev || current.ino !== lockStat.ino) return false;
+    if (nowMs() - current.mtimeMs <= 30_000) return false;
     try {
       await fsp.unlink(path.join(lockDir, 'owner.json'));
     } catch (error) {
@@ -311,7 +341,14 @@ async function flagPresent(a2aDir, stream) {
   const flag = path.join(a2aDir, `${stream}.disabled`);
   const stat = await privateLstat(flag, 'file');
   if (!stat) return false;
-  const handle = await safeOpenExisting(flag);
+  let handle;
+  try {
+    handle = await safeOpenExisting(flag);
+  } catch (error) {
+    // `enable` removed the flag between the lstat and the open: the stream is enabled.
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
   await handle.close();
   return true;
 }

@@ -89,6 +89,49 @@ test('r1-f2 / AC-23: replacement between lstat and open is caught by O_NOFOLLOW'
   });
 });
 
+test('trk-4sh.16: a lock released while a waiter inspects its owner is retried, never storage_unsafe', async () => {
+  await withFixture(async ({ a2aDir, stream }) => {
+    const lockDir = path.join(a2aDir, `${stream}.lock`);
+    const ownerPath = path.join(lockDir, 'owner.json');
+    await fs.mkdir(lockDir, { mode: 0o700 });
+    await writePrivate(ownerPath, JSON.stringify({
+      pid: process.pid, start_time: 'held by this test', nonce: 'a'.repeat(32),
+    }));
+    const client = new McpClient({ a2aDir, stream }, {
+      A2A_TEST_MODE: '1', A2A_TEST_RELEASE_AFTER_LSTAT: ownerPath,
+    });
+    const result = toolResult(await send(client));
+    await client.close();
+    assert.equal(result.reason, null, `expected a delivery after the lock was released; got ${JSON.stringify(result)}`);
+    assert.equal(result.outcome, 'queued');
+  });
+});
+
+test('trk-4sh.16: a lock re-acquired by a live holder while a waiter inspects it is never broken', async () => {
+  await withFixture(async ({ a2aDir, stream }) => {
+    const lockDir = path.join(a2aDir, `${stream}.lock`);
+    const ownerPath = path.join(lockDir, 'owner.json');
+    await fs.mkdir(lockDir, { mode: 0o700 });
+    await writePrivate(ownerPath, JSON.stringify({
+      pid: process.pid, start_time: 'previous holder', nonce: 'a'.repeat(32),
+    }));
+    const { stdout } = await execFileAsync('/bin/ps', ['-o', 'lstart=', '-p', String(process.pid)]);
+    const liveOwner = {
+      pid: process.pid, start_time: stdout.trim().replace(/\s+/g, ' '), nonce: 'b'.repeat(32),
+    };
+    // The injected clock makes the first lock directory look two minutes old, so only the
+    // identity re-check can stop the waiter from treating the new holder's lock as stale.
+    const client = new McpClient({ a2aDir, stream }, {
+      A2A_TEST_MODE: '1', A2A_NOW_MS: String(Date.now() + 120_000),
+      A2A_TEST_REACQUIRE_AFTER_LSTAT: ownerPath, A2A_TEST_REACQUIRE_OWNER: JSON.stringify(liveOwner),
+    });
+    const result = toolResult(await send(client));
+    await client.close();
+    assert.equal(result.reason, 'busy_retry', `the live holder's lock must be respected; got ${JSON.stringify(result)}`);
+    assert.deepEqual(JSON.parse(await fs.readFile(ownerPath, 'utf8')), liveOwner);
+  });
+});
+
 test('AC-23: group-readable a2a directory is refused', async () => {
   await withFixture(async ({ a2aDir, stream }) => {
     await fs.chmod(a2aDir, 0o750);
