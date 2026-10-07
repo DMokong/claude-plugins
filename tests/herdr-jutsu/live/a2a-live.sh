@@ -203,8 +203,24 @@ spawn_member() {
   else
     command+=(-- --model sonnet --effort medium --permission-mode acceptEdits)
   fi
-  "${command[@]}" >"$output" 2>"$errors" \
-    || gate_fail "spawn-$name" "exact $kind A2A spawn failed: $(tail -n 3 "$errors" | tr '\n' ' ')"
+  local before="$PRIVATE/$CURRENT_GATE-$name.panes-before" leaked hint=""
+  "$HERDR_BIN" agent list 2>/dev/null | jq -r '.result.agents[]?.pane_id' >"$before" 2>/dev/null || : >"$before"
+  if ! "${command[@]}" >"$output" 2>"$errors"; then
+    # The launcher can fail while leaving the member running (for example at a startup
+    # dialog). Adopt that pane for cleanup only if it carries this member's name and did
+    # not exist before this spawn, and say what it is showing.
+    leaked="$("$HERDR_BIN" agent list 2>/dev/null \
+      | jq -r --arg name "$name" '.result.agents[]? | select(.name == $name) | .pane_id' | head -n1)"
+    if [ -n "$leaked" ] && ! grep -Fxq -- "$leaked" "$before"; then
+      CREATED_PANES+=("$leaked")
+      if "$HERDR_BIN" pane read "$leaked" --source visible --lines 40 2>/dev/null \
+          | grep -Eqi 'trust and continue|trust this (folder|directory)|do you trust'; then
+        hint=" The member is waiting at a directory-trust prompt: $SCRATCH must already be trusted by $kind (see README.md). The prompt was not answered."
+      fi
+    fi
+    [ -n "$hint" ] || hint=" If $SCRATCH is not yet trusted by $kind, the member stops at a directory-trust prompt and the launcher reports agent_start_failed (timeout) or a2a_thread_unresolved (see README.md)."
+    gate_fail "spawn-$name" "exact $kind A2A spawn failed: $(tail -n 3 "$errors" | tr '\n' ' ')$hint"
+  fi
   LAST_PANE="$(jq -r '.pane_id // empty' "$output")"
   LAST_THREAD="$(jq -r '.session_id // empty' "$output")"
   [ -n "$LAST_PANE" ] || gate_fail "spawn-$name" "spawn output omitted pane_id"

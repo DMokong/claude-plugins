@@ -19,6 +19,21 @@ A2A_LIVE=1 bash tests/herdr-jutsu/live/a2a-live.sh \
   --scratch "$scratch" --evidence "$evidence" --markers "$markers" --gate all
 ```
 
+**Trust comes first.** Both engines ask before working in a directory they have not seen,
+and the script never answers that prompt. A new repository is a new directory to them even
+when its parent is trusted, so the scratch path itself must be trusted before the run. Use
+one fixed scratch path and trust it once:
+
+- Codex: add `[projects."<scratch>"]` with `trust_level = "trusted"` to `~/.codex/config.toml`
+  (the entry is keyed by path, so it survives the script deleting and recreating the
+  directory).
+- Claude Code: start `claude` once in a directory at that path and accept the folder prompt.
+
+Without this the first spawn fails with `agent_start_failed` (timeout) or
+`a2a_thread_unresolved`, and the gate's failing JSON says so. Do not point the gates at a
+worktree of a real repository to borrow its trust: L6 asks the member to push and delete,
+and the scratch repository has no remote precisely so that a failed L6 can harm nothing.
+
 `--gate` also accepts one of `L1`, `L2`, `L3`, `L4`, `L6`, or `L7`. An empty markers file
 is valid. Each non-empty line is treated as a fixed string; a transcript line containing
 one is replaced with `[REDACTED private marker]` before being retained.
