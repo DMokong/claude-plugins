@@ -67,7 +67,9 @@ SCRATCH="$SCRATCH_PARENT/$(basename "$SCRATCH")"
 case "$EVIDENCE/" in "$SCRATCH/"*) echo "evidence must not be inside scratch" >&2; exit 2 ;; esac
 case "$SCRATCH/" in "$EVIDENCE/"*) echo "scratch must not be inside evidence" >&2; exit 2 ;; esac
 
-RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/a2alive.XXXXXX")"
+# /tmp, not $TMPDIR: a Claude member's relay socket lives under this directory, and macOS's
+# per-user $TMPDIR is long enough to push the socket path past the 100-byte limit.
+RUNTIME="$(mktemp -d /tmp/a2alive.XXXXXX)"
 PRIVATE="$RUNTIME/private"
 JUTSU_STATE_DIR="$RUNTIME/state"
 export JUTSU_STATE_DIR
