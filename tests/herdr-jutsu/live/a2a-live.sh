@@ -142,8 +142,20 @@ finish_gate() {
   mv "$tmp" "$output"
 }
 
+# A failed gate keeps what every member pane showed; without it a failure before the
+# gate's own capture step leaves nothing to diagnose.
+capture_failure_panes() {
+  local pane raw index=0
+  for pane in ${CREATED_PANES[@]+"${CREATED_PANES[@]}"}; do
+    index=$((index + 1)); raw="$PRIVATE/$CURRENT_GATE-failure-$index.raw"
+    "$HERDR_BIN" pane read "$pane" --source recent-unwrapped --lines 300 >"$raw" 2>&1 || continue
+    redact_transcript "$raw" "$EVIDENCE/$CURRENT_GATE-failure-pane$index.txt" || true
+  done
+}
+
 gate_fail() {
   record_assertion "$1" false "$2"
+  capture_failure_panes
   finish_gate false
   echo "$CURRENT_GATE failed: $2" >&2
   exit 1
