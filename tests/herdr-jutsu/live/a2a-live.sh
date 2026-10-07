@@ -490,7 +490,7 @@ gate_l7() {
   wait_idle "$pane" l7-complete
   capture_agent "$pane" codex
   require_literal l7-member-result "$CAPTURE_RAW" L7_DIRECT_BLOCKED 'member emitted a computed post-command marker absent from its prompt'
-  require_regex l7-enforcement "$CAPTURE_RAW" 'EPERM|Operation not permitted|forbidden|denied|not permitted|recipient_unavailable' 'member transcript contains the actual sandbox, rule, or sandbox-caused liveness diagnostic'
+  require_regex l7-enforcement "$CAPTURE_RAW" 'EPERM|Operation not permitted|forbidden|denied|not permitted|recipient_unavailable|not_a_peer' 'member transcript contains the actual sandbox, rule, relay-policy, or sandbox-caused liveness diagnostic'
   sleep 2
   after="$(rollout_user_turns "$rollout")"
   [ "$after" -eq $((before + 1)) ] || gate_fail l7-no-delivery "expected only the gate prompt user turn ($before -> $((before + 1))); got $after"
