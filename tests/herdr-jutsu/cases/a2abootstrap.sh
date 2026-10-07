@@ -9,6 +9,8 @@ a2abootstrap_begin() {
   setup_case
   unset A2A_TEST_GET_SESSION A2A_TEST_STRIP_START_SESSION A2A_TEST_REAL_HERDR 2>/dev/null
   export JUTSU_STATE_DIR="$SCRATCH/s"
+  export JUTSU_A2A_THREAD_WAIT_MS=300 A2A_TEST_LIVE_CWD="$REPO_DIR"
+  unset A2A_TEST_LIVE_ROLLOUT 2>/dev/null
   export STUB_AGENTS='{"result":{"agents":[{"name":"parent","kind":"claude","pane_id":"w0:p1","agent_status":"idle"}]}}'
   export CLAUDE_CODE_MESSAGING_SOCKET="$SCRATCH/p.sock"
   : >"$CLAUDE_CODE_MESSAGING_SOCKET"
@@ -19,6 +21,14 @@ a2abootstrap_begin() {
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'set -u' \
+    'if [ "${1:-} ${2:-}" = "agent start" ] && [ -n "${A2A_TEST_LIVE_ROLLOUT:-}" ]; then' \
+    '  mkdir -p "$HOME/.codex/sessions/live"' \
+    '  jq -cn --arg id "$A2A_TEST_LIVE_ROLLOUT" --arg cwd "$A2A_TEST_LIVE_CWD" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" '\''{timestamp:$ts,type:"session_meta",payload:{id:$id,timestamp:$ts,cwd:$cwd,originator:"codex-tui"}}'\'' >"$HOME/.codex/sessions/live/rollout-$A2A_TEST_LIVE_ROLLOUT.jsonl"' \
+    '  sleep 1.1' \
+    'fi' \
+    'if [ "${1:-} ${2:-}" = "agent prompt" ] && [ -n "${A2A_TEST_LIVE_ROLLOUT:-}" ]; then' \
+    '  jq -cn --arg text "${4:-}" '\''{type:"response_item",payload:{type:"message",role:"user",content:[{type:"input_text",text:$text}]}}'\'' >>"$HOME/.codex/sessions/live/rollout-$A2A_TEST_LIVE_ROLLOUT.jsonl"' \
+    'fi' \
     'if [ "${1:-} ${2:-}" = "agent prompt" ] || [ "${1:-} ${2:-}" = "agent wait" ]; then' \
     '  printf "%s\n" "$*" >>"$STUB_LOG"' \
     '  jq -cn '\''$ARGS.positional'\'' --args -- "$@" >>"$STUB_HERDR_JSON_LOG"' \
@@ -42,12 +52,18 @@ a2abootstrap_begin() {
   export PATH="$wrapper_dir:$PATH"
 }
 
-a2abootstrap_rollout() { # id
-  local id="$1" dir="$HOME/.codex/sessions/2999/01/01"
+A2A_BOOTSTRAP_PROMPT='A2A bootstrap: reply with exactly READY and do nothing else.'
+
+a2abootstrap_rollout() { # id [session-timestamp] [with-prompt: 1|0]
+  local id="$1" ts="${2:-2999-01-01T00:00:00Z}" with_prompt="${3:-1}" dir="$HOME/.codex/sessions/2999/01/01"
   mkdir -p "$dir"
-  jq -cn --arg id "$id" --arg cwd "$REPO_DIR" \
-    '{timestamp:"2999-01-01T00:00:00Z",type:"session_meta",payload:{id:$id,timestamp:"2999-01-01T00:00:00Z",cwd:$cwd,originator:"codex-tui"}}' \
+  jq -cn --arg id "$id" --arg cwd "$REPO_DIR" --arg ts "$ts" \
+    '{timestamp:$ts,type:"session_meta",payload:{id:$id,timestamp:$ts,cwd:$cwd,originator:"codex-tui"}}' \
     >"$dir/rollout-$id.jsonl"
+  [ "$with_prompt" = 1 ] || return 0
+  jq -cn --arg text "$A2A_BOOTSTRAP_PROMPT" \
+    '{type:"response_item",payload:{type:"message",role:"user",content:[{type:"input_text",text:$text}]}}' \
+    >>"$dir/rollout-$id.jsonl"
 }
 
 a2abootstrap_spawn() {
@@ -59,10 +75,10 @@ test_a2abootstrap_agent_session_recorded_after_fixed_prompt() {
   export A2A_TEST_GET_SESSION=thread-from-herdr
   a2abootstrap_spawn
   [ "$CODE" -eq 0 ] || { fail_case "spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
-  grep -Fqx 'agent prompt w0:p1 A2A bootstrap: reply with exactly READY and do nothing else.' "$STUB_LOG" \
-    || { fail_case "fixed bootstrap prompt was not sent: $(cat "$STUB_LOG")"; teardown_case; return; }
-  grep -q '^agent wait w0:p1 --until idle --timeout 60000$' "$STUB_LOG" \
-    || { fail_case "launcher did not wait for bootstrap idle"; teardown_case; return; }
+  grep -Fqx 'agent prompt w0:p1 A2A bootstrap: reply with exactly READY and do nothing else. --wait --timeout 60000' "$STUB_LOG" \
+    || { fail_case "fixed bootstrap prompt was not sent with --wait: $(cat "$STUB_LOG")"; teardown_case; return; }
+  grep -q '^agent wait w0:p1 --until idle' "$STUB_LOG" \
+    && { fail_case "launcher waited for 'idle' only; a background member settles as 'done'"; teardown_case; return; }
   jq -e '.members["boot-codex"].thread_id == "thread-from-herdr"' \
     "$JUTSU_STATE_DIR/a2a/boot.members.json" >/dev/null \
     || { fail_case "herdr session was not recorded"; teardown_case; return; }
@@ -78,6 +94,34 @@ test_a2abootstrap_single_matching_rollout_recorded() {
   jq -e '.members["boot-codex"].thread_id == "rollout-one"' \
     "$JUTSU_STATE_DIR/a2a/boot.members.json" >/dev/null \
     || { fail_case "single matching rollout was not recorded"; teardown_case; return; }
+  ok "$CURRENT_TEST"; teardown_case
+}
+
+# Real Codex stamps the session when the TUI starts, seconds BEFORE the bootstrap prompt is
+# sent, and writes the rollout at the first turn (observed live on Codex 0.160.1).
+test_a2abootstrap_session_started_before_the_bootstrap_send_is_found() {
+  CURRENT_TEST="a2abootstrap_session_started_before_the_bootstrap_send_is_found"; a2abootstrap_begin
+  export A2A_TEST_STRIP_START_SESSION=1 A2A_TEST_LIVE_ROLLOUT=rollout-live
+  a2abootstrap_spawn
+  [ "$CODE" -eq 0 ] || { fail_case "spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  jq -e '.members["boot-codex"].thread_id == "rollout-live"' \
+    "$JUTSU_STATE_DIR/a2a/boot.members.json" >/dev/null \
+    || { fail_case "the member's own session was not recorded"; teardown_case; return; }
+  ok "$CURRENT_TEST"; teardown_case
+}
+
+test_a2abootstrap_other_sessions_in_the_same_cwd_are_ignored() {
+  CURRENT_TEST="a2abootstrap_other_sessions_in_the_same_cwd_are_ignored"; a2abootstrap_begin
+  export A2A_TEST_STRIP_START_SESSION=1 A2A_TEST_LIVE_ROLLOUT=rollout-live
+  # an earlier member's bootstrap session in this cwd, from before this member started
+  a2abootstrap_rollout rollout-stale 2001-01-01T00:00:00Z 1
+  # an unrelated Codex session opened in this cwd afterwards: never saw the bootstrap prompt
+  a2abootstrap_rollout rollout-foreign 2999-01-01T00:00:00Z 0
+  a2abootstrap_spawn
+  [ "$CODE" -eq 0 ] || { fail_case "spawn failed: $(cat "$ERR_FILE")"; teardown_case; return; }
+  jq -e '.members["boot-codex"].thread_id == "rollout-live"' \
+    "$JUTSU_STATE_DIR/a2a/boot.members.json" >/dev/null \
+    || { fail_case "wrong session recorded: $(cat "$JUTSU_STATE_DIR/a2a/boot.members.json")"; teardown_case; return; }
   ok "$CURRENT_TEST"; teardown_case
 }
 
@@ -132,6 +176,8 @@ test_a2abootstrap_incomplete_member_is_not_ready() {
 
 register_test test_a2abootstrap_agent_session_recorded_after_fixed_prompt
 register_test test_a2abootstrap_single_matching_rollout_recorded
+register_test test_a2abootstrap_session_started_before_the_bootstrap_send_is_found
+register_test test_a2abootstrap_other_sessions_in_the_same_cwd_are_ignored
 register_test test_a2abootstrap_zero_rollouts_retains_and_reports_member
 register_test test_a2abootstrap_two_rollouts_retains_and_reports_member
 register_test test_a2abootstrap_incomplete_member_is_not_ready

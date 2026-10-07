@@ -189,6 +189,16 @@ case "$NOUN" in
         shift
         echo '{"result":{"ok":true}}'
         ;;
+      wait-output)
+        # The A2A shell-readiness handshake. STUB_WAIT_OUTPUT_FAIL=1 simulates a shell that
+        # never runs the probe command.
+        shift
+        if [ "${STUB_WAIT_OUTPUT_FAIL:-}" = 1 ]; then
+          err_json timeout "no matching output" >&2
+          exit 1
+        fi
+        echo '{"result":{"matched":true}}'
+        ;;
       process-info)
         shift
         TARGET="current"

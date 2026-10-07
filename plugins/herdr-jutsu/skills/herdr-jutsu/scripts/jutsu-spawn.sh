@@ -1225,8 +1225,15 @@ a2a_write_member() {
   a2a_release_lock
 }
 
-a2a_codex_rollout_thread() { # a2a_codex_rollout_thread <bootstrap-send-epoch>
-  local sent="$1" sessions="${CODEX_HOME:-$HOME/.codex}/sessions" list="" rollout="" head="" id=""
+# The member's own session is the one rollout that (1) is a codex-tui session in the member
+# cwd, (2) was started at or after this launcher started the agent, and (3) contains the
+# bootstrap prompt as a user message. Codex stamps a session when its TUI starts — seconds
+# BEFORE the bootstrap prompt is sent — and writes the rollout at the first turn, so the
+# session timestamp is compared with the agent start, never with the send. (2) rules out an
+# earlier member's session in the same cwd; (3) rules out an unrelated Codex session opened
+# there meanwhile.
+a2a_codex_rollout_thread() { # a2a_codex_rollout_thread <agent-start-epoch> <bootstrap-prompt>
+  local sent="$1" prompt="$2" sessions="${CODEX_HOME:-$HOME/.codex}/sessions" list="" rollout="" head="" id=""
   local candidates=""
   [ -d "$sessions" ] || return 1
   list="$(mktemp "${TMPDIR:-/tmp}/jutsu-rollouts.XXXXXX" 2>/dev/null || true)"
@@ -1241,7 +1248,11 @@ a2a_codex_rollout_thread() { # a2a_codex_rollout_thread <bootstrap-send-epoch>
       | select($p.originator == "codex-tui" and $p.cwd == $cwd
           and (($ts // -1) >= $sent) and (($p.id | type) == "string"))
       | $p.id' 2>/dev/null || true)"
-    [ -n "$id" ] && candidates="${candidates}${id}
+    [ -n "$id" ] || continue
+    jq -e --arg prompt "$prompt" 'select(.type == "response_item" and .payload.type == "message"
+        and .payload.role == "user") | any(.payload.content[]?; (.text? // "") == $prompt)
+      | select(.)' "$rollout" >/dev/null 2>&1 || continue
+    candidates="${candidates}${id}
 "
   done <"$list"
   rm -f "$list"
@@ -1249,11 +1260,28 @@ a2a_codex_rollout_thread() { # a2a_codex_rollout_thread <bootstrap-send-epoch>
   printf '%s' "$candidates" | sed -n '1p'
 }
 
+a2a_wait_shell_ready() {
+  # The token is printed by the shell from two halves, so it appears in the pane only as
+  # OUTPUT of an executed command, never in the echoed command line.
+  local half="$$${RANDOM}" token=""
+  token="jutsu-shell-ready-${half}"
+  herdr_run pane run "$PANE_ID" "printf '%s%s\\n' jutsu-shell-ready- ${half}" \
+    || fail a2a_shell_not_ready "could not reach the shell in pane $PANE_ID before the agent start: ${HERDR_ERRTEXT:-no error output}" 1
+  herdr_run pane wait-output "$PANE_ID" --match "$token" --timeout 20000 \
+    || fail a2a_shell_not_ready "the shell in pane $PANE_ID did not run a command within 20s; the agent was not started" 1
+  # the prompt is redrawn and the line editor re-entered just after the output
+  sleep 0.3
+}
+
 a2a_bootstrap_codex() {
-  local prompt='A2A bootstrap: reply with exactly READY and do nothing else.' sent=0 discovered=""
-  sent="$(date -u +%s)"
-  herdr_run agent prompt "$PANE_ID" "$prompt" || return 1
-  herdr_run agent wait "$PANE_ID" --until idle --timeout "$TIMEOUT" || return 1
+  local prompt='A2A bootstrap: reply with exactly READY and do nothing else.' discovered=""
+  local waited=0 budget="${JUTSU_A2A_THREAD_WAIT_MS:-5000}"
+  case "$budget" in ''|*[!0-9]*) budget=5000 ;; esac
+  # --wait returns at the first settled state AFTER the prompt changed the lifecycle. A
+  # separate `agent wait --until idle` is wrong twice over: it returns at once while the
+  # member is still idle from before the prompt, and a background member that finishes
+  # settles as `done`, which `--until idle` never matches.
+  herdr_run agent prompt "$PANE_ID" "$prompt" --wait --timeout "$TIMEOUT" || return 1
 
   # Prefer herdr's post-bootstrap view. The start response is retained as a fallback for
   # herdr versions that return the session there but omit it from a later `agent get`.
@@ -1261,9 +1289,14 @@ a2a_bootstrap_codex() {
     discovered="$(printf '%s' "$HERDR_OUT" | jq -r '.result.agent.agent_session.value // empty' 2>/dev/null || true)"
   fi
   [ -n "$discovered" ] || discovered="$SESSION_ID"
-  if [ -z "$discovered" ]; then
-    discovered="$(a2a_codex_rollout_thread "$sent" || true)"
-  fi
+  # Codex flushes the rollout shortly after the turn; look again for a bounded time.
+  while [ -z "$discovered" ]; do
+    discovered="$(a2a_codex_rollout_thread "${A2A_AGENT_START_EPOCH:-0}" "$prompt" || true)"
+    [ -z "$discovered" ] || break
+    [ "$waited" -lt "$budget" ] || break
+    sleep 0.25
+    waited=$((waited + 250))
+  done
   [ -n "$discovered" ] || return 1
   SESSION_ID="$discovered"
   return 0
@@ -1979,6 +2012,13 @@ else
   ARGS=()
   [ "$KIND" != claude ] || ARGS+=(-n "$NAME")
   ARGS+=(${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"})
+  # An A2A start command is longer than 1024 bytes. A freshly split pane whose shell has
+  # not reached its line editor yet is still in the terminal's canonical mode, where macOS
+  # silently drops everything past 1024 bytes of a line: the command is cut mid-argument
+  # and the start times out. Prove the shell is reading commands before typing the long one.
+  if [ "$A2A" -eq 1 ]; then a2a_wait_shell_ready; fi
+  # Only for an A2A Codex member: a spawn without --a2a must make no extra calls.
+  if [ "$A2A" -eq 1 ] && [ "$KIND" = codex ]; then A2A_AGENT_START_EPOCH="$(date -u +%s)"; fi
   START=(herdr agent start "$NAME" --kind "$KIND" --pane "$PANE_ID" --timeout "$TIMEOUT")
   [ ${#ARGS[@]} -eq 0 ] || START+=(-- "${ARGS[@]}")
   # Test-only relay clock controls may be used by the launcher's lock tests, but they are
