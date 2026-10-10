@@ -51,7 +51,9 @@
     "--disable",
     "in_app_local_automation",
     "-c",
-    "web_search=\"disabled\""
+    "web_search=\"disabled\"",
+    "-c",
+    "model_catalog_json=\"<SCRATCH>/home/.cache/herdr-jutsu/codex-models.json\""
   ],
   "resume_args": [
     "resume",
@@ -61,6 +63,6 @@
   "registry": "home",
   "registry_path": "<SCRATCH>/home/.local/state/herdr-jutsu/bstream2.jsonl",
   "outbound_isolation": "enforced_if_trusted",
-  "isolation_detail": "Codex project deny policy passed three resolved-host execpolicy self-checks and -a never is active; the policy loads only when Codex trusts the target repository; connected apps, browser and computer use, plugins and image generation are disabled, as are the 0 MCP servers in the user config and web search",
+  "isolation_detail": "Codex project deny policy passed three resolved-host execpolicy self-checks and -a never is active; the policy loads only when Codex trusts the target repository; connected apps, browser and computer use, plugins and image generation are disabled, as are the 0 MCP servers in the user config and web search; Codex's built-in sub-agent tools are removed (model catalog override, checked against the session instructions)",
   "spawned_at": "<TS>"
 }

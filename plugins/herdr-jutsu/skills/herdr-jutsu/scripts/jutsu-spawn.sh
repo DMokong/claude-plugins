@@ -147,7 +147,9 @@ the target cwd, requires `-a never` (and adds it when absent), applies the allow
 even with --allow-dangerous-agent-flags, and reports
 "outbound_isolation":"enforced_if_trusted" because Codex only loads a project policy
 from a trusted repository. Three resolved-host `codex execpolicy check` probes are required
-when codex is on PATH. kind=shell and --no-isolation report "outbound_isolation":"none".
+when codex is on PATH. An isolated Codex member is also pointed at a copy of the model catalog
+without multi_agent_version (the only setting that removes Codex's sub-agent tools);
+isolation_detail says whether that worked. kind=shell and --no-isolation report "outbound_isolation":"none".
 For Claude and --no-isolation, everything after `--` goes to the agent binary verbatim
 apart from the documented Claude name/deny merge. Isolated Codex args must match the
 allowlist: safe -s/--sandbox; -a/--ask-for-approval never; -m/--model; --add-dir;
@@ -454,6 +456,69 @@ codex_surface_args() { # fills CODEX_SURFACE_ARGS; refuses a config server it ca
     done <"$config"
   fi
   CODEX_SURFACE_ARGS+=(-c 'web_search="disabled"')
+  codex_subagent_catalog
+}
+
+# `--disable multi_agent` does not remove Codex's sub-agent tools: the model catalog turns
+# them on per model (multi_agent_version) and that wins over every feature flag. The one
+# setting that removes them is a catalog without that field, so an isolated member is pointed
+# at a copy of the current catalog with it deleted. Nothing is written here (refusals and
+# --preflight create nothing): the copy is held in memory and install_codex_subagent_catalog
+# writes it once placement has succeeded.
+CODEX_CATALOG_JSON=""
+CODEX_CATALOG_FILE=""
+CODEX_SUBAGENT_NOTE=""
+CODEX_SUBAGENT_KEPT="; Codex's built-in sub-agent tools were NOT removed"
+CODEX_SUBAGENT_SCOPE="they run inside the same sandbox and rules"
+
+codex_subagent_catalog() { # appends the catalog override to CODEX_SURFACE_ARGS when it can be built
+  local catalog=""
+  CODEX_CATALOG_JSON=""
+  CODEX_CATALOG_FILE=""
+  if ! command -v codex >/dev/null 2>&1; then
+    CODEX_SUBAGENT_NOTE="$CODEX_SUBAGENT_KEPT (codex was not on PATH to read its model catalog); $CODEX_SUBAGENT_SCOPE"
+    return 0
+  fi
+  catalog="$(codex debug models 2>/dev/null \
+    | jq -c 'select(type == "object" and (.models | type) == "array" and (.models | length) > 0)
+        | .models |= map(del(.multi_agent_version, .multi_agent_reasoning_effort))' 2>/dev/null)" || catalog=""
+  if [ -z "$catalog" ]; then
+    CODEX_SUBAGENT_NOTE="$CODEX_SUBAGENT_KEPT (codex debug models gave no usable model catalog); $CODEX_SUBAGENT_SCOPE"
+    return 0
+  fi
+  CODEX_CATALOG_JSON="$catalog"
+  CODEX_CATALOG_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/herdr-jutsu/codex-models.json"
+  CODEX_SURFACE_ARGS+=(-c "model_catalog_json=$(jq -Rn --arg v "$CODEX_CATALOG_FILE" '$v')")
+  CODEX_SUBAGENT_NOTE="; Codex's built-in sub-agent tools are removed by a model catalog override"
+}
+
+install_codex_subagent_catalog() { # writes the catalog, then checks what a session is told
+  local dir="" tmp="" probe="" probe_rc=0
+  [ -n "$CODEX_CATALOG_FILE" ] || return 0
+  dir="$(dirname "$CODEX_CATALOG_FILE")"
+  # The member's argv already names this file, so a spawn that cannot write it must stop.
+  if ! mkdir -p "$dir" 2>/dev/null || ! chmod 700 "$dir" 2>/dev/null \
+    || ! tmp="$(mktemp "$dir/.codex-models.XXXXXX" 2>/dev/null)" \
+    || ! printf '%s\n' "$CODEX_CATALOG_JSON" >"$tmp" 2>/dev/null \
+    || ! chmod 600 "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$CODEX_CATALOG_FILE" 2>/dev/null; then
+    [ -z "$tmp" ] || rm -f "$tmp" 2>/dev/null || true
+    fail codex_catalog_write_failed \
+      "could not write the model catalog that removes Codex's sub-agent tools: $CODEX_CATALOG_FILE" 1
+  fi
+  # No model call: this renders the instructions a new session would receive. Sub-agent
+  # tooling announces itself there, so its absence is the check.
+  probe="$(cd "$CWD" 2>/dev/null && codex debug prompt-input "${CODEX_SURFACE_ARGS[@]}" probe 2>/dev/null)" || probe_rc=$?
+  if [ "$probe_rc" -ne 0 ] \
+    || ! printf '%s' "$probe" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+    CODEX_SUBAGENT_NOTE="; a model catalog override meant to remove Codex's built-in sub-agent tools is in place but could not be checked (codex debug prompt-input exit $probe_rc); if they remain, $CODEX_SUBAGENT_SCOPE"
+    emit_warning codex_subagent_tools_unverified "the model catalog override could not be checked: codex debug prompt-input exit $probe_rc"
+  elif printf '%s' "$probe" | grep -Eq 'multi_agent_role|spawn_agent'; then
+    CODEX_SUBAGENT_NOTE="$CODEX_SUBAGENT_KEPT (the model catalog override is in place but a session is still told about them); $CODEX_SUBAGENT_SCOPE"
+    emit_warning codex_subagent_tools_present "the model catalog override did not remove Codex's sub-agent tools"
+  else
+    CODEX_SUBAGENT_NOTE="; Codex's built-in sub-agent tools are removed (model catalog override, checked against the session instructions)"
+  fi
 }
 
 codex_config_allowed() { # codex_config_allowed <key=value>
@@ -604,7 +669,7 @@ prepare_isolation() {
       LAUNCH_ARGS+=(${resume_tail[@]+"${resume_tail[@]}"})
       OUTBOUND_ISOLATION="enforced_if_trusted"
       CODEX_SURFACE_NOTE="; connected apps, browser and computer use, plugins and image generation are disabled, as are the $CODEX_SURFACE_MCP_COUNT MCP servers in the user config and web search"
-      ISOLATION_DETAIL="Codex project deny policy and -a never; effective only when Codex trusts the target repository$CODEX_SURFACE_NOTE"
+      ISOLATION_DETAIL="Codex project deny policy and -a never; effective only when Codex trusts the target repository$CODEX_SURFACE_NOTE$CODEX_SUBAGENT_NOTE"
       if [ "$profile_seen" -eq 1 ]; then
         CODEX_PROFILE_NOTE="; profile '$profile_value' is in play with explicit sandbox '$sandbox_value'"
         ISOLATION_DETAIL="$ISOLATION_DETAIL$CODEX_PROFILE_NOTE"
@@ -1018,7 +1083,7 @@ fi
 if [ "$PREFLIGHT_ONLY" -eq 1 ]; then
   PREFLIGHT_ISOLATION_DETAIL="$ISOLATION_DETAIL"
   if [ "$KIND" = codex ] && [ "$NO_ISOLATION" -eq 0 ]; then
-    PREFLIGHT_ISOLATION_DETAIL="planned: spawn will install the Codex project deny policy and use -a never; effective only when Codex trusts the target repository$CODEX_PROFILE_NOTE$CODEX_SURFACE_NOTE"
+    PREFLIGHT_ISOLATION_DETAIL="planned: spawn will install the Codex project deny policy and use -a never; effective only when Codex trusts the target repository$CODEX_PROFILE_NOTE$CODEX_SURFACE_NOTE$CODEX_SUBAGENT_NOTE"
   elif [ "$KIND" = claude ] && [ "$NO_ISOLATION" -eq 0 ]; then
     PREFLIGHT_ISOLATION_DETAIL="planned: $ISOLATION_DETAIL"
   fi
@@ -1682,6 +1747,9 @@ install_codex_policy() {
   [ "$KIND" = codex ] || return 0
   [ "$NO_ISOLATION" -eq 0 ] || return 0
 
+  # First, and whatever happens to the deny policy below: the member's argv names this file.
+  install_codex_subagent_catalog
+
   herdr_path="$(command -v herdr 2>/dev/null || true)"
   if [ -z "$herdr_path" ]; then
     degrade_codex_isolation "could not resolve the herdr executable for the Codex deny policy"
@@ -1812,9 +1880,9 @@ install_codex_policy() {
 
   OUTBOUND_ISOLATION="enforced_if_trusted"
   if command -v codex >/dev/null 2>&1; then
-    ISOLATION_DETAIL="Codex project deny policy passed three resolved-host execpolicy self-checks and -a never is active; the policy loads only when Codex trusts the target repository$CODEX_PROFILE_NOTE$CODEX_EXCLUDE_NOTE$CODEX_SURFACE_NOTE"
+    ISOLATION_DETAIL="Codex project deny policy passed three resolved-host execpolicy self-checks and -a never is active; the policy loads only when Codex trusts the target repository$CODEX_PROFILE_NOTE$CODEX_EXCLUDE_NOTE$CODEX_SURFACE_NOTE$CODEX_SUBAGENT_NOTE"
   else
-    ISOLATION_DETAIL="Codex project deny policy and -a never are active; codex was not on PATH for a static check, and the policy loads only when Codex trusts the target repository$CODEX_PROFILE_NOTE$CODEX_EXCLUDE_NOTE$CODEX_SURFACE_NOTE"
+    ISOLATION_DETAIL="Codex project deny policy and -a never are active; codex was not on PATH for a static check, and the policy loads only when Codex trusts the target repository$CODEX_PROFILE_NOTE$CODEX_EXCLUDE_NOTE$CODEX_SURFACE_NOTE$CODEX_SUBAGENT_NOTE"
   fi
 }
 

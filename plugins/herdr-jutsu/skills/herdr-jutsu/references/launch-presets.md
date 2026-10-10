@@ -82,6 +82,16 @@ both `agent_args` (caller input) and `effective_agent_args` (launched argv).
   in_app_local_automation; one `-c mcp_servers.<name>.enabled=false` per `[mcp_servers.<name>]` header
   in `${CODEX_HOME:-~/.codex}/config.toml`; and `-c web_search="disabled"`. `--enable` and
   `--disable` are not on the caller allowlist, so a caller cannot switch a tool back on.
+- **Sub-agent tools are removed by a catalog override, not by `multi_agent`.** Codex's model
+  catalog turns `spawn_agent`, `send_message` and the rest on per model, whatever the feature
+  flags say. The segment therefore ends with `-c model_catalog_json="<cache>/herdr-jutsu/codex-models.json"`
+  (`<cache>` is `$XDG_CACHE_HOME` or `~/.cache`): the output of `codex debug models` with
+  `multi_agent_version` deleted, written 0600 on each spawn. The launcher then runs
+  `codex debug prompt-input` with the same segment and reads the result. `isolation_detail`
+  ends with one of: tools removed and checked; tools NOT removed (no catalog, or a session is
+  still told about them — warning `codex_subagent_tools_present`); override in place but
+  unchecked (warning `codex_subagent_tools_unverified`). A catalog that cannot be written is
+  `codex_catalog_write_failed`, exit 1. The check uses the default model.
 - Codex reads `AGENTS.md`, not `CLAUDE.md` — the brief must carry anything it needs that
   lives only in Claude-side instructions.
 

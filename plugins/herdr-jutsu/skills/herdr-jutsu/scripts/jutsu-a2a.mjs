@@ -713,7 +713,7 @@ async function mcpMode(args) {
     if (request.method === 'initialize') {
       writeRpc({ jsonrpc: '2.0', id: request.id, result: {
         protocolVersion: request.params?.protocolVersion,
-        capabilities: { tools: {} }, serverInfo: { name: 'herdr_jutsu_a2a', version: '0.5.0' },
+        capabilities: { tools: {} }, serverInfo: { name: 'herdr_jutsu_a2a', version: '0.5.1' },
         instructions: TOOL_DESCRIPTION,
       } });
     } else if (request.method === 'tools/list') {

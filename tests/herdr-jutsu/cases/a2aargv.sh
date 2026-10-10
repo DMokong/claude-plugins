@@ -40,10 +40,11 @@ a2aargv_normalized_args() {
   relay_path="$(realpath "$A2A_RELAY")"
   a2a_path="$(realpath "$JUTSU_STATE_DIR")/a2a"
   printf '%s' "$args" | jq -c --arg node "$node_path" --arg codex "$codex_path" \
-    --arg herdr "$herdr_path" --arg relay "$relay_path" --arg a2a "$a2a_path" '
+    --arg herdr "$herdr_path" --arg relay "$relay_path" --arg a2a "$a2a_path" \
+    --arg catalog "$HOME/.cache/herdr-jutsu/codex-models.json" '
       map(split($node)|join("<node>") | split($codex)|join("<codex>")
         | split($herdr)|join("<herdr>") | split($relay)|join("<relay>")
-        | split($a2a)|join("<a2a>"))'
+        | split($a2a)|join("<a2a>") | split($catalog)|join("<catalog>"))'
 }
 
 a2aargv_assert_golden() {

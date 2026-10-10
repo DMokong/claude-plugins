@@ -3,6 +3,36 @@
 set -u
 
 LOG_FILE="${STUB_CODEX_LOG:-${STUB_LOG:-/dev/null}.codex}"
+
+# `codex debug models` / `codex debug prompt-input`: the two calls the launcher makes to
+# remove and then check Codex's sub-agent tools. Logged apart from the execpolicy calls.
+if [ "${1:-}" = debug ]; then
+  jq -cn '$ARGS.positional' --args -- "$@" >>"$LOG_FILE.debug"
+  case "${2:-}" in
+    models)
+      [ "${STUB_CODEX_MODELS_FAIL:-}" != 1 ] || exit 1
+      if [ "${STUB_CODEX_MODELS_OUTPUT_SET:-}" = 1 ]; then printf '%s\n' "${STUB_CODEX_MODELS_OUTPUT:-}"; exit 0; fi
+      jq -cn '{models:[{slug:"stub-model",multi_agent_version:"v2",multi_agent_reasoning_effort:"high",context_window:1000},{slug:"stub-plain",context_window:500}]}'
+      exit 0 ;;
+    prompt-input)
+      [ "${STUB_CODEX_PROMPT_INPUT_FAIL:-}" != 1 ] || exit 1
+      catalog=""
+      for arg in "$@"; do
+        case "$arg" in model_catalog_json=*) catalog="$(printf '%s' "${arg#model_catalog_json=}" | jq -r . 2>/dev/null)" ;; esac
+      done
+      # Like the real binary: sub-agent instructions appear unless the catalog in use has
+      # no multi_agent_version for its models.
+      if [ "${STUB_CODEX_PROMPT_INPUT_ROLE:-}" = 1 ] || [ -z "$catalog" ] \
+        || ! jq -e 'all(.models[]; has("multi_agent_version") | not)' "$catalog" >/dev/null 2>&1; then
+        jq -cn '[{type:"message",role:"developer",content:[{type:"input_text",text:"<multi_agent_role>spawn_agent</multi_agent_role>"}]}]'
+      else
+        jq -cn '[{type:"message",role:"developer",content:[{type:"input_text",text:"base"}]}]'
+      fi
+      exit 0 ;;
+  esac
+  exit 2
+fi
+
 jq -cn '$ARGS.positional' --args -- "$@" >>"$LOG_FILE"
 
 if [ "${1:-}" != execpolicy ] || [ "${2:-}" != check ]; then

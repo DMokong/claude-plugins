@@ -99,7 +99,7 @@ setup_case() {
   : >"$STUB_CODEX_LOG"
   export STUB_CODEX_LOG
 
-  unset JUTSU_STATE_DIR XDG_STATE_HOME STUB_FAIL STUB_AGENT_START_ERROR STUB_VERSION \
+  unset JUTSU_STATE_DIR XDG_STATE_HOME XDG_CACHE_HOME STUB_FAIL STUB_AGENT_START_ERROR STUB_VERSION \
     STUB_PROCESS_INFO STUB_AGENTS STUB_PANE_LABEL STUB_PANE_CWD STUB_AGENT_LIST_EPERM \
     STUB_CODEX_DECISION STUB_CODEX_RULES_OVERRIDE_SET STUB_CODEX_RULES_OVERRIDE \
     STUB_AGENT_START_HOLD_NAME STUB_AGENT_START_READY STUB_AGENT_START_RELEASE \
@@ -1369,7 +1369,7 @@ test_stage0_codex_requires_never_and_injects_when_absent() {
   : >"$STUB_LOG"
   run_spawn --name stage0-ap2 --kind codex --cwd "$REPO_DIR" -- -s read-only
   [ "$CODE" -eq 0 ] || { fail_case "spawn without -a failed: $(cat "$ERR_FILE")"; teardown_case; return; }
-  grep -qE '^agent start .* -- -s read-only -a never --disable apps .* -c web_search="disabled"$' "$STUB_LOG" \
+  grep -qE '^agent start .* -- -s read-only -a never --disable apps .* -c web_search="disabled" -c model_catalog_json="[^ ]*/codex-models\.json"$' "$STUB_LOG" \
     || { fail_case "agent start did not inject '-a never': $(cat "$STUB_LOG")"; teardown_case; return; }
   ok "$CURRENT_TEST"
   teardown_case
@@ -1507,7 +1507,9 @@ surface_json() { # surface_json [mcp-server-name...] -> the launcher-added surfa
   local f out='[]'
   for f in $SURFACE_FEATURES; do out="$(printf '%s' "$out" | jq -c --arg f "$f" '. + ["--disable",$f]')"; done
   for f in "$@"; do out="$(printf '%s' "$out" | jq -c --arg f "mcp_servers.$f.enabled=false" '. + ["-c",$f]')"; done
-  printf '%s' "$out" | jq -c '. + ["-c","web_search=\"disabled\""]'
+  # Last: the catalog override that removes Codex's sub-agent tools (HOME is the case sandbox).
+  printf '%s' "$out" | jq -c --arg catalog "$HOME/.cache/herdr-jutsu/codex-models.json" \
+    '. + ["-c","web_search=\"disabled\"","-c",("model_catalog_json=" + ($catalog | tojson))]'
 }
 
 test_surface_codex_isolated_disables_connectors_and_web() {

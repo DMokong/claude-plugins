@@ -284,6 +284,15 @@ connected apps, the user's MCP servers and web tools — all outside the sandbox
 rule. Isolated members are now launched without them; `--no-isolation` is unchanged. Codex's own
 sub-agent tools and built-in skills remain, and run inside the same sandbox and rules.
 
+0.5.1 removes those sub-agent tools from isolated Codex members. `--disable multi_agent` never
+did: Codex's model catalog switches the tools on per model and that wins over the flag. The
+launcher now points the member at a copy of the catalog without that switch
+(`~/.cache/herdr-jutsu/codex-models.json`, rewritten on every spawn), then checks the
+instructions a new session would receive. `isolation_detail` says whether the tools were removed,
+left in place, or could not be checked — when left, they still run inside the same sandbox and
+rules. The member's own tool list is what a live gate reads; nothing inspects the request Codex
+sends. `--no-isolation` is unchanged.
+
 0.3.1 stops calling a Claude member's permission mode "effective": the launcher sees launch
 args, not the member's settings, so it names the mode only when an arg set it and otherwise
 warns that the settings decide and the string-pattern deny may be the only barrier.
