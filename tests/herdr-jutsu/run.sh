@@ -566,6 +566,39 @@ test_ac17_registry_modes_0700_0600() {
   teardown_case
 }
 
+# =========================================================================================
+# Contract with the crew-pane plugin — plugins/crew-pane/hooks/lib/sources.ts (parseRegistry)
+# reads exactly these five fields of a registry row. Renaming or dropping one breaks the pane.
+# =========================================================================================
+
+test_registry_row_carries_fields_crew_pane_reads() {
+  CURRENT_TEST="registry_row_carries_fields_crew_pane_reads"
+  setup_case
+  export JUTSU_STATE_DIR="$SCRATCH/state"
+  run_spawn --name pane1 --kind shell --cwd "$REPO_DIR" --stream pane1 --issue demo-1
+  [ "$CODE" -eq 0 ] || { fail_case "expected exit 0, got $CODE: $(cat "$ERR_FILE")"; teardown_case; return; }
+  local regfile row field
+  regfile="$(find "$JUTSU_STATE_DIR" -name '*.jsonl' | head -n1)"
+  [ -n "$regfile" ] || { fail_case "no registry .jsonl found under $JUTSU_STATE_DIR"; teardown_case; return; }
+  row="$(tail -n1 "$regfile")"
+  for field in name kind issue pane_id parent_pane; do
+    printf '%s' "$row" | jq -e --arg f "$field" 'has($f) and (.[$f] | type) == "string"' >/dev/null \
+      || { fail_case "registry row lacks the string field '$field' that crew-pane reads: $row"; teardown_case; return; }
+  done
+  [ "$(printf '%s' "$row" | jq -r '.name')" = "pane1" ] \
+    || { fail_case "row .name is not the member name: $row"; teardown_case; return; }
+  [ "$(printf '%s' "$row" | jq -r '.kind')" = "shell" ] \
+    || { fail_case "row .kind is not the member kind: $row"; teardown_case; return; }
+  [ "$(printf '%s' "$row" | jq -r '.issue')" = "demo-1" ] \
+    || { fail_case "row .issue is not the --issue value: $row"; teardown_case; return; }
+  [ "$(printf '%s' "$row" | jq -r '.parent_pane')" = "w0:p1" ] \
+    || { fail_case "row .parent_pane is not the caller's HERDR_PANE_ID: $row"; teardown_case; return; }
+  [ -n "$(printf '%s' "$row" | jq -r '.pane_id')" ] \
+    || { fail_case "row .pane_id is empty: $row"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
 test_ac17_sandbox_readonly_registry_none() {
   CURRENT_TEST="ac17_sandbox_readonly_registry_none"
   setup_case
@@ -2446,6 +2479,7 @@ register_test test_ac16_claude_dangerous_flags_refused
 register_test test_ac16_codex_dangerous_flags_refused
 register_test test_ac16_override_accepted_and_recorded
 register_test test_ac17_registry_modes_0700_0600
+register_test test_registry_row_carries_fields_crew_pane_reads
 register_test test_ac17_sandbox_readonly_registry_none
 register_test test_ac17_sandbox_workspace_write_registry_workspace
 register_test test_ac18_agent_args_roundtrip_as_json_array
