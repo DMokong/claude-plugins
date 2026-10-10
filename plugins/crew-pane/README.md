@@ -35,3 +35,5 @@ Headless runs (`claude -p`) poll nothing.
     claude plugin validate plugins/crew-pane
     claude plugin test plugins/crew-pane
     claude --plugin-dir plugins/crew-pane
+
+If the plugin is also installed, `--plugin-dir` overrides the installed copy for that session.

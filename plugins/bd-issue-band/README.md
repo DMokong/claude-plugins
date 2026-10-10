@@ -30,3 +30,5 @@ Headless runs (`claude -p`) are always ignored.
     claude plugin validate plugins/bd-issue-band
     claude plugin test plugins/bd-issue-band
     claude --plugin-dir plugins/bd-issue-band
+
+If the plugin is also installed, `--plugin-dir` overrides the installed copy for that session.

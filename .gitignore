@@ -9,3 +9,5 @@ docs/fable-streams/
 
 # Written by Claude Code when a mod is loaded with --plugin-dir. Never committed.
 plugins/*/.claude-plugin/types/
+# A mod type-checked before the engine has written its types/ emits .js beside the sources
+plugins/*/hooks/**/*.js
