@@ -6,3 +6,8 @@
 # Conductor stream directories hold absolute local paths and private tracker ids —
 # they are working records, never part of this public repo.
 docs/fable-streams/
+
+# Written by Claude Code when a mod is loaded with --plugin-dir. Never committed.
+plugins/*/.claude-plugin/types/
+# A mod type-checked before the engine has written its types/ emits .js beside the sources
+plugins/*/hooks/**/*.js

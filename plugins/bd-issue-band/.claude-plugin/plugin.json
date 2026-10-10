@@ -1,0 +1,17 @@
+{
+  "name": "bd-issue-band",
+  "version": "0.2.0",
+  "description": "A band above the prompt showing the bd (beads) issue this session holds and how long since its last comment",
+  "author": { "name": "Dustin Cheng" },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "enabled": {
+      "type": "string",
+      "title": "Issue band",
+      "description": "Show the bd issue band above the prompt",
+      "options": ["on", "off"],
+      "default": "on"
+    }
+  }
+}
