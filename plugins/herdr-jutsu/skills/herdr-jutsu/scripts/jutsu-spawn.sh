@@ -58,6 +58,8 @@ Options:
                                effect on kind=codex (it has no SendMessage); refused with
                                --no-isolation or kind=shell (conflicting_options). Must
                                appear before `--`.
+  --a2a                        enable guarded peer messaging for this member
+  --peer NAME                  permit a named peer (repeatable; requires --a2a)
   --preflight                  run the environment checks, print the result JSON line, create
                                nothing (cannot be combined with --record-session:
                                conflicting_options)
@@ -217,6 +219,8 @@ NAME="" KIND="" WHERE="pane" WORKTREE="" WORKTREE_WHERE="tab" BASE="" IN_PANE=""
 CWD="$PWD" STREAM="" ISSUE="" CMD="" TIMEOUT=60000
 FOCUS_ARG=(--no-focus)
 ALLOW_DANGEROUS=0 NO_ISOLATION=0 STRICT_ISOLATION=0 PREFLIGHT_ONLY=0 RECORD_SESSION=0 SESSION_ID_ARG=""
+A2A=0
+PEERS=()
 AGENT_ARGS=()
 
 while [ $# -gt 0 ]; do
@@ -240,6 +244,8 @@ while [ $# -gt 0 ]; do
     --allow-dangerous-agent-flags) ALLOW_DANGEROUS=1; shift ;;
     --no-isolation) NO_ISOLATION=1; shift ;;
     --strict-isolation) STRICT_ISOLATION=1; shift ;;
+    --a2a) A2A=1; shift ;;
+    --peer) need_value "$1" $#; PEERS+=("$2"); shift 2 ;;
     --preflight) PREFLIGHT_ONLY=1; shift ;;
     --record-session) RECORD_SESSION=1; shift ;;
     --session-id) need_value "$1" $#; SESSION_ID_ARG="$2"; shift 2 ;;
@@ -248,6 +254,52 @@ while [ $# -gt 0 ]; do
     *) fail unknown_option "unknown option: $1" 2 ;;
   esac
 done
+
+# A2A compatibility errors are request-shape errors and must be decided before any
+# environment probing can create a registry path or contact herdr.
+if [ "${#PEERS[@]}" -gt 0 ] && [ "$A2A" -ne 1 ]; then
+  fail a2a_required "--peer requires --a2a" 2
+fi
+if [ "$A2A" -eq 1 ] && [ "$RECORD_SESSION" -eq 1 ]; then
+  fail a2a_not_applicable "--a2a does not apply to --record-session" 2
+fi
+if [ "$A2A" -eq 1 ] && [ "$KIND" = shell ]; then
+  fail a2a_kind_unsupported "--a2a supports only claude and codex members" 2
+fi
+if [ "$A2A" -eq 1 ] && [ "$NO_ISOLATION" -eq 1 ]; then
+  fail a2a_requires_isolation "--a2a requires outbound isolation" 5
+fi
+
+A2A_SEEN_PEERS=()
+for a2a_peer in ${PEERS[@]+"${PEERS[@]}"}; do
+  [[ "$a2a_peer" =~ ^[a-z][a-z0-9_-]{0,31}$ ]] \
+    || fail bad_peer_name "--peer must match ^[a-z][a-z0-9_-]{0,31}$: $a2a_peer" 2
+  [ "$a2a_peer" != "$NAME" ] || fail peer_is_self "a member cannot name itself as a peer: $a2a_peer" 2
+  for a2a_seen in ${A2A_SEEN_PEERS[@]+"${A2A_SEEN_PEERS[@]}"}; do
+    [ "$a2a_seen" != "$a2a_peer" ] || fail duplicate_peer "duplicate --peer: $a2a_peer" 2
+  done
+  A2A_SEEN_PEERS+=("$a2a_peer")
+done
+
+if [ "$A2A" -eq 1 ]; then
+  a2a_i=0
+  while [ "$a2a_i" -lt "${#AGENT_ARGS[@]}" ]; do
+    a2a_arg="${AGENT_ARGS[$a2a_i]}"
+    a2a_next=""
+    [ $((a2a_i + 1)) -ge "${#AGENT_ARGS[@]}" ] || a2a_next="${AGENT_ARGS[$((a2a_i + 1))]}"
+    case "$a2a_arg" in
+      --mcp-config|--mcp-config=*|--strict-mcp-config|--allowedTools|--allowedTools=*)
+        fail a2a_arg_conflict "--a2a owns the member MCP configuration and allowed tool entry" 5 ;;
+      mcp_servers.*)
+        fail a2a_arg_conflict "--a2a owns mcp_servers.* configuration" 5 ;;
+      -c|--config)
+        case "$a2a_next" in mcp_servers.*) fail a2a_arg_conflict "--a2a owns mcp_servers.* configuration" 5 ;; esac ;;
+      -c=*|--config=*)
+        case "${a2a_arg#*=}" in mcp_servers.*) fail a2a_arg_conflict "--a2a owns mcp_servers.* configuration" 5 ;; esac ;;
+    esac
+    a2a_i=$((a2a_i + 1))
+  done
+fi
 
 # --preflight and --record-session contradict each other: --preflight promises to create
 # nothing, --record-session exists to append a row. Refuse the pair instead of letting one
@@ -659,7 +711,7 @@ REGISTRY_MODE=none REG_DIR="" REG_FILE=""
 # --preflight (creates nothing at all) and --record-session (only ever appends to a file
 # that already holds the member's row).
 NO_CREATE=0
-if [ "$PREFLIGHT_ONLY" -eq 1 ] || [ "$RECORD_SESSION" -eq 1 ]; then NO_CREATE=1; fi
+if [ "$PREFLIGHT_ONLY" -eq 1 ] || [ "$RECORD_SESSION" -eq 1 ] || [ "$A2A" -eq 1 ]; then NO_CREATE=1; fi
 
 try_state_dir() { # try_state_dir <dir> <home|workspace>
   local d="$1" mode="$2" f probe
@@ -702,6 +754,57 @@ resolve_registry() {
   return 0
 }
 resolve_registry
+
+# A2A can never fall back to workspace-local or unrecorded state. Resolve and validate
+# all executable and parent-socket inputs while registry resolution is still non-creating.
+A2A_DIR=""
+A2A_NODE="" A2A_CODEX="" A2A_HERDR=""
+absolute_command() { # absolute_command <name>
+  local p d b resolved
+  p="$(command -v "$1" 2>/dev/null || true)"
+  [ -n "$p" ] || return 1
+  case "$p" in
+    /*) ;;
+    *) d="$(dirname "$p")"; b="$(basename "$p")"; p="$(cd "$d" 2>/dev/null && pwd -P)/$b" ;;
+  esac
+  resolved="$(realpath "$p" 2>/dev/null || true)"
+  printf '%s' "${resolved:-$p}"
+}
+
+path_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null || return 1; }
+trusted_executable() { # trusted_executable <absolute-path>
+  local p="$1" target mode pair group world
+  for target in "$p" "$(dirname "$p")"; do
+    [ -e "$target" ] || return 1
+    mode="$(path_mode "$target")" || return 1
+    pair="${mode#${mode%??}}"
+    group="${pair%?}"; world="${pair#?}"
+    case "$group" in 2|3|6|7) return 1 ;; esac
+    case "$world" in 2|3|6|7) return 1 ;; esac
+  done
+  [ -f "$p" ] && [ -x "$p" ]
+}
+
+if [ "$A2A" -eq 1 ]; then
+  [ "$REGISTRY_MODE" = home ] || fail a2a_registry_unsuitable \
+    "--a2a requires home registry storage; resolved mode is $REGISTRY_MODE" 4
+  [ -n "${CLAUDE_CODE_MESSAGING_SOCKET:-}" ] || fail a2a_parent_unreachable \
+    "--a2a requires the parent CLAUDE_CODE_MESSAGING_SOCKET" 4
+  A2A_NODE="$(absolute_command node || true)"
+  [ -n "$A2A_NODE" ] || fail a2a_runtime_missing "--a2a requires node >= 20" 4
+  A2A_NODE_VERSION="$($A2A_NODE -p 'process.versions.node' 2>/dev/null || true)"
+  ver_ge "$A2A_NODE_VERSION" 20.0.0 || fail a2a_runtime_missing \
+    "--a2a requires node >= 20 (found ${A2A_NODE_VERSION:-unreadable})" 4
+  A2A_CODEX="$(absolute_command codex || true)"
+  A2A_HERDR="$(absolute_command herdr || true)"
+  for A2A_EXEC in "$A2A_NODE" "$A2A_CODEX" "$A2A_HERDR"; do
+    [ -n "$A2A_EXEC" ] && trusted_executable "$A2A_EXEC" || fail a2a_untrusted_executable \
+      "A2A executable is missing, non-absolute, or group/world-writable (as is its directory): ${A2A_EXEC:-unresolved}" 5
+  done
+  A2A_DIR="$REG_DIR/a2a"
+  A2A_RELAY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/jutsu-a2a.mjs"
+  [ -f "$A2A_RELAY" ] || fail a2a_runtime_missing "A2A relay is missing: $A2A_RELAY" 4
+fi
 
 if [ "$REGISTRY_MODE" = none ]; then
   emit_warning registry_unavailable \
@@ -799,6 +902,118 @@ fi
 PARENT="$(printf '%s' "$AGENTS_JSON" \
   | jq -r --arg p "${HERDR_PANE_ID:-}" '.result.agents[]? | select(.pane_id == $p) | .name // empty' 2>/dev/null | head -n1)"
 
+path_contains() { # path_contains <outer> <inner>; callers pass canonical absolute paths
+  local outer="${1%/}" inner="${2%/}"
+  [ "$inner" = "$outer" ] || case "$inner" in "$outer"/*) return 0 ;; *) return 1 ;; esac
+}
+
+canonical_path() { # canonical_path <possibly-not-yet-created-path>
+  local p="$1" suffix="" base parent resolved
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  while [ ! -e "$p" ]; do
+    base="$(basename "$p")"; parent="$(dirname "$p")"
+    suffix="/$base$suffix"
+    [ "$parent" != "$p" ] || break
+    p="$parent"
+  done
+  if [ -d "$p" ]; then resolved="$(cd "$p" 2>/dev/null && pwd -P)"; else resolved="$(realpath "$p" 2>/dev/null || printf '%s' "$p")"; fi
+  printf '%s%s' "$resolved" "$suffix"
+}
+
+if [ "$A2A" -eq 1 ]; then
+  # AC-32 deliberately precedes the socket-length check: an overlapping storage request
+  # is rejected for the overlap even when its derived socket path is also long.
+  A2A_DIR="$(canonical_path "$A2A_DIR")"
+  A2A_WRITE_ROOTS=("$CWD")
+  if [ -n "$WORKTREE" ]; then A2A_WRITE_ROOTS+=("$CWD/.jutsu-worktrees/$WORKTREE"); fi
+  A2A_I=0
+  while [ "$A2A_I" -lt "${#AGENT_ARGS[@]}" ]; do
+    A2A_ARG="${AGENT_ARGS[$A2A_I]}"
+    case "$A2A_ARG" in
+      --add-dir)
+        if [ $((A2A_I + 1)) -lt "${#AGENT_ARGS[@]}" ]; then
+          A2A_WRITE_ROOTS+=("${AGENT_ARGS[$((A2A_I + 1))]}")
+          A2A_I=$((A2A_I + 1))
+        fi ;;
+      --add-dir=*) A2A_WRITE_ROOTS+=("${A2A_ARG#*=}") ;;
+    esac
+    A2A_I=$((A2A_I + 1))
+  done
+  for A2A_ROOT in ${A2A_WRITE_ROOTS[@]+"${A2A_WRITE_ROOTS[@]}"}; do
+    case "$A2A_ROOT" in /*) ;; *) A2A_ROOT="$CWD/$A2A_ROOT" ;; esac
+    A2A_ROOT="$(canonical_path "$A2A_ROOT")"
+    if path_contains "$A2A_ROOT" "$A2A_DIR" || path_contains "$A2A_DIR" "$A2A_ROOT"; then
+      fail a2a_storage_in_write_root \
+        "A2A storage and member write roots must be disjoint: $A2A_DIR / $A2A_ROOT" 5
+    fi
+  done
+
+  A2A_SOCKET="$A2A_DIR/sock/$NAME.sock"
+  A2A_SOCKET_BYTES="$(LC_ALL=C printf '%s' "$A2A_SOCKET" | wc -c | tr -d '[:space:]')"
+  [ "$A2A_SOCKET_BYTES" -le 100 ] || fail socket_path_too_long \
+    "member socket path is $A2A_SOCKET_BYTES bytes (maximum 100): $A2A_SOCKET" 5
+  [ -n "$PARENT" ] || fail a2a_parent_unnamed \
+    "the parent pane ${HERDR_PANE_ID:-<unknown>} has no herdr agent name" 4
+
+  A2A_PARENT_SOCKET="$CLAUDE_CODE_MESSAGING_SOCKET"
+  A2A_PARENT_DIR="$(dirname "$A2A_PARENT_SOCKET")"
+  [ -d "$A2A_PARENT_DIR" ] || fail a2a_parent_unreachable \
+    "parent inbox directory does not exist: $A2A_PARENT_DIR" 4
+  [ -S "$A2A_PARENT_SOCKET" ] || fail a2a_parent_unreachable \
+    "parent inbox is not a Unix socket: $A2A_PARENT_SOCKET" 4
+  A2A_PARENT_MODE="$(path_mode "$A2A_PARENT_DIR" || true)"
+  A2A_PARENT_PAIR="${A2A_PARENT_MODE#${A2A_PARENT_MODE%??}}"
+  A2A_PARENT_GROUP="${A2A_PARENT_PAIR%?}"; A2A_PARENT_WORLD="${A2A_PARENT_PAIR#?}"
+  A2A_PARENT_UID="$(stat -f '%u' "$A2A_PARENT_SOCKET" 2>/dev/null || stat -c '%u' "$A2A_PARENT_SOCKET" 2>/dev/null || printf '%s' "$(id -u)")"
+  A2A_PARENT_DIR_UID="$(stat -f '%u' "$A2A_PARENT_DIR" 2>/dev/null || stat -c '%u' "$A2A_PARENT_DIR" 2>/dev/null || true)"
+  case "$A2A_PARENT_GROUP" in 2|3|6|7) fail a2a_parent_unreachable "parent socket directory is group/world-writable: $A2A_PARENT_DIR" 4 ;; esac
+  case "$A2A_PARENT_WORLD" in 2|3|6|7) fail a2a_parent_unreachable "parent socket directory is group/world-writable: $A2A_PARENT_DIR" 4 ;; esac
+  [ "$A2A_PARENT_UID" = "$(id -u)" ] && [ "$A2A_PARENT_DIR_UID" = "$(id -u)" ] \
+    || fail a2a_parent_unreachable "parent socket and directory must be owned by the current user" 4
+
+  # Build the relay command once, preserving the normative order. jq supplies both the
+  # compact Claude JSON and TOML-compatible quoted strings for Codex without shell
+  # interpolation of names or paths.
+  A2A_SERVER_ARGS=("$A2A_RELAY" mcp --self "$NAME" --stream "$STREAM" --a2a-dir "$A2A_DIR" \
+    --node "$A2A_NODE" --codex "$A2A_CODEX" --herdr "$A2A_HERDR" --peer "$PARENT")
+  for A2A_PEER in ${PEERS[@]+"${PEERS[@]}"}; do
+    A2A_SERVER_ARGS+=(--peer "$A2A_PEER")
+  done
+  if [ "$KIND" = claude ]; then
+    A2A_MCP_JSON="$(jq -cn --arg command "$A2A_NODE" \
+      --argjson args "$(jq -cn '$ARGS.positional' --args -- "${A2A_SERVER_ARGS[@]}")" \
+      '{mcpServers:{herdr_jutsu_a2a:{type:"stdio",command:$command,args:$args}}}')"
+    # prepare_isolation already made one merged deny segment. Add A2A's four patterns to
+    # that same segment, then append the owned socket/MCP/tool arguments.
+    for A2A_DENY in 'Bash(*codex queue*)' 'Bash(*cc-socks*)' 'Bash(*jutsu-a2a*)' 'Bash(*/a2a/*)'; do
+      array_has "$A2A_DENY" ${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"} || LAUNCH_ARGS+=("$A2A_DENY")
+    done
+    LAUNCH_ARGS+=(--messaging-socket-path "$A2A_SOCKET" --mcp-config "$A2A_MCP_JSON" \
+      --allowedTools mcp__herdr_jutsu_a2a__crew_send)
+  else
+    A2A_TOML_COMMAND="$(jq -Rn --arg v "$A2A_NODE" '$v')"
+    A2A_TOML_ARGS="$(jq -cn '$ARGS.positional' --args -- "${A2A_SERVER_ARGS[@]}")"
+    # The surface-disabling segment is already at the end of LAUNCH_ARGS (before a resume
+    # tail when present). A2A sessions do not resume, so these four keys are last and
+    # enabled=true necessarily follows every disabling override, including collisions.
+    LAUNCH_ARGS+=(-c "mcp_servers.herdr_jutsu_a2a.command=$A2A_TOML_COMMAND" \
+      -c "mcp_servers.herdr_jutsu_a2a.args=$A2A_TOML_ARGS" \
+      -c 'mcp_servers.herdr_jutsu_a2a.default_tools_approval_mode="approve"' \
+      -c 'mcp_servers.herdr_jutsu_a2a.enabled=true')
+  fi
+
+  # All refusing preflight checks have now passed. A real spawn may establish its private
+  # launcher-owned storage; --preflight retains its create-nothing contract.
+  if [ "$PREFLIGHT_ONLY" -ne 1 ]; then
+    mkdir -p "$A2A_DIR/sock" || fail storage_unsafe "could not create A2A storage: $A2A_DIR" 5
+    chmod 700 "$A2A_DIR" "$A2A_DIR/sock" 2>/dev/null || true
+    if [ ! -e "$REG_FILE" ]; then
+      ( umask 077; : >"$REG_FILE" ) || fail registry_write_failed "could not create $REG_FILE" 1
+      chmod 600 "$REG_FILE" 2>/dev/null || true
+    fi
+  fi
+fi
+
 # Every preflight check is now done and nothing has been created: --preflight reports here.
 if [ "$PREFLIGHT_ONLY" -eq 1 ]; then
   PREFLIGHT_ISOLATION_DETAIL="$ISOLATION_DETAIL"
@@ -887,7 +1102,7 @@ CREATED_PANE=""          # a pane/tab/workspace root THIS run created -> closabl
 IN_PANE_ID="" IN_PANE_LABEL="" IN_PANE_RENAMED=0
 SESSION_ID="" STATUS=""
 TRAP_ARMED=0
-POLICY_RULE_FILE="" POLICY_CONFIG_FILE="" POLICY_EXCLUDE_FILE=""
+POLICY_RULE_FILE="" POLICY_RULE_TMP="" POLICY_CONFIG_FILE="" POLICY_EXCLUDE_FILE=""
 POLICY_RULE_CREATED=0 POLICY_CONFIG_CREATED=0
 POLICY_CODEX_DIR_CREATED=0 POLICY_RULES_DIR_CREATED=0
 POLICY_RULE_INTENT=0 POLICY_CONFIG_INTENT=0
@@ -896,6 +1111,200 @@ POLICY_RULE_EXCLUDE_ADDED=0 POLICY_CONFIG_EXCLUDE_ADDED=0
 POLICY_RULE_EXCLUDE_LINE=0 POLICY_CONFIG_EXCLUDE_LINE=0
 POLICY_RULE_EXCLUDE_NEWLINE=0 POLICY_CONFIG_EXCLUDE_NEWLINE=0
 POLICY_LOCK_DIR="" POLICY_LOCK_HELD=0 POLICY_LOCK_INTENT=0
+A2A_LOCK_DIR="" A2A_LOCK_NONCE="" A2A_LOCK_HELD=0
+
+a2a_now_seconds() {
+  if [ "${A2A_TEST_MODE:-}" = 1 ] && [[ "${A2A_NOW_MS:-}" =~ ^[0-9]+$ ]]; then
+    printf '%s' $((A2A_NOW_MS / 1000))
+  else
+    date +%s
+  fi
+}
+
+a2a_mtime_seconds() {
+  stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null || return 1
+}
+
+a2a_start_time() {
+  local value=""
+  value="$(ps -o lstart= -p "$1" 2>/dev/null | awk '{$1=$1; print}' || true)"
+  # Match the relay's conservative sandbox behaviour: only the current process gets a
+  # fallback identity when ps is denied. Other live pids remain unverifiable and their
+  # locks are retained.
+  if [ -z "$value" ] && [ "$1" = "$$" ]; then value="$(date '+%a %b %e %T %Y')"; fi
+  printf '%s' "$value"
+}
+
+a2a_release_lock() {
+  local observed=""
+  [ "$A2A_LOCK_HELD" -eq 1 ] || return 0
+  [ -f "$A2A_LOCK_DIR/owner.json" ] && [ ! -L "$A2A_LOCK_DIR/owner.json" ] \
+    && observed="$(jq -r '.nonce // empty' "$A2A_LOCK_DIR/owner.json" 2>/dev/null || true)"
+  if [ "$observed" = "$A2A_LOCK_NONCE" ]; then
+    rm -f "$A2A_LOCK_DIR/owner.json" 2>/dev/null || true
+    rmdir "$A2A_LOCK_DIR" 2>/dev/null || true
+  fi
+  A2A_LOCK_HELD=0
+}
+
+a2a_acquire_lock() {
+  local timeout_ms="${JUTSU_A2A_LOCK_TIMEOUT_MS:-5000}" waited=0 owner="" pid="" start="" nonce=""
+  local live_start="" mtime="" age=0 current_nonce="" tmp=""
+  case "$timeout_ms" in ''|*[!0-9]*) timeout_ms=5000 ;; esac
+  A2A_LOCK_DIR="$A2A_DIR/$STREAM.lock"
+  while [ "$waited" -le "$timeout_ms" ]; do
+    if mkdir "$A2A_LOCK_DIR" 2>/dev/null; then
+      chmod 700 "$A2A_LOCK_DIR" 2>/dev/null || true
+      A2A_LOCK_NONCE="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+      start="$(a2a_start_time "$$")"
+      [ -n "$start" ] && [[ "$A2A_LOCK_NONCE" =~ ^[0-9a-f]{32}$ ]] \
+        || fail storage_unsafe "could not determine A2A lock owner identity" 5
+      tmp="$A2A_LOCK_DIR/.owner.$$"
+      ( umask 077; jq -cn --argjson pid "$$" --arg start "$start" --arg nonce "$A2A_LOCK_NONCE" \
+        '{pid:$pid,start_time:$start,nonce:$nonce}' >"$tmp" ) \
+        || fail storage_unsafe "could not write A2A lock owner" 5
+      chmod 600 "$tmp" 2>/dev/null || true
+      mv -f "$tmp" "$A2A_LOCK_DIR/owner.json" \
+        || fail storage_unsafe "could not publish A2A lock owner" 5
+      A2A_LOCK_HELD=1
+      if [ "${A2A_TEST_MODE:-}" = 1 ] && [ -n "${A2A_TEST_LAUNCHER_LOCK_READY:-}" ]; then
+        : >"$A2A_TEST_LAUNCHER_LOCK_READY"
+        while [ ! -e "${A2A_TEST_LAUNCHER_LOCK_RELEASE:-/nonexistent}" ]; do sleep 0.01; done
+      fi
+      return 0
+    fi
+    if [ -d "$A2A_LOCK_DIR" ] && [ ! -L "$A2A_LOCK_DIR" ]; then
+      owner="$(cat "$A2A_LOCK_DIR/owner.json" 2>/dev/null || true)"
+      if printf '%s' "$owner" | jq -e '(.pid|type)=="number" and (.pid|floor)==.pid and .pid>0 and (.start_time|type)=="string" and (.nonce|type)=="string" and (.nonce|test("^[0-9a-f]{32}$"))' >/dev/null 2>&1; then
+        pid="$(printf '%s' "$owner" | jq -r '.pid')"
+        start="$(printf '%s' "$owner" | jq -r '.start_time')"
+        nonce="$(printf '%s' "$owner" | jq -r '.nonce')"
+        live_start=""
+        if kill -0 "$pid" 2>/dev/null; then live_start="$(a2a_start_time "$pid")"; fi
+        if ! kill -0 "$pid" 2>/dev/null || { [ -n "$live_start" ] && [ "$live_start" != "$start" ]; }; then
+          current_nonce="$(jq -r '.nonce // empty' "$A2A_LOCK_DIR/owner.json" 2>/dev/null || true)"
+          if [ "$current_nonce" = "$nonce" ]; then
+            rm -f "$A2A_LOCK_DIR/owner.json" 2>/dev/null || true
+            rmdir "$A2A_LOCK_DIR" 2>/dev/null || true
+            continue
+          fi
+        fi
+      else
+        mtime="$(a2a_mtime_seconds "$A2A_LOCK_DIR" || true)"
+        [ -n "$mtime" ] && age=$(( $(a2a_now_seconds) - mtime )) || age=0
+        if [ "$age" -gt 30 ]; then
+          rm -f "$A2A_LOCK_DIR/owner.json" 2>/dev/null || true
+          rmdir "$A2A_LOCK_DIR" 2>/dev/null || true
+          [ ! -e "$A2A_LOCK_DIR" ] && continue
+        fi
+      fi
+    fi
+    [ "$waited" -lt "$timeout_ms" ] || break
+    sleep 0.025
+    waited=$((waited + 25))
+  done
+  fail busy_retry "timed out waiting for A2A stream lock: $A2A_LOCK_DIR" 1
+}
+
+a2a_write_member() {
+  local members="$A2A_DIR/$STREAM.members.json" tmp="$A2A_DIR/.$STREAM.members.$$" current='{}'
+  a2a_acquire_lock
+  [ ! -e "$members" ] || current="$(cat "$members")" \
+    || { a2a_release_lock; fail storage_unsafe "could not read $members" 5; }
+  ( umask 077; printf '%s' "$current" | jq -c \
+      --arg parent "$PARENT" --arg parent_pane "${HERDR_PANE_ID:-}" --arg parent_socket "$A2A_PARENT_SOCKET" \
+      --arg name "$NAME" --arg pane "$PANE_ID" --arg engine "$KIND" \
+      --arg socket "$A2A_SOCKET" --arg thread "$SESSION_ID" \
+      '.parent //= {name:$parent,pane_id:$parent_pane,engine:"claude",socket:$parent_socket}
+       | .members //= {}
+       | .members[$name] = ({pane_id:$pane,engine:$engine}
+           + if $engine == "claude" then {socket:$socket} else {thread_id:$thread} end)' >"$tmp" ) \
+    || { rm -f "$tmp"; a2a_release_lock; fail storage_unsafe "could not build $members" 5; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$members" \
+    || { rm -f "$tmp"; a2a_release_lock; fail storage_unsafe "could not replace $members" 5; }
+  chmod 600 "$members" 2>/dev/null || true
+  a2a_release_lock
+}
+
+# The member's own session is the one rollout that (1) is a codex-tui session in the member
+# cwd, (2) was started at or after this launcher started the agent, and (3) contains the
+# bootstrap prompt as a user message. Codex stamps a session when its TUI starts — seconds
+# BEFORE the bootstrap prompt is sent — and writes the rollout at the first turn, so the
+# session timestamp is compared with the agent start, never with the send. (2) rules out an
+# earlier member's session in the same cwd; (3) rules out an unrelated Codex session opened
+# there meanwhile.
+a2a_codex_rollout_thread() { # a2a_codex_rollout_thread <agent-start-epoch> <bootstrap-prompt>
+  local sent="$1" prompt="$2" sessions="${CODEX_HOME:-$HOME/.codex}/sessions" list="" rollout="" head="" id=""
+  local candidates=""
+  [ -d "$sessions" ] || return 1
+  list="$(mktemp "${TMPDIR:-/tmp}/jutsu-rollouts.XXXXXX" 2>/dev/null || true)"
+  [ -n "$list" ] || return 1
+  find "$sessions" -type f -name 'rollout-*.jsonl' -print >"$list" 2>/dev/null || true
+  while IFS= read -r rollout; do
+    [ -n "$rollout" ] || continue
+    head="$(sed -n '1p' "$rollout" 2>/dev/null || true)"
+    id="$(printf '%s' "$head" | jq -r --arg cwd "$CWD" --argjson sent "$sent" '
+      .payload as $p
+      | (($p.timestamp // "") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601?) as $ts
+      | select($p.originator == "codex-tui" and $p.cwd == $cwd
+          and (($ts // -1) >= $sent) and (($p.id | type) == "string"))
+      | $p.id' 2>/dev/null || true)"
+    [ -n "$id" ] || continue
+    jq -e --arg prompt "$prompt" 'select(.type == "response_item" and .payload.type == "message"
+        and .payload.role == "user") | any(.payload.content[]?; (.text? // "") == $prompt)
+      | select(.)' "$rollout" >/dev/null 2>&1 || continue
+    candidates="${candidates}${id}
+"
+  done <"$list"
+  rm -f "$list"
+  [ "$(printf '%s' "$candidates" | sed '/^$/d' | wc -l | tr -d '[:space:]')" = 1 ] || return 1
+  printf '%s' "$candidates" | sed -n '1p'
+}
+
+a2a_wait_shell_ready() {
+  # The token is printed by the shell from two halves, so it appears in the pane only as
+  # OUTPUT of an executed command, never in the echoed command line.
+  local half="$$${RANDOM}" token=""
+  token="jutsu-shell-ready-${half}"
+  herdr_run pane run "$PANE_ID" "printf '%s%s\\n' jutsu-shell-ready- ${half}" \
+    || fail a2a_shell_not_ready "could not reach the shell in pane $PANE_ID before the agent start: ${HERDR_ERRTEXT:-no error output}" 1
+  herdr_run pane wait-output "$PANE_ID" --match "$token" --timeout 20000 \
+    || fail a2a_shell_not_ready "the shell in pane $PANE_ID did not run a command within 20s; the agent was not started" 1
+  # the prompt is redrawn and the line editor re-entered just after the output
+  sleep 0.3
+}
+
+a2a_bootstrap_codex() {
+  # The prompt names the member: the rollout lookup matches on it, and members bootstrapped
+  # at the same moment in one cwd would otherwise be indistinguishable from each other.
+  local prompt="A2A bootstrap for $NAME: reply with exactly READY and do nothing else." discovered=""
+  local waited=0 budget="${JUTSU_A2A_THREAD_WAIT_MS:-5000}"
+  case "$budget" in ''|*[!0-9]*) budget=5000 ;; esac
+  # --wait returns at the first settled state AFTER the prompt changed the lifecycle. A
+  # separate `agent wait --until idle` is wrong twice over: it returns at once while the
+  # member is still idle from before the prompt, and a background member that finishes
+  # settles as `done`, which `--until idle` never matches.
+  herdr_run agent prompt "$PANE_ID" "$prompt" --wait --timeout "$TIMEOUT" || return 1
+
+  # Prefer herdr's post-bootstrap view. The start response is retained as a fallback for
+  # herdr versions that return the session there but omit it from a later `agent get`.
+  if herdr_run agent get "$NAME"; then
+    discovered="$(printf '%s' "$HERDR_OUT" | jq -r '.result.agent.agent_session.value // empty' 2>/dev/null || true)"
+  fi
+  [ -n "$discovered" ] || discovered="$SESSION_ID"
+  # Codex flushes the rollout shortly after the turn; look again for a bounded time.
+  while [ -z "$discovered" ]; do
+    discovered="$(a2a_codex_rollout_thread "${A2A_AGENT_START_EPOCH:-0}" "$prompt" || true)"
+    [ -z "$discovered" ] || break
+    [ "$waited" -lt "$budget" ] || break
+    sleep 0.25
+    waited=$((waited + 250))
+  done
+  [ -n "$discovered" ] || return 1
+  SESSION_ID="$discovered"
+  return 0
+}
 
 build_line() { # build_line <status>
   jq -cn \
@@ -957,6 +1366,10 @@ remove_owned_line() { # remove_owned_line <file> <line> <line-number> <restore-n
 
 cleanup_policy_layer() {
   # Reverse creation order, and only remove resources this invocation proved it created.
+  if [ -n "$POLICY_RULE_TMP" ]; then
+    rm -f "$POLICY_RULE_TMP" 2>/dev/null || true
+    POLICY_RULE_TMP=""
+  fi
   if [ "$POLICY_CONFIG_EXCLUDE_ADDED" -eq 1 ]; then
     remove_owned_line "$POLICY_EXCLUDE_FILE" '.codex/config.toml' \
       "$POLICY_CONFIG_EXCLUDE_LINE" "$POLICY_CONFIG_EXCLUDE_NEWLINE"
@@ -1043,6 +1456,7 @@ on_exit() {
   if [ "$POLICY_LOCK_HELD" -eq 1 ] || [ "$POLICY_LOCK_INTENT" -eq 1 ]; then
     release_policy_lock
   fi
+  a2a_release_lock
   exit "$rc"
 }
 trap on_exit EXIT
@@ -1148,12 +1562,27 @@ append_exclude_once() { # append_exclude_once <file> <entry> <tracking-variable-
   return 0
 }
 
-codex_rules_content() { # codex_rules_content <resolved-herdr-path>
+codex_rules_v1_content() { # codex_rules_v1_content <resolved-herdr-path>
   local escaped_path
   escaped_path="$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
   printf '%s\n%s' \
     "host_executable(name=\"herdr\", paths=[\"$escaped_path\"])" \
     'prefix_rule(pattern=["herdr"], decision="forbidden", justification="Crew members do not drive herdr; the parent pulls from this pane.")'
+}
+
+codex_rules_content() { # codex_rules_content <resolved-herdr-path> <resolved-codex-path>
+  local escaped_herdr escaped_codex
+  escaped_herdr="$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  escaped_codex="$(printf '%s' "$2" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  printf '%s\n%s\n%s\n%s' \
+    "host_executable(name=\"herdr\", paths=[\"$escaped_herdr\"])" \
+    'prefix_rule(pattern=["herdr"], decision="forbidden", justification="Crew members do not drive herdr; the parent pulls from this pane.")' \
+    "host_executable(name=\"codex\", paths=[\"$escaped_codex\"])" \
+    'prefix_rule(pattern=["codex","queue"], decision="forbidden", justification="Crew members use the guarded herdr-jutsu A2A relay; direct Codex queue delivery is forbidden.")'
+}
+
+policy_file_matches() { # policy_file_matches <file> <content>; includes the final newline
+  cmp -s "$1" <(printf '%s\n' "$2")
 }
 
 policy_conflict() { # policy_conflict <message>; post-placement conflicts orphan worktrees
@@ -1162,8 +1591,8 @@ policy_conflict() { # policy_conflict <message>; post-placement conflicts orphan
   fail isolation_policy_conflict "$1" "$status"
 }
 
-validate_policy_paths() { # validate_policy_paths <cwd> <expected-rules>
-  local root="$1" expected="$2" codex_dir rules_dir rule_file config_file existing=""
+validate_policy_paths() { # validate_policy_paths <cwd> <current-rules> <v0.4.0-rules>
+  local root="$1" expected="$2" legacy="$3" codex_dir rules_dir rule_file config_file
   codex_dir="$root/.codex"
   rules_dir="$codex_dir/rules"
   rule_file="$rules_dir/herdr-jutsu-deny.rules"
@@ -1183,8 +1612,9 @@ validate_policy_paths() { # validate_policy_paths <cwd> <expected-rules>
   fi
   if [ -e "$rule_file" ]; then
     [ -f "$rule_file" ] || policy_conflict "Codex isolation policy is not a regular file: $rule_file"
-    existing="$(cat "$rule_file" 2>/dev/null || true)"
-    [ "$existing" = "$expected" ] || policy_conflict \
+    policy_file_matches "$rule_file" "$expected" \
+      || policy_file_matches "$rule_file" "$legacy" \
+      || policy_conflict \
       "refusing to overwrite a differing Codex isolation policy: $rule_file"
   fi
 }
@@ -1222,12 +1652,18 @@ acquire_policy_lock() {
       # trap. Break the lock only when the RECORDED holder is provably gone; a lock with no
       # readable pid is left alone (it may be mid-creation) and simply times out.
       holder=""
+      # The holder may release the lock between the -f test and the read: a failed read
+      # means "holder unknown", never a launcher failure (pipefail + set -e would exit 1
+      # here with no message).
       [ ! -f "$POLICY_LOCK_DIR/pid" ] || [ -L "$POLICY_LOCK_DIR/pid" ] \
-        || holder="$(head -n1 "$POLICY_LOCK_DIR/pid" 2>/dev/null | tr -cd '0-9')"
+        || holder="$(head -n1 "$POLICY_LOCK_DIR/pid" 2>/dev/null | tr -cd '0-9')" \
+        || holder=""
       if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
         rm -f "$POLICY_LOCK_DIR/pid" 2>/dev/null || true
         rmdir "$POLICY_LOCK_DIR" 2>/dev/null || true
-        continue
+        # Retry at once only when the stale lock is really gone; a lock that cannot be
+        # removed must fall through to the sleep and the timeout, never spin.
+        [ -e "$POLICY_LOCK_DIR" ] || continue
       fi
     fi
     [ "$waited" -lt "$timeout_ms" ] || break
@@ -1240,7 +1676,7 @@ acquire_policy_lock() {
 }
 
 install_codex_policy() {
-  local herdr_path rules_content existing
+  local herdr_path codex_path rules_content legacy_rules_content
   local git_top exclude exclude_dir codex_dir rules_dir
 
   [ "$KIND" = codex ] || return 0
@@ -1251,13 +1687,19 @@ install_codex_policy() {
     degrade_codex_isolation "could not resolve the herdr executable for the Codex deny policy"
     return 0
   fi
-  rules_content="$(codex_rules_content "$herdr_path")"
+  codex_path="$(command -v codex 2>/dev/null || true)"
+  if [ -z "$codex_path" ]; then
+    degrade_codex_isolation "could not resolve the codex executable for the Codex deny policy"
+    return 0
+  fi
+  rules_content="$(codex_rules_content "$herdr_path" "$codex_path")"
+  legacy_rules_content="$(codex_rules_v1_content "$herdr_path")"
 
   POLICY_CONFIG_FILE="$CWD/.codex/config.toml"
   POLICY_RULE_FILE="$CWD/.codex/rules/herdr-jutsu-deny.rules"
   codex_dir="$CWD/.codex"
   rules_dir="$codex_dir/rules"
-  validate_policy_paths "$CWD" "$rules_content"
+  validate_policy_paths "$CWD" "$rules_content" "$legacy_rules_content"
 
   if [ ! -d "$codex_dir" ]; then
     POLICY_CODEX_DIR_INTENT=1
@@ -1266,7 +1708,7 @@ install_codex_policy() {
       POLICY_CODEX_DIR_INTENT=0
     else
       POLICY_CODEX_DIR_INTENT=0
-      validate_policy_paths "$CWD" "$rules_content"
+      validate_policy_paths "$CWD" "$rules_content" "$legacy_rules_content"
       [ -d "$codex_dir" ] || { degrade_codex_isolation "could not create $codex_dir"; return 0; }
     fi
   fi
@@ -1277,7 +1719,7 @@ install_codex_policy() {
       POLICY_RULES_DIR_INTENT=0
     else
       POLICY_RULES_DIR_INTENT=0
-      validate_policy_paths "$CWD" "$rules_content"
+      validate_policy_paths "$CWD" "$rules_content" "$legacy_rules_content"
       [ -d "$rules_dir" ] || { degrade_codex_isolation "could not create $rules_dir"; return 0; }
     fi
   fi
@@ -1291,15 +1733,28 @@ install_codex_policy() {
       POLICY_CONFIG_INTENT=0
     else
       POLICY_CONFIG_INTENT=0
-      validate_policy_paths "$CWD" "$rules_content"
+      validate_policy_paths "$CWD" "$rules_content" "$legacy_rules_content"
       [ -f "$POLICY_CONFIG_FILE" ] \
         || { degrade_codex_isolation "could not create $POLICY_CONFIG_FILE"; return 0; }
     fi
   fi
 
   if [ -e "$POLICY_RULE_FILE" ]; then
-    existing="$(cat "$POLICY_RULE_FILE" 2>/dev/null || true)"
-    if [ "$existing" != "$rules_content" ]; then
+    if policy_file_matches "$POLICY_RULE_FILE" "$rules_content"; then
+      :
+    elif policy_file_matches "$POLICY_RULE_FILE" "$legacy_rules_content"; then
+      POLICY_RULE_TMP="$(mktemp "$rules_dir/.herdr-jutsu-deny.rules.XXXXXX" 2>/dev/null || true)"
+      if [ -z "$POLICY_RULE_TMP" ] \
+        || ! printf '%s\n' "$rules_content" >"$POLICY_RULE_TMP" 2>/dev/null \
+        || ! chmod 600 "$POLICY_RULE_TMP" 2>/dev/null \
+        || ! mv -f "$POLICY_RULE_TMP" "$POLICY_RULE_FILE" 2>/dev/null; then
+        [ -z "$POLICY_RULE_TMP" ] || rm -f "$POLICY_RULE_TMP" 2>/dev/null || true
+        POLICY_RULE_TMP=""
+        degrade_codex_isolation "could not atomically upgrade the Codex isolation policy: $POLICY_RULE_FILE"
+        return 0
+      fi
+      POLICY_RULE_TMP=""
+    else
       fail isolation_policy_conflict \
         "refusing to overwrite a differing Codex isolation policy: $POLICY_RULE_FILE" 5
     fi
@@ -1311,7 +1766,7 @@ install_codex_policy() {
       POLICY_RULE_INTENT=0
     else
       POLICY_RULE_INTENT=0
-      validate_policy_paths "$CWD" "$rules_content"
+      validate_policy_paths "$CWD" "$rules_content" "$legacy_rules_content"
       [ -f "$POLICY_RULE_FILE" ] \
         || { degrade_codex_isolation "could not create $POLICY_RULE_FILE"; return 0; }
     fi
@@ -1369,8 +1824,11 @@ install_codex_policy() {
 if [ "$KIND" = codex ] && [ "$NO_ISOLATION" -eq 0 ] \
   && [ -z "$WORKTREE" ] && [ -z "$IN_PANE" ]; then
   POLICY_HERDR_PATH="$(command -v herdr 2>/dev/null || true)"
-  if [ -n "$POLICY_HERDR_PATH" ]; then
-    validate_policy_paths "$CWD" "$(codex_rules_content "$POLICY_HERDR_PATH")"
+  POLICY_CODEX_PATH="$(command -v codex 2>/dev/null || true)"
+  if [ -n "$POLICY_HERDR_PATH" ] && [ -n "$POLICY_CODEX_PATH" ]; then
+    validate_policy_paths "$CWD" \
+      "$(codex_rules_content "$POLICY_HERDR_PATH" "$POLICY_CODEX_PATH")" \
+      "$(codex_rules_v1_content "$POLICY_HERDR_PATH")"
   fi
 fi
 
@@ -1382,11 +1840,14 @@ if [ -n "$WORKTREE" ]; then
   fi
   if [ "$KIND" = codex ] && [ "$NO_ISOLATION" -eq 0 ]; then
     POLICY_HERDR_PATH="$(command -v herdr 2>/dev/null || true)"
+    POLICY_CODEX_PATH="$(command -v codex 2>/dev/null || true)"
     if [ -n "$POLICY_HERDR_PATH" ] \
+      && [ -n "$POLICY_CODEX_PATH" ] \
       && git -C "$CWD" cat-file -e "$BASE:.codex/rules/herdr-jutsu-deny.rules" 2>/dev/null; then
       BASE_POLICY="$(git -C "$CWD" show "$BASE:.codex/rules/herdr-jutsu-deny.rules" 2>/dev/null || true)"
-      EXPECTED_POLICY="$(codex_rules_content "$POLICY_HERDR_PATH")"
-      [ "$BASE_POLICY" = "$EXPECTED_POLICY" ] || policy_conflict \
+      EXPECTED_POLICY="$(codex_rules_content "$POLICY_HERDR_PATH" "$POLICY_CODEX_PATH")"
+      LEGACY_POLICY="$(codex_rules_v1_content "$POLICY_HERDR_PATH")"
+      [ "$BASE_POLICY" = "$EXPECTED_POLICY" ] || [ "$BASE_POLICY" = "$LEGACY_POLICY" ] || policy_conflict \
         "base ref $BASE tracks a differing Codex isolation policy; refusing to create the worktree"
     fi
   fi
@@ -1458,8 +1919,11 @@ elif [ -n "$IN_PANE" ]; then
   CWD="$PANE_CWD"
   if [ "$KIND" = codex ] && [ "$NO_ISOLATION" -eq 0 ]; then
     POLICY_HERDR_PATH="$(command -v herdr 2>/dev/null || true)"
-    if [ -n "$POLICY_HERDR_PATH" ]; then
-      validate_policy_paths "$CWD" "$(codex_rules_content "$POLICY_HERDR_PATH")"
+    POLICY_CODEX_PATH="$(command -v codex 2>/dev/null || true)"
+    if [ -n "$POLICY_HERDR_PATH" ] && [ -n "$POLICY_CODEX_PATH" ]; then
+      validate_policy_paths "$CWD" \
+        "$(codex_rules_content "$POLICY_HERDR_PATH" "$POLICY_CODEX_PATH")" \
+        "$(codex_rules_v1_content "$POLICY_HERDR_PATH")"
     fi
   fi
   # refuse unless the pane is demonstrably an idle interactive shell — BEFORE any rename.
@@ -1552,9 +2016,18 @@ else
   ARGS=()
   [ "$KIND" != claude ] || ARGS+=(-n "$NAME")
   ARGS+=(${LAUNCH_ARGS[@]+"${LAUNCH_ARGS[@]}"})
+  # An A2A start command is longer than 1024 bytes. A freshly split pane whose shell has
+  # not reached its line editor yet is still in the terminal's canonical mode, where macOS
+  # silently drops everything past 1024 bytes of a line: the command is cut mid-argument
+  # and the start times out. Prove the shell is reading commands before typing the long one.
+  if [ "$A2A" -eq 1 ]; then a2a_wait_shell_ready; fi
+  # Only for an A2A Codex member: a spawn without --a2a must make no extra calls.
+  if [ "$A2A" -eq 1 ] && [ "$KIND" = codex ]; then A2A_AGENT_START_EPOCH="$(date -u +%s)"; fi
   START=(herdr agent start "$NAME" --kind "$KIND" --pane "$PANE_ID" --timeout "$TIMEOUT")
   [ ${#ARGS[@]} -eq 0 ] || START+=(-- "${ARGS[@]}")
-  if R="$("${START[@]}" 2>&1)"; then
+  # Test-only relay clock controls may be used by the launcher's lock tests, but they are
+  # never part of the environment generated for a member process.
+  if R="$(env -u A2A_TEST_MODE -u A2A_NOW_MS "${START[@]}" 2>&1)"; then
     SESSION_ID="$(jq -r '.result.agent.agent_session.value // empty' <<<"$R" 2>/dev/null || true)"
     STATUS="$(jq -r '.result.agent.agent_status // "unknown"' <<<"$R" 2>/dev/null || echo unknown)"
     [ -n "$STATUS" ] || STATUS="unknown"
@@ -1581,6 +2054,23 @@ TRAP_ARMED=0
 # and retained starts release it here; other failures exit through the trap, which rolls
 # back first and releases second.
 release_policy_lock
+
+if [ "$A2A" -eq 1 ] && [ "$KIND" = codex ]; then
+  if ! a2a_bootstrap_codex; then
+    # The member is already running and must remain visible to both address-book and
+    # registry readers, but an empty thread id keeps relay calls in the `not_ready` class.
+    SESSION_ID=""
+    a2a_write_member
+    LINE="$(build_line "$STATUS")"
+    append_registry "$LINE"
+    printf '%s\n' "$LINE"
+    emit_error a2a_thread_unresolved \
+      "could not resolve exactly one Codex thread after the A2A bootstrap; $NAME remains running"
+    exit 1
+  fi
+fi
+
+if [ "$A2A" -eq 1 ]; then a2a_write_member; fi
 
 # resume_args: the kind-specific argv that would revive this member.
 if [ -n "$SESSION_ID" ] && [ "$KIND" = claude ]; then

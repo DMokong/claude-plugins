@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = agent ] && [ "${2:-}" = start ]; then
+  jq -cn --arg mode "${A2A_TEST_MODE+x}" --arg now "${A2A_NOW_MS+x}" \
+    '{A2A_TEST_MODE:$mode,A2A_NOW_MS:$now}' >"$A2A_ENV_CAPTURE"
+fi
+exec "$A2A_REAL_HERDR" "$@"

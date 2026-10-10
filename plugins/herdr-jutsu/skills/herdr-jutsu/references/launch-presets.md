@@ -14,6 +14,7 @@ both `agent_args` (caller input) and `effective_agent_args` (launched argv).
 | hard implementer / debugger | `--model opus --effort high --permission-mode acceptEdits` | Judgment-heavy work |
 | architect / final reviewer | `--model fable --effort high --permission-mode plan` | Thinks, does not touch files |
 | handoff successor | same args as the member it replaces | Behaviour continuity |
+| A2A member | launcher: `--a2a [--peer <name> …]`; normal role args after `--` | Guarded Q&A with the parent and named siblings; see `a2a.md` |
 
 - `--effort`: `low | medium | high | xhigh | max`.
 - `--permission-mode`: `plan | manual | acceptEdits | auto | dontAsk | bypassPermissions`.
@@ -43,6 +44,7 @@ both `agent_args` (caller input) and `effective_agent_args` (launched argv).
 | reviewer / second opinion | `-s read-only -a never` | Cannot write, never stalls on approval |
 | implementer in a worktree | `-s workspace-write -a never` | Writes only inside its cwd; outbound isolation requires never-ask |
 | unattended implementer | `-s workspace-write -a never` | Failures return to the model, no prompts |
+| A2A member | launcher: `--a2a [--peer <name> …]`; `-s read-only\|workspace-write -a never` after `--` | Guarded Q&A with the parent and named siblings; see `a2a.md` |
 
 - `-s/--sandbox`: `read-only | workspace-write | danger-full-access`.
 - `-a/--ask-for-approval`: `on-request | never` (run `codex --help` for the full list).
