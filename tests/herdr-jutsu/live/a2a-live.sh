@@ -534,25 +534,36 @@ gate_l7() {
   finish_gate true
 }
 
-# The member's own account of its tools is the only view of a live session's inventory, so
-# the answer must also name crew_send (present) and end in a marker absent from the prompt:
-# a refusal or an empty answer cannot pass for "no sub-agent tools".
+# A member's own list of its tools is not an inventory: Codex finds MCP tools on demand, so
+# crew_send is callable yet absent from such a list. The gate therefore has the member use
+# the relay (control: it can find and call a tool it was not shown) and then look for a
+# sub-agent tool to call, and reads the session's rollout for any such call.
 gate_l8() {
-  local stream=l8live name=l8-codex pane
+  local stream=l8live name=l8-codex pane thread audit
   begin_gate L8
-  spawn_member codex "$stream" "$name"; pane="$LAST_PANE"
+  spawn_member codex "$stream" "$name"; pane="$LAST_PANE"; thread="$LAST_THREAD"
+  audit="$(audit_file "$stream")"
   jq -e '.isolation_detail | test("sub-agent tools are removed \\(model catalog override, checked")' \
     "$PRIVATE/L8-$name.spawn.json" >/dev/null 2>&1 \
     || gate_fail l8-launcher-check "launcher did not report the sub-agent tools removed: $(jq -r '.isolation_detail' "$PRIVATE/L8-$name.spawn.json")"
   gate_pass l8-launcher-check 'launcher reported the catalog override and its session-instruction check'
-  prompt_member_wait "$pane" "Call no tool. List the exact name of every tool or function you are able to call in this session, including namespaced ones, one per line. Then finish by joining L8_, TOOLS_, and LISTED with no spaces."
+  prompt_member_wait "$pane" "First call crew_send once to $PARENT_NAME with body 'L8 control'. Second, search for and call list_agents, or any other tool that lists, spawns or messages sub-agents, if one is available to you. Finish by joining L8_ with either NONE_FOUND or TOOL_CALLED, no spaces."
+  wait_audit_count "$audit" "$name" "$PARENT_NAME" delivered "" 1 l8-control-delivered
   capture_agent "$pane" codex
-  require_literal l8-marker "$CAPTURE_RAW" L8_TOOLS_LISTED 'member emitted a computed marker absent from its prompt after listing its tools'
-  require_literal l8-relay-tool "$CAPTURE_RAW" crew_send 'the listed inventory includes the relay tool, so the list is a real inventory'
-  if grep -Eqi 'collaboration[._]|spawn_agent|followup_task|wait_agent|interrupt_agent|list_agents|send_message|send_input|close_agent|resume_agent' "$CAPTURE_RAW"; then
-    gate_fail l8-no-subagent-tools 'the member lists a Codex sub-agent tool'
+  require_literal l8-marker "$CAPTURE_RAW" L8_NONE_FOUND 'member reported, with a marker absent from its prompt, that it found no sub-agent tool'
+  if grep -Fq -- L8_TOOL_CALLED "$CAPTURE_RAW"; then gate_fail l8-no-call-claimed 'member reported calling a sub-agent tool'; fi
+  gate_pass l8-no-call-claimed 'member did not report calling a sub-agent tool'
+  find_rollout "$thread" || gate_fail l8-rollout 'could not locate Codex rollout by recorded thread id'
+  if jq -s -e 'any(.[];
+      ((.payload.type? // "") | test("^collab|sub_agent"))
+      or (.type == "response_item" and ((.payload.type? // "") | test("call$"))
+        and (((.payload.namespace? // "") == "collaboration")
+          or ((.payload.name? // "") | test("^(spawn_agent|followup_task|wait_agent|interrupt_agent|list_agents|send_message|send_input|close_agent|resume_agent)$")))))
+    ' "$ROLLOUT_FILE" >/dev/null 2>&1; then
+    gate_fail l8-rollout-no-subagent-call 'the rollout records a sub-agent tool call or event'
   fi
-  gate_pass l8-no-subagent-tools 'the member lists no Codex sub-agent tool'
+  gate_pass l8-rollout-no-subagent-call 'the rollout records no sub-agent tool call or event'
+  copy_audit "$stream"
   finish_gate true
 }
 

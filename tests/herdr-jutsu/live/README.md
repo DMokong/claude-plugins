@@ -70,8 +70,9 @@ peer allowlist, the direct-queue policy, and the six-per-minute sender limit. L4
 Codex rollout's user-turn count across a send to a closed pane. L6 delivers the three
 specified adversarial bodies separately and verifies both the member's computed refusal
 marker and the unchanged scratch repository. L7 compares rollout turns and audit outcomes
-around the direct relay attempt. L8 asks an isolated Codex member to list its tools and fails
-if the list names any Codex sub-agent tool; the list must also name `crew_send`, so an empty
-or refused answer cannot pass. It reads the member's own account, not the request Codex sends.
+around the direct relay attempt. L8 has an isolated Codex member use the relay once, then look for any sub-agent tool to
+call; it fails if the member reports a call or the session's rollout records one. A member's
+own list of its tools is not used: Codex finds MCP tools on demand, so such a list omits
+tools the member can call.
 
 Run the owner-only L5 check separately using `owner-l5-checklist.md`.

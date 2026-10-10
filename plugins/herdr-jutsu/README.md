@@ -290,7 +290,7 @@ launcher now points the member at a copy of the catalog without that switch
 (`~/.cache/herdr-jutsu/codex-models.json`, rewritten on every spawn), then checks the
 instructions a new session would receive. `isolation_detail` says whether the tools were removed,
 left in place, or could not be checked — when left, they still run inside the same sandbox and
-rules. The member's own tool list is what a live gate reads; nothing inspects the request Codex
+rules. A live gate has a member look for a sub-agent tool and reads its session record; nothing inspects the request Codex
 sends. `--no-isolation` is unchanged.
 
 0.3.1 stops calling a Claude member's permission mode "effective": the launcher sees launch
