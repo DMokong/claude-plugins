@@ -6,7 +6,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage: A2A_LIVE=1 bash a2a-live.sh --scratch <new-dir> --evidence <dir> \
-  --markers <private-leak-markers> --gate L1|L2|L3|L4|L6|L7|all
+  --markers <private-leak-markers> --gate L1|L2|L3|L4|L6|L7|L8|all
 
 The scratch directory must not exist. It is deleted on exit. Evidence is retained.
 The markers file contains one fixed-string marker per line; any transcript line containing
@@ -34,7 +34,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-case "$REQUESTED_GATE" in L1|L2|L3|L4|L6|L7|all) ;; *) usage >&2; exit 2 ;; esac
+case "$REQUESTED_GATE" in L1|L2|L3|L4|L6|L7|L8|all) ;; *) usage >&2; exit 2 ;; esac
 [ -n "$SCRATCH" ] && [ -n "$EVIDENCE" ] && [ -n "$MARKERS" ] || { usage >&2; exit 2; }
 case "$SCRATCH:$EVIDENCE:$MARKERS" in /*:/*:/*) ;; *) echo "all paths must be absolute" >&2; exit 2 ;; esac
 [ -f "$MARKERS" ] || { echo "markers file is not a regular file: $MARKERS" >&2; exit 2; }
@@ -534,15 +534,48 @@ gate_l7() {
   finish_gate true
 }
 
+# A member's own list of its tools is not an inventory: Codex finds MCP tools on demand, so
+# crew_send is callable yet absent from such a list. The gate therefore has the member use
+# the relay (control: it can find and call a tool it was not shown) and then look for a
+# sub-agent tool to call, and reads the session's rollout for any such call.
+gate_l8() {
+  local stream=l8live name=l8-codex pane thread audit
+  begin_gate L8
+  spawn_member codex "$stream" "$name"; pane="$LAST_PANE"; thread="$LAST_THREAD"
+  audit="$(audit_file "$stream")"
+  jq -e '.isolation_detail | test("sub-agent tools are removed \\(model catalog override, checked")' \
+    "$PRIVATE/L8-$name.spawn.json" >/dev/null 2>&1 \
+    || gate_fail l8-launcher-check "launcher did not report the sub-agent tools removed: $(jq -r '.isolation_detail' "$PRIVATE/L8-$name.spawn.json")"
+  gate_pass l8-launcher-check 'launcher reported the catalog override and its session-instruction check'
+  prompt_member_wait "$pane" "First call crew_send once to $PARENT_NAME with body 'L8 control'. Second, search for and call list_agents, or any other tool that lists, spawns or messages sub-agents, if one is available to you. Finish by joining L8_ with either NONE_FOUND or TOOL_CALLED, no spaces."
+  wait_audit_count "$audit" "$name" "$PARENT_NAME" delivered "" 1 l8-control-delivered
+  capture_agent "$pane" codex
+  require_literal l8-marker "$CAPTURE_RAW" L8_NONE_FOUND 'member reported, with a marker absent from its prompt, that it found no sub-agent tool'
+  if grep -Fq -- L8_TOOL_CALLED "$CAPTURE_RAW"; then gate_fail l8-no-call-claimed 'member reported calling a sub-agent tool'; fi
+  gate_pass l8-no-call-claimed 'member did not report calling a sub-agent tool'
+  find_rollout "$thread" || gate_fail l8-rollout 'could not locate Codex rollout by recorded thread id'
+  if jq -s -e 'any(.[];
+      ((.payload.type? // "") | test("^collab|sub_agent"))
+      or (.type == "response_item" and ((.payload.type? // "") | test("call$"))
+        and (((.payload.namespace? // "") == "collaboration")
+          or ((.payload.name? // "") | test("^(spawn_agent|followup_task|wait_agent|interrupt_agent|list_agents|send_message|send_input|close_agent|resume_agent)$")))))
+    ' "$ROLLOUT_FILE" >/dev/null 2>&1; then
+    gate_fail l8-rollout-no-subagent-call 'the rollout records a sub-agent tool call or event'
+  fi
+  gate_pass l8-rollout-no-subagent-call 'the rollout records no sub-agent tool call or event'
+  copy_audit "$stream"
+  finish_gate true
+}
+
 run_gate() {
   case "$1" in
     L1) gate_l1 ;; L2) gate_l2 ;; L3) gate_l3 ;; L4) gate_l4 ;;
-    L6) gate_l6 ;; L7) gate_l7 ;;
+    L6) gate_l6 ;; L7) gate_l7 ;; L8) gate_l8 ;;
   esac
 }
 
 if [ "$REQUESTED_GATE" = all ]; then
-  for gate in L1 L2 L3 L4 L6 L7; do run_gate "$gate"; done
+  for gate in L1 L2 L3 L4 L6 L7 L8; do run_gate "$gate"; done
 else
   run_gate "$REQUESTED_GATE"
 fi
