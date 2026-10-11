@@ -67,6 +67,15 @@ setup_case() {
     cp "$REPO_ROOT/plugins/$p/.claude-plugin/plugin.json" "$ROOT/plugins/$p/.claude-plugin/plugin.json"
     cp "$REPO_ROOT/plugins/$p/.codex-plugin/plugin.json" "$ROOT/plugins/$p/.codex-plugin/plugin.json"
   done
+  mkdir -p "$ROOT/scripts"
+  if [ -f "$REPO_ROOT/scripts/claude-only-plugins.txt" ]; then
+    cp "$REPO_ROOT/scripts/claude-only-plugins.txt" "$ROOT/scripts/claude-only-plugins.txt"
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      mkdir -p "$ROOT/plugins/$p/.claude-plugin"
+      cp "$REPO_ROOT/plugins/$p/.claude-plugin/plugin.json" "$ROOT/plugins/$p/.claude-plugin/plugin.json"
+    done < <(sed -e 's/#.*//' -e 's/[[:space:]]//g' "$REPO_ROOT/scripts/claude-only-plugins.txt" | awk 'NF')
+  fi
   OUT_FILE="$ROOT/.out"
   ERR_FILE="$ROOT/.err"
 }
@@ -157,6 +166,19 @@ mutate_readme_version() {
   tmp="$(mktemp)"
   sed -E "/\`$plugin\`/ s/\\| $old_escaped \\|/| $new_escaped |/" "$ROOT/README.md" >"$tmp"
   mv "$tmp" "$ROOT/README.md"
+}
+
+# add_claude_only_plugin <name> — adds a self-consistent Claude-only plugin to the case root:
+# Claude manifest, Claude catalog entry, README row, and a line in the list file.
+add_claude_only_plugin() {
+  local name="$1" version="0.0.1-case"
+  mkdir -p "$ROOT/plugins/$name/.claude-plugin" "$ROOT/scripts"
+  printf '{"name":"%s","version":"%s"}\n' "$name" "$version" \
+    >"$ROOT/plugins/$name/.claude-plugin/plugin.json"
+  jq_set_file "$ROOT/.claude-plugin/marketplace.json" \
+    ".plugins += [{\"name\":\"$name\",\"source\":\"./plugins/$name\",\"version\":\"$version\"}]"
+  printf '| `%s` | %s | this repo | case fixture |\n' "$name" "$version" >>"$ROOT/README.md"
+  printf '%s\n' "$name" >>"$ROOT/scripts/claude-only-plugins.txt"
 }
 
 # =========================================================================================
@@ -846,6 +868,116 @@ test_ac25_bash_n_under_bash32() {
   fi
 }
 
+# =========================================================================================
+# Claude-only plugins (scripts/claude-only-plugins.txt): the Codex surfaces must be ABSENT.
+# =========================================================================================
+
+test_claude_only_plugin_consistent_exits_zero() {
+  CURRENT_TEST="claude_only_plugin_consistent_exits_zero"
+  setup_case
+  add_claude_only_plugin demo-mod
+  run_check
+  if [ "$CODE" -ne 0 ]; then
+    fail_case "expected exit 0 for a consistent Claude-only plugin, got $CODE. Output:$(all_output)"
+    teardown_case
+    return
+  fi
+  grep -qxF "ok demo-mod 0.0.1-case" "$OUT_FILE" \
+    || { fail_case "missing 'ok demo-mod 0.0.1-case'. Output:$(all_output)"; teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_claude_only_plugin_with_codex_manifest_rejected() {
+  CURRENT_TEST="claude_only_plugin_with_codex_manifest_rejected"
+  setup_case
+  add_claude_only_plugin demo-mod
+  mkdir -p "$ROOT/plugins/demo-mod/.codex-plugin"
+  printf '{"name":"demo-mod","version":"0.0.1-case"}\n' >"$ROOT/plugins/demo-mod/.codex-plugin/plugin.json"
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit when a Claude-only plugin carries a Codex manifest, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "demo-mod" "claude-only-codex-manifest" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_claude_only_plugin_in_codex_catalog_rejected() {
+  CURRENT_TEST="claude_only_plugin_in_codex_catalog_rejected"
+  setup_case
+  add_claude_only_plugin demo-mod
+  jq_set_file "$ROOT/.agents/plugins/marketplace.json" \
+    '.plugins += [{"name":"demo-mod","source":{"source":"local","path":"./plugins/demo-mod"},"policy":{"installation":"AVAILABLE","authentication":"ON_USE"},"category":"Developer Tools"}]'
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit when a Claude-only plugin is in the Codex catalog, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "demo-mod" "claude-only-codex-catalog-entry" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_claude_only_list_names_missing_plugin_rejected() {
+  CURRENT_TEST="claude_only_list_names_missing_plugin_rejected"
+  setup_case
+  printf 'ghost-mod\n' >>"$ROOT/scripts/claude-only-plugins.txt"
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit when the list names a plugin that is not in the Claude catalog, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "ghost-mod" "claude-only-list-stale" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_unlisted_plugin_without_codex_surfaces_still_rejected() {
+  CURRENT_TEST="unlisted_plugin_without_codex_surfaces_still_rejected"
+  local tmp
+  setup_case
+  add_claude_only_plugin demo-mod
+  tmp="$(mktemp)"
+  grep -vxF "demo-mod" "$ROOT/scripts/claude-only-plugins.txt" >"$tmp" || true
+  mv "$tmp" "$ROOT/scripts/claude-only-plugins.txt"
+  run_check
+  if [ "$CODE" -eq 0 ]; then
+    fail_case "expected non-zero exit for an UNLISTED plugin with no Codex surfaces, got 0"
+    teardown_case
+    return
+  fi
+  assert_named_mismatch "demo-mod" "codex-manifest-missing" "codex-catalog-missing" || { teardown_case; return; }
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
+test_claude_only_list_with_comments_and_blanks_ok() {
+  CURRENT_TEST="claude_only_list_with_comments_and_blanks_ok"
+  local tmp
+  setup_case
+  add_claude_only_plugin demo-mod
+  # Keep whatever the repo's list already names; only dress the fixture's own line.
+  tmp="$(mktemp)"
+  {
+    printf '# a comment line\n\n   \n'
+    sed 's/^demo-mod$/  demo-mod   # trailing comment/' "$ROOT/scripts/claude-only-plugins.txt"
+  } >"$tmp"
+  mv "$tmp" "$ROOT/scripts/claude-only-plugins.txt"
+  run_check
+  if [ "$CODE" -ne 0 ]; then
+    fail_case "expected exit 0 for a list with comments, blank lines and trailing spaces, got $CODE. Output:$(all_output)"
+    teardown_case
+    return
+  fi
+  ok "$CURRENT_TEST"
+  teardown_case
+}
+
 # --- driver -------------------------------------------------------------------------------
 
 test_ac25_bash_n_under_bash32
@@ -879,6 +1011,12 @@ test_ac25_orphan_codex_catalog_entry
 test_ac25_two_simultaneous_mutations_both_reported
 test_ac25_url_sourced_readme_row_mismatch
 test_consistent_bump_all_surfaces_exits_zero
+test_claude_only_plugin_consistent_exits_zero
+test_claude_only_plugin_with_codex_manifest_rejected
+test_claude_only_plugin_in_codex_catalog_rejected
+test_claude_only_list_names_missing_plugin_rejected
+test_unlisted_plugin_without_codex_surfaces_still_rejected
+test_claude_only_list_with_comments_and_blanks_ok
 test_suite_contains_no_literal_current_version
 
 TOTAL=$((PASS + FAIL))

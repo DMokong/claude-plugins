@@ -1,12 +1,14 @@
 # Releasing a plugin from this marketplace
 
-Three plugins live in this repo: `fable-mode`, `fable-conductor`, and `herdr-jutsu`. The Claude
+Five plugins live in this repo: `fable-mode`, `fable-conductor`, `herdr-jutsu`, and two Claude
+Code mods, `bd-issue-band` and `crew-pane`. The Claude
 catalog (`.claude-plugin/marketplace.json`) is canonical and Codex reads it natively; a Codex
 catalog or Codex manifest is not required for Codex to install these plugins. This repo also keeps
 `.agents/plugins/marketplace.json` and `.codex-plugin/plugin.json` so Codex gets intentional
 policy/category and interface/listing metadata, including honest descriptions of unsupported
 features. Because Codex prefers its catalog when both exist, the Codex catalog **must list every
-Claude-catalog plugin**. The other entries (`speculator`, `lego-plan-builder`) are separate GitHub
+Claude-catalog plugin** except those named in `scripts/claude-only-plugins.txt` (mods; see
+[Releasing a mod](#releasing-a-mod)). The other entries (`speculator`, `lego-plan-builder`) are separate GitHub
 repos — this document does not govern their releases, but catalog parity still covers them.
 
 ## The four steps
@@ -106,7 +108,9 @@ Codex has `plugin marketplace add|list|upgrade|remove` and `plugin add|list|remo
 Codex can read `.claude-plugin/marketplace.json` directly, including its external URL-sourced
 plugins, when `.agents/plugins/marketplace.json` is absent. If the Codex catalog is present it wins
 instead, so omitting a Claude-catalog name makes that plugin invisible to Codex. Keep the catalogs
-name-for-name identical; `scripts/check-manifests.sh` enforces this in both directions.
+name-for-name identical, apart from the mods named in `scripts/claude-only-plugins.txt`, which
+must be in the Claude catalog only; `scripts/check-manifests.sh` enforces both rules in both
+directions.
 
 **External-source trap.** In the Codex catalog the working shape is exactly
 `{"source":"url","url":"https://github.com/<owner>/<repo>.git"}`. The plausible-looking
@@ -155,6 +159,35 @@ separate `requirements.toml` / administrator-managed policy are kept apart, whic
 home for it, but that inference was not confirmed against a real managed instance). If `codex
 plugin marketplace add DMokong/claude-plugins` is refused on a managed machine, ask the admin
 whether this repo's source needs adding to that allowlist.
+
+## Releasing a mod
+
+A mod is a plugin of function hooks. It runs on Claude Code only, so it is named in
+`scripts/claude-only-plugins.txt` and carries **no** `.codex-plugin/` directory and **no** entry
+in `.agents/plugins/marketplace.json`. `scripts/check-manifests.sh` enforces both absences.
+
+The four steps are the same, with these differences:
+
+- **Three version fields, not four:** `plugins/<name>/.claude-plugin/plugin.json`, the entry in
+  `.claude-plugin/marketplace.json`, and the README row.
+- **In place of the Codex install check:**
+
+  ```bash
+  claude plugin validate plugins/<name>     # what the engine sees and would refuse
+  claude plugin test plugins/<name>         # runs hooks/*.test.ts against the engine
+  ```
+
+- **Exercise it live before tagging.** `claude --plugin-dir plugins/<name> --debug-file /tmp/mod.log`,
+  use it, then `grep -nE "skipped|refused|threw" /tmp/mod.log` must find nothing. A hook that fails
+  to load is skipped without notice, and the tests cannot see that.
+- **Type-check only after the engine has written `plugins/<name>/.claude-plugin/types/`** (it does
+  so on the first `--plugin-dir` load). Before that, `tsc -p plugins/<name>` uses compiler defaults
+  and writes `.js` files beside the sources. Stage files by name.
+- The mod API is early access. After a Claude Code update, run validate and test for every mod
+  before trusting any of them.
+- `crew-pane` reads five fields of the crew registry rows that another plugin here writes. The
+  registry contract test in that plugin's suite under `tests/` pins them; run that suite before
+  releasing either plugin.
 
 ## Never put non-plugin files under `plugins/<name>/`
 

@@ -29,6 +29,15 @@ disposable="$script_dir/codex-disposable.sh"
   || die "missing $repo_root/.agents/plugins/marketplace.json"
 command -v jq >/dev/null 2>&1 || die "jq not found on PATH"
 
+claude_only_file="$repo_root/scripts/claude-only-plugins.txt"
+if [ -f "$claude_only_file" ]; then
+  for plugin in "$@"; do
+    if sed -e 's/#.*//' -e 's/[[:space:]]//g' "$claude_only_file" | grep -Fqx -- "$plugin"; then
+      die "$plugin is Claude Code only (scripts/claude-only-plugins.txt); it has no Codex install to check"
+    fi
+  done
+fi
+
 # Tripwire: the real config.toml must be untouched by this run.
 real_config="$HOME/.codex/config.toml"
 tripwire_before=""

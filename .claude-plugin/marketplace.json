@@ -109,6 +109,40 @@
         "cross-session",
         "terminal-multiplexer"
       ]
+    },
+    {
+      "name": "bd-issue-band",
+      "source": "./plugins/bd-issue-band",
+      "description": "A band above the prompt showing the bd (beads) issue this session holds and how long since its last comment. A Claude Code mod; dormant where no bd tracker resolves.",
+      "version": "0.2.0",
+      "author": {
+        "name": "Dustin Cheng"
+      },
+      "license": "MIT",
+      "keywords": [
+        "beads",
+        "issue-tracking",
+        "mod",
+        "status",
+        "claude-code-only"
+      ]
+    },
+    {
+      "name": "crew-pane",
+      "source": "./plugins/crew-pane",
+      "description": "Status line and /crew pane for the crew a session raised inside Herdr with herdr-jutsu, and the fable-conductor stream it conducts. A read-only Claude Code mod.",
+      "version": "0.2.0",
+      "author": {
+        "name": "Dustin Cheng"
+      },
+      "license": "MIT",
+      "keywords": [
+        "herdr",
+        "multi-agent",
+        "mod",
+        "status",
+        "claude-code-only"
+      ]
     }
   ]
 }
