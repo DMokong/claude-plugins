@@ -109,6 +109,21 @@ test('a fresh claim with no comments says so, and a comment changes the wording'
   await again.unmount()
 })
 
+test('a claim on an issue whose last comment is old does not read as a fresh comment', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000_000 })
+  bd(on, 'Fix it', ['1970-01-10T00:00:00Z'])
+  on('tool.call', { tool: 'Bash' }, async () => ({ result: { stdout: 'ok' } }))
+  await $.tool.call({ tool: 'Bash', command: 'bd update app-1 --claim' })
+  await clock.advance(2 * MIN)
+  const ui = await $.ui.mount(BAND)
+  const line = (await ui.find({ type: 'Text', text: /app-1/ }))?.text ?? ''
+  // The count runs from this session's claim, so the band must say so.
+  expect(line).toContain('claimed 2m ago · no comment since')
+  expect(line).not.toContain('last comment')
+  expect(line).not.toContain('no comment yet')
+  await ui.unmount()
+})
+
 test('a failed claim puts nothing on the band', async ($, on) => {
   mock.clock(on, { now: 1_000_000_000 })
   blank(on)

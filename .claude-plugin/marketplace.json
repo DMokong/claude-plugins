@@ -114,7 +114,7 @@
       "name": "bd-issue-band",
       "source": "./plugins/bd-issue-band",
       "description": "A band above the prompt showing the bd (beads) issue this session holds and how long since its last comment. A Claude Code mod; dormant where no bd tracker resolves.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "author": {
         "name": "Dustin Cheng"
       },

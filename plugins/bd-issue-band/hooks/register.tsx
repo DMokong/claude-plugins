@@ -185,7 +185,11 @@ export const register: Register = (on, options) => {
       )
     }
 
-    const since = model.hasComment ? `last comment ${model.minutes}m ago` : `no comment yet · claimed ${model.minutes}m ago`
+    const since = !model.hasComment
+      ? `no comment yet · claimed ${model.minutes}m ago`
+      : model.hasCommentSinceClaim
+        ? `last comment ${model.minutes}m ago`
+        : `claimed ${model.minutes}m ago · no comment since`
     const tail = ` · ${since}${model.more > 0 ? ` · +${model.more} more` : ''} `
     const room = (e.props.bodyColumns ?? 80) - model.id.length - tail.length - 30
     const title = model.title === '' ? '' : ` · ${fit(model.title, Math.max(8, room))}`
