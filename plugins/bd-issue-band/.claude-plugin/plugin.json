@@ -1,6 +1,6 @@
 {
   "name": "bd-issue-band",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A band above the prompt showing the bd (beads) issue this session holds and how long since its last comment",
   "author": { "name": "Dustin Cheng" },
   "license": "MIT",

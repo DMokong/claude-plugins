@@ -24,6 +24,7 @@ test('a claim adds the issue and focuses it', () => {
   expect(held(s, 'app-1').title).toBe('')
   expect(bandModel(s, T0 + 5 * MIN)).toEqual({
     kind: 'issue', id: 'app-1', title: '', minutes: 5, isStale: false, more: 0, error: null, hasComment: false,
+    hasCommentSinceClaim: false,
   })
 })
 
@@ -35,6 +36,26 @@ test('the band knows whether anyone has commented on the issue', () => {
   const after = bandModel(commented, T0 + 5 * MIN)
   expect(after.kind === 'issue' && after.hasComment).toBe(true)
   expect(after.kind === 'issue' && after.minutes).toBe(3)
+})
+
+test('a claim newer than the last comment is not mistaken for a comment', () => {
+  // Someone commented two days before this session claimed the issue.
+  const claimed = applyEvent(EMPTY, { kind: 'claim', ids: ['app-1'] }, T0)
+  const read = applyRefresh(claimed, 'app-1', { title: 'Fix it', status: 'in_progress' }, T0 - 2880 * MIN)
+  const before = bandModel(read, T0 + 3 * MIN)
+  expect(before.kind === 'issue' && before.hasComment).toBe(true)
+  expect(before.kind === 'issue' && before.hasCommentSinceClaim).toBe(false)
+  expect(before.kind === 'issue' && before.minutes).toBe(3)
+  const commented = applyEvent(read, { kind: 'comment', ids: ['app-1'] }, T0 + 4 * MIN)
+  const after = bandModel(commented, T0 + 5 * MIN)
+  expect(after.kind === 'issue' && after.hasCommentSinceClaim).toBe(true)
+})
+
+test('any bd event that went through wakes a dormant band, not only a claim', () => {
+  const dormant = applyProbe(EMPTY, false)
+  expect(applyEvent(dormant, { kind: 'comment', ids: ['app-1'] }, T0).isTracked).toBe(true)
+  expect(applyEvent(dormant, { kind: 'close', ids: ['app-1'] }, T0).isTracked).toBe(true)
+  expect(applyEvent(dormant, { kind: 'edit', path: '/a' }, T0).isTracked).toBe(false)
 })
 
 test('a comment resets the clock and adopts an unknown issue', () => {

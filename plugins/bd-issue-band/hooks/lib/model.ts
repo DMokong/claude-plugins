@@ -28,6 +28,8 @@ export type BandModel =
       error: string | null
       /** Whether anyone is known to have commented; `minutes` runs from the claim when not. */
       hasComment: boolean
+      /** Whether a comment landed after this session's claim; when not, `minutes` runs from the claim. */
+      hasCommentSinceClaim: boolean
     }
 
 function fresh(id: string, now: number): Issue {
@@ -48,15 +50,14 @@ export function applyEvent(state: BandState, event: BdEvent, now: number): BandS
     if (state.isTracked === false) return state
     return Object.keys(state.issues).length === 0 ? { ...state, edits: state.edits + 1 } : state
   }
-  if (event.kind === 'close') return without(state, event.ids)
+  // A bd command that went through proves a tracker, whatever the probe said.
+  if (event.kind === 'close') return { ...without(state, event.ids), isTracked: true }
   const issues = { ...state.issues }
   for (const id of event.ids) {
     const held = issues[id] ?? fresh(id, now)
     issues[id] = event.kind === 'comment' ? { ...held, lastCommentAt: now, toastedMark: null } : held
   }
-  // A claim that went through proves a tracker, whatever the probe said.
-  const isTracked = event.kind === 'claim' ? true : state.isTracked
-  return { ...state, issues, focus: event.ids[event.ids.length - 1] ?? null, edits: 0, isHidden: false, isTracked }
+  return { ...state, issues, focus: event.ids[event.ids.length - 1] ?? null, edits: 0, isHidden: false, isTracked: true }
 }
 
 export function applyRefresh(
@@ -127,6 +128,7 @@ export function bandModel(state: BandState, now: number): BandModel {
     more: Object.keys(state.issues).length - 1,
     error: state.error,
     hasComment: held.lastCommentAt !== null,
+    hasCommentSinceClaim: held.lastCommentAt !== null && held.lastCommentAt >= held.claimedAt,
   }
 }
 
