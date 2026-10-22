@@ -1,7 +1,7 @@
 # Releasing a plugin from this marketplace
 
-Five plugins live in this repo: `fable-mode`, `fable-conductor`, `herdr-jutsu`, and two Claude
-Code mods, `bd-issue-band` and `crew-pane`. The Claude
+Six plugins live in this repo: `fable-mode`, `fable-conductor`, `herdr-jutsu`, and three Claude
+Code mods, `bd-issue-band`, `crew-pane` and `sidekick`. The Claude
 catalog (`.claude-plugin/marketplace.json`) is canonical and Codex reads it natively; a Codex
 catalog or Codex manifest is not required for Codex to install these plugins. This repo also keeps
 `.agents/plugins/marketplace.json` and `.codex-plugin/plugin.json` so Codex gets intentional
