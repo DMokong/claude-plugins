@@ -76,13 +76,16 @@ function world(on: On, w: World) {
     seen.judged += 1
     if (e.prompt.includes('<message>')) seen.judgments.push(e.prompt)
     if (w.judgeDelayMs !== undefined) await slow
-    return { value: { isAnswered: true, text: w.judge, usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }
+    return { value: { isAnswered: true, text: w.judge, usage: { input_tokens: 1000, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }
   })
   on('process.spawn', async function* (_$, e) {
     seen.spawned.push([...e.argv])
     yield { stream: 'stdout' as const, text: `${JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', input: { command: 'git commit -m x' } }] } })}\n` }
     if (w.workerGate !== undefined) await w.workerGate
-    yield { stream: 'stdout' as const, text: `${JSON.stringify({ type: 'result', result: w.worker, is_error: false, total_cost_usd: 0 })}\n` }
+    yield {
+      stream: 'stdout' as const,
+      text: `${JSON.stringify({ type: 'result', result: w.worker, is_error: false, total_cost_usd: 0.00055948, usage: WORKER_USAGE })}\n`,
+    }
     return { value: { code: 0, signal: null } }
   })
   // The bottom of prompt.submit: the main session receiving the prompt, or the mod re-sending one.
@@ -95,6 +98,13 @@ function world(on: On, w: World) {
 }
 
 const MECHANICAL = 'mechanical'
+const WORKER_USAGE = {
+  input_tokens: 4,
+  cache_creation_input_tokens: 1642,
+  cache_read_input_tokens: 15068,
+  output_tokens: 160,
+  cache_creation: { ephemeral_1h_input_tokens: 1642, ephemeral_5m_input_tokens: 0 },
+}
 const NEEDS_MAIN = 'needs-main'
 const DONE = '{"status":"done","summary":"Committed 3f2a91c and pushed to origin/main","commands":["git commit","git push"],"shas":["3f2a91c"],"changed":["a.txt"],"uncertain":[],"needsMain":""}'
 
@@ -135,8 +145,13 @@ test('in auto, a mechanical chore is dropped from main, done by the worker, and 
   const s = await until($, x => x.entries[0]?.status === 'done')
   expect(s.entries[0]?.steps).toEqual(['$ git commit -m x'])
   expect(s.totals.assists).toBe(1)
+  // Priced with caching: the worker's run as Claude Code prices it, plus the judge's call.
+  expect(Math.abs((s.entries[0]?.workerSpend.usd ?? 0) - 0.00055948)).toBeLessThan(1e-10)
+  expect(s.entries[0]?.judgeSpend.input).toBe(1000)
+  expect(s.spend.usd).toBeGreaterThan(0.00055948)
+  expect(s.spend.savedUsd).toBeGreaterThan(0)
   expect(seen.spawned[0]?.slice(0, 4)).toEqual(['claude', '-p', '--model', 'haiku'])
-  expect(seen.logs.some(line => line.startsWith('✓ Committed 3f2a91c'))).toBe(true)
+  expect(seen.logs.some(line => line.startsWith('✓ Committed 3f2a91c') && line.includes('≈$'))).toBe(true)
   expect(seen.notified[0]).toContain('Committed 3f2a91c')
   // The main session learns what happened without the raw output.
   expect(seen.appended[0]).toContain('"commit and push"')
@@ -153,7 +168,8 @@ test('in auto, a message that needs the session goes to main', async ($, on) => 
   expect((await state($)).entries[0]?.status).toBe('passed')
   // The pass is visible in the transcript, and the status line says the sidekick is on.
   expect(seen.logs.some(line => line.startsWith('→ to Claude:'))).toBe(true)
-  expect(seen.status.at(-1)).toBe('on (auto)')
+  // The band, not the status line, says the sidekick is on.
+  expect(seen.status.every(text => text === undefined)).toBe(true)
 })
 
 test('a slow judge fails open within the budget', async ($, on) => {
@@ -241,6 +257,8 @@ test('the pane draws the assist with its buttons on every surface', async ($, on
       props: { title: 'Sidekick', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
     } as never)
     expect(await ui.find({ type: 'Text', text: /✓ commit and push/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /▌ DONE/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /caching saved/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Committed 3f2a91c/ })).toBeDefined()
     // The handed-off prompt is not in the up-arrow history, so the pane recalls it.
     filled.length = 0
@@ -266,4 +284,29 @@ test('a draft judged while typing answers the submit without a second judge call
   // The draft was judged once while typing; the submit asked nothing more.
   expect(seen.judgments.length).toBe(1)
   expect((await state($)).entries[0]?.status).not.toBe('passed')
+})
+
+test('the band shows while on and stacks above the band beneath it', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  // Another plugin's band, beneath this one.
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>other band</Text>
+  })
+  await $.session.start(START)
+  const BAND = { plugin: 'sidekick', component: 'AbovePrompt', props: { bodyColumns: 100, hasSurvey: false, view: {} } } as never
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const off = await $.ui.mount({ ...(BAND as object), surface } as never)
+    expect(await off.find({ type: 'Text', text: /◆ sidekick/ })).toBeUndefined()
+    expect(await off.find({ type: 'Text', text: /other band/ })).toBeDefined()
+    await off.unmount()
+  }
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...(BAND as object), surface } as never)
+    expect(await ui.find({ type: 'Text', text: /◆ sidekick/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: / AUTO / })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /other band/ })).toBeDefined()
+    await ui.unmount()
+  }
 })

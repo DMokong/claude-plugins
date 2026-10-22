@@ -1,8 +1,24 @@
+import { usd } from './cost'
+import type { Usage } from './cost'
 import { firstJson } from './judge'
 import type { Outcome } from '../../types'
 
 /** What the worker may run. Anything else is refused by `--permission-mode dontAsk`. */
-export const ALLOWED_TOOLS = ['Read', 'Glob', 'Grep', 'Bash(git:*)', 'Bash(bd:*)']
+export const ALLOWED_TOOLS = [
+  'Read',
+  'Glob',
+  'Grep',
+  'Bash(git:*)',
+  'Bash(bd:*)',
+  // Read-only helpers a chore reaches for (`cd repo && git ...`, `git log | head`); without
+  // them a chained command is refused whole and the assist stops.
+  'Bash(cd:*)',
+  'Bash(head:*)',
+  'Bash(tail:*)',
+  'Bash(wc:*)',
+  'Bash(ls:*)',
+  'Bash(cat:*)',
+]
 
 /**
  * Prefix deny rules, the first layer of the data-loss line. The guard hook (bin/sidekick-guard)
@@ -35,7 +51,7 @@ Rules:
 - Never lose work. Forbidden: force-push, reset --hard, clean, deleting unmerged branches, discarding uncommitted changes, rewriting commits already on the upstream. These are also blocked by the tool layer; if one is refused, stop. Never look for another route to the same effect.
 - Before a rebase, check the commits being rewritten are not on the upstream yet (git rev-list @{u}..HEAD and git log @{u}). If they are, stop and say the main session should handle it.
 - If a rebase, merge, pull or cherry-pick hits a conflict, abort it (git rebase --abort / merge --abort / cherry-pick --abort) so the repo is back where it started, then stop and describe the conflict.
-- Run plain git and bd commands only: no heredocs, no $(...), no cat, echo or pipes into git; anything else is refused. Commit with -m flags: git commit -m "subject" -m "body paragraph" -m "Co-Authored-By: ..." (one -m per paragraph).
+- Prefer one plain git or bd command per call. Pipes into head, tail or wc and a leading cd are fine; heredocs, $(...), echo and other programs are refused. Commit with -m flags: git commit -m "subject" -m "body paragraph" -m "Co-Authored-By: ..." (one -m per paragraph).
 - Commit messages: follow the style of recent git log entries; describe what the diff does.
 - Pushing is allowed when asked.
 
@@ -96,7 +112,7 @@ export function splitLines(buffer: string, chunk: string): { lines: string[]; re
 
 export type StreamEvent =
   | { kind: 'step'; text: string }
-  | { kind: 'result'; text: string; isError: boolean; costUsd: number }
+  | { kind: 'result'; text: string; isError: boolean; costUsd: number; usage: Usage | undefined }
   | { kind: 'other' }
 
 /** One line of `--output-format stream-json`, reduced to what the pane shows. */
@@ -115,6 +131,7 @@ export function parseStreamLine(line: string): StreamEvent {
       text: typeof event.result === 'string' ? event.result : '',
       isError: event.is_error === true,
       costUsd: typeof event.total_cost_usd === 'number' ? event.total_cost_usd : 0,
+      usage: event.usage !== null && typeof event.usage === 'object' ? (event.usage as Usage) : undefined,
     }
   }
   if (event.type !== 'assistant') return { kind: 'other' }
@@ -166,9 +183,10 @@ export function parseOutcome(text: string, isError: boolean): Outcome {
 const MARK: Record<Outcome['status'], string> = { done: '✓', partial: '◐', stopped: '■', failed: '✗' }
 
 /** The line shown in the transcript where a reply would have been. */
-export function chatLine(outcome: Outcome, backend: string, seconds: number): string {
+export function chatLine(outcome: Outcome, backend: string, seconds: number, costUsd = 0): string {
   const tail = outcome.status === 'done' ? '' : outcome.needsMain !== '' ? ` · ${outcome.needsMain} (pane → give to main)` : ' · see the sidekick pane'
-  return `${MARK[outcome.status]} ${outcome.summary} · ${backend} · ${seconds}s${tail}`
+  const cost = costUsd > 0 ? ` · ≈${usd(costUsd)}` : ''
+  return `${MARK[outcome.status]} ${outcome.summary} · ${backend} · ${seconds}s${cost}${tail}`
 }
 
 const HANDOFF_LIMIT = 700

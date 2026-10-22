@@ -1,5 +1,17 @@
 export type Mode = 'off' | 'shadow' | 'auto'
 
+/** Tokens and API-equivalent dollars, prompt caching priced in. */
+export type Tally = {
+  usd: number
+  /** What caching changed against sending every input token uncached; negative when writes cost more than reads saved. */
+  savedUsd: number
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite5m: number
+  cacheWrite1h: number
+}
+
 export type Verdict = 'mechanical' | 'needs-main' | 'unclear'
 
 export type EntryStatus =
@@ -25,7 +37,7 @@ export type Outcome = {
 
 export type Entry = {
   id: string
-  /** The prompt as Dustin typed it. */
+  /** The prompt as the person typed it. */
   prompt: string
   status: EntryStatus
   /** What the judge said, and why; empty before it answered or when it never ran. */
@@ -44,8 +56,11 @@ export type Entry = {
   /** The worker's most recent steps (commands it ran, notes it wrote), newest last. */
   steps: string[]
   outcome: Outcome | null
-  /** Set when Dustin pressed "should've been sidekick" on a passed entry. */
+  /** Set when the person pressed "should've been sidekick" on a passed entry. */
   isMissed: boolean
+  /** The judge's call for this prompt and the worker's run. */
+  judgeSpend: Tally
+  workerSpend: Tally
 }
 
 /** A prompt bound for the main session, held while assists run. */
@@ -60,6 +75,10 @@ export type SidekickState = {
   /** The entry whose steps the pane shows in full; empty for none. */
   watching: string
   totals: { assists: number; passed: number; failed: number }
+  /** This session's spend: every judge call (drafts and warm-ups too) and every worker run. */
+  spend: Tally
+  /** Moves once a second while an assist runs, so the pane's spinner and clocks redraw. */
+  tick: number
 }
 
 declare module 'claude-code' {
