@@ -85,6 +85,8 @@ export function usd(dollars: number): string {
   const sign = dollars < 0 ? '-' : ''
   const size = Math.abs(dollars)
   if (size === 0) return '$0'
+  // A judge call is a few hundred-thousandths of a dollar; two significant digits keep it visible.
+  if (size < 0.0001) return `${sign}$${size.toPrecision(2)}`
   if (size < 0.01) return `${sign}$${size.toFixed(4)}`
   if (size < 1) return `${sign}$${size.toFixed(3)}`
   return `${sign}$${size.toFixed(2)}`

@@ -25,6 +25,7 @@ type World = {
 /** The engine beneath the mod: answers every call it makes and records what it did. */
 function world(on: On, w: World) {
   clock = mock.clock(on)
+  mock.store(on)
   latest = undefined
   on('state.set', async (_$, e, next) => {
     if (e.plugin === 'sidekick' && e.key === 'sidekick') latest = e.value as SidekickState
@@ -43,6 +44,8 @@ function world(on: On, w: World) {
     spawned: [] as string[][],
     judged: 0,
     judgments: [] as string[],
+    systems: [] as string[],
+    toasts: [] as string[],
     status: [] as (string | undefined)[],
     release: () => release(),
   }
@@ -62,7 +65,10 @@ function world(on: On, w: World) {
     seen.notified.push(e.text)
     return { value: { isSent: true as const, channel: 'terminal_bell' as const } }
   })
-  on('ui.toast', async () => ({ value: undefined }))
+  on('ui.toast', async (_$, e) => {
+    seen.toasts.push(e.text)
+    return { value: undefined }
+  })
   on('ui.status', async (_$, e) => {
     seen.status.push(e.text)
     return { value: undefined }
@@ -78,7 +84,10 @@ function world(on: On, w: World) {
   })
   on('model.complete', async ($, e) => {
     seen.judged += 1
-    if (e.prompt.includes('<message>')) seen.judgments.push(e.prompt)
+    if (e.prompt.includes('<message>')) {
+      seen.judgments.push(e.prompt)
+      seen.systems.push(typeof e.system === 'string' ? e.system : '')
+    }
     if (w.judgeDelayMs !== undefined) await slow
     return { value: { isAnswered: true, text: w.judge, usage: { input_tokens: 1000, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }
   })
@@ -315,4 +324,42 @@ test('the band shows while on and stacks above the band beneath it', async ($, o
     expect(await ui.find({ type: 'Text', text: /other band/ })).toBeDefined()
     await ui.unmount()
   }
+})
+
+test("should've been sidekick teaches the judge: the next judgment carries the miss", async ($, on) => {
+  const seen = world(on, { judge: NEEDS_MAIN, worker: DONE })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'tidy up merged branches', ...TYPED })
+  expect(seen.systems.at(-1)).not.toContain('corrected you')
+  const ui = await $.ui.mount({
+    plugin: 'sidekick',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'sidekick',
+    props: { title: 'Sidekick', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  } as never)
+  await ui.press({ key: `missed-${(await state($)).entries[0]?.id}` })
+  await ui.unmount()
+  expect(seen.toasts.some(t => t.includes('tidy up merged branches'))).toBe(true)
+  await $.prompt.submit({ text: 'tidy up stale branches', ...TYPED })
+  expect(seen.systems.at(-1)).toContain('- tidy up merged branches')
+})
+
+test('the band stays on one line when narrow: the least useful parts give way first', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>beneath</Text>
+  })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const band = (columns: number) => ({ plugin: 'sidekick', component: 'AbovePrompt', surface: 'terminal', props: { bodyColumns: columns, hasSurvey: false, view: {} } }) as never
+  const wide = await $.ui.mount(band(120))
+  expect(await wide.find({ type: 'Text', text: /assists/ })).toBeDefined()
+  await wide.unmount()
+  const narrow = await $.ui.mount(band(46))
+  expect(await narrow.find({ type: 'Text', text: /◆ sidekick/ })).toBeDefined()
+  expect(await narrow.find({ type: 'Text', text: /assists/ })).toBeUndefined()
+  await narrow.unmount()
 })

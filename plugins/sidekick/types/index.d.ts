@@ -79,6 +79,8 @@ export type SidekickState = {
   spend: Tally
   /** Moves once a second while an assist runs, so the pane's spinner and clocks redraw. */
   tick: number
+  /** True while the judge's first call is opening its connection, which can take seconds. */
+  isWarming: boolean
 }
 
 declare module 'claude-code' {

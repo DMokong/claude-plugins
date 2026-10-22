@@ -48,8 +48,10 @@ export const WORKER_SYSTEM = `You are a sidekick: you carry out ONE small, mecha
 
 Rules:
 - Do exactly the task. Do not fix, refactor or edit files beyond what the task names.
+- Work on the branch that is checked out. Never create, switch or delete a branch unless the task says to; this overrides any general advice to branch first or open a pull request. "commit and push" means commit here and push this branch.
 - Never lose work. Forbidden: force-push, reset --hard, clean, deleting unmerged branches, discarding uncommitted changes, rewriting commits already on the upstream. These are also blocked by the tool layer; if one is refused, stop. Never look for another route to the same effect.
-- Before a rebase, check the commits being rewritten are not on the upstream yet (git rev-list @{u}..HEAD and git log @{u}). If they are, stop and say the main session should handle it.
+- Before a rebase, check the commits being rewritten are not on the upstream yet: git status -sb and git branch -vv show ahead/behind, and git log origin/<branch>..HEAD lists what is unpushed. If they are already upstream, stop and say the main session should handle it.
+- Never write @{u}, @{upstream} or any other {...} in a command: braces are refused. Name the upstream branch instead (origin/main).
 - If a rebase, merge, pull or cherry-pick hits a conflict, abort it (git rebase --abort / merge --abort / cherry-pick --abort) so the repo is back where it started, then stop and describe the conflict.
 - Prefer one plain git or bd command per call. Pipes into head, tail or wc and a leading cd are fine; heredocs, $(...), echo and other programs are refused. Commit with -m flags: git commit -m "subject" -m "body paragraph" -m "Co-Authored-By: ..." (one -m per paragraph).
 - Commit messages: follow the style of recent git log entries; describe what the diff does.
@@ -78,6 +80,10 @@ export function workerArgv(model: string, guardPath: string): string[] {
     // or plugins), and only the four built-in tools a chore needs. Measured on a large
     // repo: ~10k tokens a request against ~50k for a default `claude -p`, and 3 s against 9 s.
     '--strict-mcp-config',
+    // The per-run details (cwd, date, git status) go in the first user message instead of the
+    // system prompt, so the cached prefix is the same in every repo. Measured: a repo switch
+    // writes 2.0k tokens instead of 3.6k (~35% cheaper), and a repeat in one repo writes none.
+    '--exclude-dynamic-system-prompt-sections',
     '--disable-slash-commands',
     '--setting-sources',
     '',
@@ -111,7 +117,8 @@ export function splitLines(buffer: string, chunk: string): { lines: string[]; re
 }
 
 export type StreamEvent =
-  | { kind: 'step'; text: string }
+  | { kind: 'step'; text: string; id: string }
+  | { kind: 'refused'; id: string }
   | { kind: 'result'; text: string; isError: boolean; costUsd: number; usage: Usage | undefined }
   | { kind: 'other' }
 
@@ -134,6 +141,17 @@ export function parseStreamLine(line: string): StreamEvent {
       usage: event.usage !== null && typeof event.usage === 'object' ? (event.usage as Usage) : undefined,
     }
   }
+  // A tool call the permission layer or the guard turned down comes back as an errored result.
+  if (event.type === 'user') {
+    const message = event.message as { content?: unknown } | undefined
+    for (const block of (Array.isArray(message?.content) ? message.content : []) as Record<string, unknown>[]) {
+      const said = typeof block.content === 'string' ? block.content : JSON.stringify(block.content ?? '')
+      if (block.type === 'tool_result' && block.is_error === true && /denied|refused|not allowed/i.test(said)) {
+        return { kind: 'refused', id: typeof block.tool_use_id === 'string' ? block.tool_use_id : '' }
+      }
+    }
+    return { kind: 'other' }
+  }
   if (event.type !== 'assistant') return { kind: 'other' }
   const message = event.message as { content?: unknown } | undefined
   const content = Array.isArray(message?.content) ? message.content : []
@@ -141,7 +159,7 @@ export function parseStreamLine(line: string): StreamEvent {
     if (block.type === 'tool_use') {
       const input = (block.input ?? {}) as Record<string, unknown>
       const command = typeof input.command === 'string' ? input.command : typeof input.file_path === 'string' ? `read ${input.file_path}` : ''
-      if (command !== '') return { kind: 'step', text: `$ ${command.split('\n')[0]}` }
+      if (command !== '') return { kind: 'step', text: `$ ${command.split('\n')[0]}`, id: typeof block.id === 'string' ? block.id : '' }
     }
   }
   return { kind: 'other' }

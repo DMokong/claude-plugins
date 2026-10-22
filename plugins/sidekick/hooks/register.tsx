@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PromptSubmitInput, PromptSubmitResult, Register } from 'claude-code'
 
-import { JUDGE_SYSTEM, canStart, judgePrompt, lockKeys, parseJudgment, precheck } from './lib/judge'
+import { canStart, judgePrompt, judgeSystem, lockKeys, parseJudgment, precheck } from './lib/judge'
 import type { Judgment } from './lib/judge'
 import { NO_SPEND, addTally, tallyLine, tallyOf, usd } from './lib/cost'
 import { migrate } from './lib/state'
@@ -26,6 +26,7 @@ export const EMPTY: SidekickState = {
   totals: { assists: 0, passed: 0, failed: 0 },
   spend: NO_SPEND,
   tick: 0,
+  isWarming: false,
 }
 
 const sidekick = atom({ plugin: 'sidekick', key: 'sidekick' } as const, EMPTY)
@@ -41,6 +42,8 @@ async function change($: EngineInterface, fn: (state: SidekickState) => Sidekick
 }
 
 const PANE = 'sidekick'
+/** Rows asked for inline, past the default third, so a running assist's command and buttons show. */
+const PANE_ROWS = 28
 // The agreed ceiling is 2 s on any message; this leaves room for the hook around the call.
 const JUDGE_TIMEOUT_MS = 1_800
 const STATE_TIMEOUT_MS = 400
@@ -59,6 +62,9 @@ let cwd = ''
 let guardPath = ''
 /** The loaded version, from the plugin's own manifest; shown in the pane so a stale load is visible. */
 let version = ''
+/** The person's "should've been sidekick" corrections, across sessions; the judge learns from them. */
+let misses: string[] = []
+const MISSES_KEY = 'missed'
 let sequence = 0
 /** When the judge's connection was last used; a cold one blows the budget (measured: 1.8 s+ against ~1.2 s warm). */
 let lastJudgeAt = 0
@@ -155,7 +161,7 @@ async function judge($: EngineInterface, text: string, budgetMs: number | null =
     const reply = await $.model.complete(
       {
         model: judgeModel,
-        system: JUDGE_SYSTEM,
+        system: judgeSystem(misses),
         prompt: judgePrompt(text, `cwd: ${cwd}`),
         maxTokens: 8,
         ...(budgetMs === null ? {} : { timeoutMs: budgetMs }),
@@ -224,7 +230,11 @@ async function warm($: EngineInterface): Promise<void> {
   const now = await $.clock.now()
   if (now - lastJudgeAt < WARM_AFTER_MS) return
   lastJudgeAt = now
+  // A cold first call can outlast the judge's budget; say so in the band rather than leave a
+  // message that times out to the main session unexplained.
+  await change($, s => ({ ...s, isWarming: true }))
   const reply = await $.model.complete({ model: judgeModel, prompt: 'Reply with: ok', maxTokens: 1 }).catch(() => undefined)
+  await change($, s => ({ ...s, isWarming: false }))
   if (reply !== undefined) await addSpend($, tallyOf(judgeModel, reply.usage))
 }
 
@@ -318,6 +328,7 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
   const timer = $.clock.after(WORKER_TIMEOUT_MS, stop)
   try {
     let buffer = ''
+    const commands = new Map<string, string>()
     for await (const chunk of stream) {
       if (isStopped) break
       if (chunk.stream !== 'stdout') continue
@@ -327,6 +338,11 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
         const event = parseStreamLine(line)
         if (event.kind === 'step') {
           const step = event.text
+          commands.set(event.id, step)
+          await patchEntry($, id, x => ({ steps: [...x.steps, step].slice(-MAX_STEPS) }))
+        } else if (event.kind === 'refused') {
+          // Say which command was turned down, so a stopped assist can be explained and fixed.
+          const step = `✗ refused: ${(commands.get(event.id) ?? '(a tool call)').replace(/^\$ /, '')}`
           await patchEntry($, id, x => ({ steps: [...x.steps, step].slice(-MAX_STEPS) }))
         } else if (event.kind === 'result') {
           result = { text: event.text, isError: event.isError }
@@ -481,10 +497,13 @@ async function markMissed($: EngineInterface, id: string): Promise<void> {
   await patchEntry($, id, () => ({ isMissed: true }))
   const entry = (await load($)).entries.find(x => x.id === id)
   if (entry === undefined) return
-  // Kept across sessions so the judge can be tuned from real misses.
-  const key = 'missed'
-  const prior = ((await $.store.get(key)) as string[] | undefined) ?? []
-  await $.store.set(key, [...prior, entry.prompt].slice(-200))
+  // Kept across sessions; the judge sees the latest few as precedents from its next call on.
+  const prior = await $.store.get(MISSES_KEY).catch(() => misses)
+  const known = Array.isArray(prior) ? prior.filter((m): m is string => typeof m === 'string') : misses
+  misses = [...known.filter(m => m !== entry.prompt), entry.prompt].slice(-200)
+  // The judge learns this session even if the store refuses; the store carries it to the next.
+  await $.store.set(MISSES_KEY, misses).catch(() => {})
+  $.ui.toast(`Noted: messages like "${clip(entry.prompt, 40)}" go to the sidekick from now on`)
 }
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
@@ -540,6 +559,12 @@ export const register: Register = (on, options) => {
       version = ''
     }
     // A reload keeps the session's mode; the new module's connection starts cold.
+    try {
+      const stored = await $.store.get(MISSES_KEY)
+      misses = Array.isArray(stored) ? stored.filter((m): m is string => typeof m === 'string') : []
+    } catch {
+      misses = []
+    }
     // Store the upgraded shape, so state written by an older version is current from here on.
     await change($, state => state)
     // 0.1.2 kept the mode in the status line; the band carries it now, so clear what it left.
@@ -570,7 +595,7 @@ export const register: Register = (on, options) => {
     if (arg !== '' && asked === null) return { text: 'Usage: /sidekick [auto|shadow|off]' }
     if (asked !== null) await setMode($, asked)
     const { mode } = await load($)
-    if (mode !== 'off') await $.ui.open({ id: PANE, title: 'Sidekick' })
+    if (mode !== 'off') await $.ui.open({ id: PANE, title: 'Sidekick', rows: PANE_ROWS })
     const what: Record<Mode, string> = {
       off: 'Sidekick is off for this session.',
       shadow: 'Sidekick is in shadow for this session: it judges each message and logs what it would hand off, but everything still goes to Claude. /sidekick auto to let it act.',
@@ -703,14 +728,17 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column">
-        <Box flexDirection="column" borderStyle="round" borderColor={modeColor[state.mode]} paddingX={1}>
+        <Box flexDirection="column" borderStyle="round" borderColor={modeColor[state.mode]} paddingX={1} paddingY={0}>
           <Box justifyContent="space-between">
-            <Box>
             <Text bold color="claude">
-              ◆ SIDEKICK{'  '}
+              ◆ SIDEKICK
             </Text>
+            {version !== '' && <Text dimColor>{`v${version}`}</Text>}
+          </Box>
+          <Box>
+            <Text dimColor>{'mode   '}</Text>
             {(['off', 'shadow', 'auto'] as const).flatMap((mode, i) => [
-              ...(i > 0 ? [<Text key={`mg-${mode}`}> </Text>] : []),
+              ...(i > 0 ? [<Text key={`mg-${mode}`}>{'  '}</Text>] : []),
               <Button
                 key={`mode-${mode}`}
                 label={state.mode === mode ? `● ${mode.toUpperCase()}` : `○ ${mode}`}
@@ -719,23 +747,28 @@ export const register: Register = (on, options) => {
                 onPress={() => void setMode($, mode)}
               />,
             ])}
-            </Box>
-            {version !== '' && <Text dimColor>{`v${version}`}</Text>}
           </Box>
-          <Box>
+          <Box flexWrap="wrap">
+            <Text dimColor>{'now    '}</Text>
             <Text color={running.length > 0 ? 'warning' : 'subtle'}>{`${running.length > 0 ? spin : '·'} ${running.length} running`}</Text>
-            <Text color={queued.length > 0 ? 'suggestion' : 'subtle'}>{`  ◷ ${queued.length} queued`}</Text>
-            <Text color={state.waiting.length > 0 ? 'warning' : 'subtle'}>{`  ⏸ ${state.waiting.length} waiting`}</Text>
-            <Text color="success">{`  ✓ ${state.totals.assists - state.totals.failed}`}</Text>
-            <Text color={state.totals.failed > 0 ? 'error' : 'subtle'}>{`  ✗ ${state.totals.failed}`}</Text>
-            <Text dimColor>{`  → ${state.totals.passed} to Claude`}</Text>
+            <Text color={queued.length > 0 ? 'suggestion' : 'subtle'}>{`   ◷ ${queued.length} queued`}</Text>
+            <Text color={state.waiting.length > 0 ? 'warning' : 'subtle'}>{`   ⏸ ${state.waiting.length} waiting`}</Text>
           </Box>
-          <Text dimColor>
-            {clip(
-              `≈${usd(state.spend.usd)} this session · caching ${state.spend.savedUsd >= 0 ? 'saved' : 'cost'} ≈${usd(Math.abs(state.spend.savedUsd))} · API-equivalent · judge ${judgeModel} · worker ${workerModel}`,
-              width - 4,
-            )}
-          </Text>
+          <Box flexWrap="wrap">
+            <Text dimColor>{'total  '}</Text>
+            <Text color="success">{`✓ ${state.totals.assists - state.totals.failed} done`}</Text>
+            <Text color={state.totals.failed > 0 ? 'error' : 'subtle'}>{`   ✗ ${state.totals.failed} stopped`}</Text>
+            <Text dimColor>{`   → ${state.totals.passed} to Claude`}</Text>
+          </Box>
+          <Box flexWrap="wrap">
+            <Text dimColor>{'cost   '}</Text>
+            <Text bold>{`≈${usd(state.spend.usd)}`}</Text>
+            <Text dimColor>{' this session   '}</Text>
+            <Text color={state.spend.savedUsd >= 0 ? 'success' : 'warning'}>
+              {`caching ${state.spend.savedUsd >= 0 ? 'saved' : 'cost'} ≈${usd(Math.abs(state.spend.savedUsd))}`}
+            </Text>
+          </Box>
+          <Text dimColor wrap="wrap">{`models judge ${judgeModel} · worker ${workerModel} · costs are API-equivalent estimates`}</Text>
         </Box>
 
         {state.mode === 'off' && <Text dimColor>Off for this session. Pick shadow to watch the judge, auto to let it act.</Text>}
@@ -752,7 +785,7 @@ export const register: Register = (on, options) => {
               </Text>
               <Text dimColor>{`  ${Math.max(0, Math.round((now - (entry.startedAt || entry.createdAt)) / 1000))}s`}</Text>
             </Box>
-            <Text color="subtle">{clip(`    ↳ ${entry.steps.at(-1) ?? 'starting the worker…'}`, width)}</Text>
+            <Text color={(entry.steps.at(-1) ?? '').startsWith('✗') ? 'error' : 'text'}>{clip(`    ↳ ${entry.steps.at(-1) ?? 'starting the worker…'}`, width)}</Text>
             {buttonsFor(entry)}
             {watched(entry)}
           </Box>
@@ -796,7 +829,7 @@ export const register: Register = (on, options) => {
           )
         })}
 
-        {passed.length > 0 && section('pass', 'TO CLAUDE', 'subtle', passed.length)}
+        {passed.length > 0 && section('pass', 'TO CLAUDE', 'permission', passed.length)}
         {passed.slice(0, room).map(entry => (
           <Box key={`e-${entry.id}`} flexDirection="column">
             <Text dimColor>{clip(`${STATUS_MARK[entry.status]} ${entry.prompt}`, width)}</Text>
@@ -823,14 +856,28 @@ export const register: Register = (on, options) => {
     const activity =
       lead !== undefined
         ? `${spin} ${lead.prompt}${lead.steps.length > 0 ? ` · ${lead.steps.at(-1)}` : ''}${running.length > 1 ? ` +${running.length - 1}` : ''}`
-        : 'idle'
-    const tail = [queued > 0 ? `◷ ${queued} queued` : '', state.waiting.length > 0 ? `⏸ ${state.waiting.length} waiting` : '', `${state.totals.assists} ${state.totals.assists === 1 ? 'assist' : 'assists'}`, `≈${usd(state.spend.usd)}`]
-      .filter(part => part !== '')
-      .join(' · ')
-    const room = Math.max(10, width - tail.length - 30)
+        : state.isWarming
+          ? 'warming up the judge…'
+          : 'idle'
+    // One line at any width: the least useful parts give way first, then the activity is cut.
+    const parts: { text: string; color: string; keep: number }[] = [
+      { text: queued > 0 ? `◷ ${queued} queued` : '', color: 'suggestion', keep: 2 },
+      { text: state.waiting.length > 0 ? `⏸ ${state.waiting.length} waiting` : '', color: 'warning', keep: 3 },
+      { text: `≈${usd(state.spend.usd)}`, color: 'subtle', keep: 1 },
+      { text: `${state.totals.assists} ${state.totals.assists === 1 ? 'assist' : 'assists'}`, color: 'subtle', keep: 0 },
+    ].filter(part => part.text !== '')
+    const fixed = 'sidekick '.length + state.mode.length + 2 + ' │ '.length + ' Open '.length + 8
+    const minActivity = 14
+    const length = (list: typeof parts) => list.reduce((n, part) => n + part.text.length + 3, 0)
+    let shown = [...parts]
+    while (shown.length > 0 && fixed + minActivity + length(shown) > width) {
+      const lowest = Math.min(...shown.map(part => part.keep))
+      shown = shown.filter(part => part.keep !== lowest)
+    }
+    const room = Math.max(8, width - fixed - length(shown))
     return (
       <Box flexDirection="column">
-        <Box key="sidekick-band">
+        <Box key="sidekick-band" flexWrap="nowrap">
           <Text bold color="claude">
             ◆ sidekick{' '}
           </Text>
@@ -838,9 +885,14 @@ export const register: Register = (on, options) => {
             {` ${state.mode.toUpperCase()} `}
           </Text>
           <Text dimColor> │ </Text>
-          <Text color={lead !== undefined ? 'warning' : 'subtle'}>{clip(activity, room)}</Text>
-          <Text dimColor>{` │ ${tail} `}</Text>
-          <Button key="open" label="Open" onPress={() => void $.ui.open({ id: PANE, title: 'Sidekick' })} />
+          <Text color={lead !== undefined ? 'warning' : state.isWarming ? 'suggestion' : 'subtle'}>{clip(activity, room)}</Text>
+          {shown.map(part => (
+            <Text key={`band-${part.keep}`} color={part.color}>
+              {` · ${part.text}`}
+            </Text>
+          ))}
+          <Text> </Text>
+          <Button key="open" label="Open" onPress={() => void $.ui.open({ id: PANE, title: 'Sidekick', rows: PANE_ROWS })} />
         </Box>
         {below}
       </Box>
