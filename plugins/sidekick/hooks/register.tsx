@@ -3,6 +3,7 @@ import type { EngineInterface, PromptSubmitInput, PromptSubmitResult, Register }
 
 import { JUDGE_SYSTEM, canStart, judgePrompt, lockKeys, parseJudgment, precheck } from './lib/judge'
 import type { Judgment } from './lib/judge'
+import { NO_SPEND, addTally, tallyLine, tallyOf, usd } from './lib/cost'
 import {
   chatLine,
   giveToMainPrompt,
@@ -13,7 +14,7 @@ import {
   workerArgv,
   workerInput,
 } from './lib/worker'
-import type { Entry, EntryStatus, Mode, Outcome, SidekickState } from '../types'
+import type { Entry, EntryStatus, Mode, Outcome, SidekickState, Tally } from '../types'
 
 export const EMPTY: SidekickState = {
   mode: 'off',
@@ -22,12 +23,14 @@ export const EMPTY: SidekickState = {
   notes: [],
   watching: '',
   totals: { assists: 0, passed: 0, failed: 0 },
+  spend: NO_SPEND,
+  tick: 0,
 }
 
 const sidekick = atom({ plugin: 'sidekick', key: 'sidekick' } as const, EMPTY)
 
 const PANE = 'sidekick'
-// Dustin's ceiling is 2 s on any message; this leaves room for the hook around the call.
+// The agreed ceiling is 2 s on any message; this leaves room for the hook around the call.
 const JUDGE_TIMEOUT_MS = 1_800
 const STATE_TIMEOUT_MS = 400
 const WORKER_TIMEOUT_MS = 10 * 60_000
@@ -46,7 +49,7 @@ let guardPath = ''
 let sequence = 0
 /** When the judge's connection was last used; a cold one blows the budget (measured: 1.8 s+ against ~1.2 s warm). */
 let lastJudgeAt = 0
-type Judged = { judgment: Judgment; ms: number; stateMs: number; repo: string }
+type Judged = { judgment: Judgment; ms: number; stateMs: number; repo: string; spend: Tally }
 /**
  * The draft judged while it was being typed. A prompt submitted with the same text takes this
  * verdict instead of starting a judge of its own, so the judge's latency hides in typing time.
@@ -79,7 +82,15 @@ function blankEntry(id: string, prompt: string, now: number): Entry {
     steps: [],
     outcome: null,
     isMissed: false,
+    judgeSpend: NO_SPEND,
+    workerSpend: NO_SPEND,
   }
+}
+
+/** Adds one call's tokens and dollars to the session's spend. */
+async function addSpend($: EngineInterface, spend: Tally): Promise<void> {
+  if (spend.input + spend.output + spend.cacheRead + spend.cacheWrite5m + spend.cacheWrite1h === 0) return
+  await update($, sidekick, s => ({ ...s, spend: addTally(s.spend, spend) }))
 }
 
 async function addEntry($: EngineInterface, entry: Entry): Promise<void> {
@@ -116,6 +127,7 @@ async function judge($: EngineInterface, text: string, budgetMs: number | null =
   const timedOut: Judgment = { verdict: 'unclear', task: '', resources: [], reason: 'judge timed out' }
   let repo = cwd
   let stateMs = 0
+  let spent: Tally = NO_SPEND
   // Whichever settles first ends the other: an answer cancels the timer, a timeout the call.
   const stop = new AbortController()
   const asked = (async (): Promise<Judgment> => {
@@ -138,6 +150,8 @@ async function judge($: EngineInterface, text: string, budgetMs: number | null =
       { signal: stop.signal },
     )
     await state
+    spent = tallyOf(judgeModel, reply.usage)
+    await addSpend($, spent)
     if (!reply.isAnswered) return { verdict: 'unclear', task: '', resources: [], reason: `judge: ${reply.reason}` }
     return parseJudgment(reply.text, text)
   })().catch((): Judgment => ({ verdict: 'unclear', task: '', resources: [], reason: 'judge failed' }))
@@ -151,7 +165,7 @@ async function judge($: EngineInterface, text: string, budgetMs: number | null =
         )
   const judgment = await Promise.race([asked, timer])
   stop.abort()
-  return { judgment, ms: (await $.clock.now()) - started, stateMs, repo }
+  return { judgment, ms: (await $.clock.now()) - started, stateMs, repo, spend: spent }
 }
 
 /**
@@ -169,6 +183,7 @@ async function verdictFor($: EngineInterface, text: string): Promise<Judged> {
     ms: JUDGE_TIMEOUT_MS,
     stateMs: 0,
     repo: cwd,
+    spend: NO_SPEND,
   }
   const timer = $.clock.sleep(JUDGE_TIMEOUT_MS, { signal: stop.signal }).then(
     () => timedOut,
@@ -196,7 +211,8 @@ async function warm($: EngineInterface): Promise<void> {
   const now = await $.clock.now()
   if (now - lastJudgeAt < WARM_AFTER_MS) return
   lastJudgeAt = now
-  await $.model.complete({ model: judgeModel, prompt: 'Reply with: ok', maxTokens: 1 }).catch(() => undefined)
+  const reply = await $.model.complete({ model: judgeModel, prompt: 'Reply with: ok', maxTokens: 1 }).catch(() => undefined)
+  if (reply !== undefined) await addSpend($, tallyOf(judgeModel, reply.usage))
 }
 
 /** Starts every queued assist whose locks are free, oldest first; when nothing is left, releases held prompts. */
@@ -259,7 +275,8 @@ async function finish($: EngineInterface, id: string, outcome: Outcome): Promise
     },
   }))
   const seconds = Math.max(1, Math.round((now - (entry.startedAt || entry.createdAt)) / 1000))
-  $.ui.log(chatLine(outcome, workerModel, seconds))
+  const after = (await read($, sidekick)).entries.find(x => x.id === id)
+  $.ui.log(chatLine(outcome, workerModel, seconds, (after?.judgeSpend.usd ?? 0) + (after?.workerSpend.usd ?? 0)))
   await deliverNote($, handoffNote(entry.prompt, outcome, workerModel))
   await tell($, status === 'done' ? `✓ ${outcome.summary}` : `⚠ ${outcome.summary} — open /sidekick to hand it to main`)
   await pump($)
@@ -272,6 +289,8 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
   await patchEntry($, id, () => ({ startedAt }))
   let isStopped = false
   let result: { text: string; isError: boolean } | null = null
+  // A running assist moves the clock once a second, so the pane's spinner and timers redraw.
+  const ticker = $.clock.every(1_000, () => void update($, sidekick, s => ({ ...s, tick: s.tick + 1 })).catch(() => {}))
   const stream = $.process.spawn({
     argv: workerArgv(workerModel, guardPath),
     cwd,
@@ -298,6 +317,11 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
           await patchEntry($, id, x => ({ steps: [...x.steps, step].slice(-MAX_STEPS) }))
         } else if (event.kind === 'result') {
           result = { text: event.text, isError: event.isError }
+          const priced = tallyOf(workerModel, event.usage)
+          // An unpriced model still has Claude Code's own figure for the run.
+          const workerSpend = priced.usd === 0 && event.costUsd > 0 ? { ...priced, usd: event.costUsd } : priced
+          await patchEntry($, id, () => ({ workerSpend }))
+          await addSpend($, workerSpend)
         }
       }
     }
@@ -305,6 +329,7 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
     // An unstartable or killed child ends here; the outcome below says which.
   }
   timer.cancel()
+  ticker.cancel()
   if (isStopped) {
     await finish($, id, {
       status: 'stopped',
@@ -371,19 +396,13 @@ function clearRestored($: EngineInterface, dropped: string): void {
   }
 }
 
-/** The status line says whether the sidekick is on, so a reload never leaves it in doubt. */
-function showMode($: EngineInterface, mode: Mode): void {
-  $.ui.status(mode === 'off' ? undefined : `on (${mode})`)
-}
-
 async function setMode($: EngineInterface, mode: Mode): Promise<void> {
   await update($, sidekick, s => ({ ...s, mode }))
-  showMode($, mode)
   if (mode !== 'off') void warm($)
 }
 
 async function shadowJudge($: EngineInterface, id: string, text: string): Promise<void> {
-  const { judgment, ms, stateMs } = await judge($, text, null)
+  const { judgment, ms, stateMs, spend } = await judge($, text, null)
   const would = judgment.verdict === 'mechanical'
   await patchEntry($, id, () => ({
     status: would ? 'shadow' : 'passed',
@@ -391,6 +410,7 @@ async function shadowJudge($: EngineInterface, id: string, text: string): Promis
     reason: `${would ? `would hand off: ${judgment.task}` : judgment.reason}${ms > JUDGE_TIMEOUT_MS ? ' · over budget' : ''} (git ${stateMs}ms)`,
     task: judgment.task,
     judgeMs: ms,
+    judgeSpend: spend,
   }))
 }
 
@@ -454,6 +474,8 @@ async function markMissed($: EngineInterface, id: string): Promise<void> {
   await $.store.set(key, [...prior, entry.prompt].slice(-200))
 }
 
+const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+
 const STATUS_MARK: Record<EntryStatus, string> = {
   judging: '…',
   queued: '◷',
@@ -499,8 +521,9 @@ export const register: Register = (on, options) => {
     cwd = e.cwd
     guardPath = `${$.plugin.root}/bin/sidekick-guard`
     // A reload keeps the session's mode; the new module's connection starts cold.
+    // 0.1.2 kept the mode in the status line; the band carries it now, so clear what it left.
+    $.ui.status(undefined)
     const { mode } = await read($, sidekick)
-    showMode($, mode)
     if (mode !== 'off') void warm($)
     await $.command.register({
       name: 'sidekick',
@@ -569,8 +592,8 @@ export const register: Register = (on, options) => {
     const id = newId(now)
     await addEntry($, blankEntry(id, e.text, now))
     draftTimer?.cancel()
-    const { judgment, ms, repo } = await verdictFor($, e.text)
-    await patchEntry($, id, () => ({ verdict: judgment.verdict, reason: judgment.reason, judgeMs: ms }))
+    const { judgment, ms, repo, spend } = await verdictFor($, e.text)
+    await patchEntry($, id, () => ({ verdict: judgment.verdict, reason: judgment.reason, judgeMs: ms, judgeSpend: spend }))
     if (judgment.verdict !== 'mechanical') {
       await patchEntry($, id, () => ({ status: 'passed' }))
       await update($, sidekick, s => ({ ...s, totals: { ...s.totals, passed: s.totals.passed + 1 } }))
@@ -585,113 +608,217 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
+    // Read the state before any early return, so every draw subscribes and a later write redraws it.
     const state = await read($, sidekick)
     const now = await $.clock.now()
-    const width = Math.max(20, e.props.bodyColumns ?? 60)
-    const room = Math.max(3, Math.floor(((e.viewport?.rows ?? 30) - 6) / 3))
-    const modeButton = (mode: Mode) => (
-      <Button key={`mode-${mode}`} label={state.mode === mode ? `[${mode}]` : mode} plain onPress={() => void setMode($, mode)} />
+    const width = Math.max(24, e.props.bodyColumns ?? 60)
+    const spin = SPINNER[state.tick % SPINNER.length] ?? '⟳'
+    const running = state.entries.filter(x => x.status === 'running')
+    const queued = state.entries.filter(x => x.status === 'queued')
+    const finished = state.entries.filter(x => x.status === 'done' || x.status === 'stopped' || x.status === 'failed')
+    const passed = state.entries.filter(x => x.status === 'passed' || x.status === 'shadow' || x.status === 'judging')
+    const room = Math.max(3, Math.floor(((e.viewport?.rows ?? 40) - 16) / 3))
+
+    const buttonsFor = (entry: Entry) => {
+      const isWatched = state.watching === entry.id
+      const list: { key: string; label: string; act: () => void }[] = []
+      // A prompt the sidekick took never entered the up-arrow history; `edit` is its recall.
+      const edit = { key: 'edit', label: 'edit', act: () => void $.prompt.fill({ text: entry.prompt, mode: 'replace' }) }
+      const watch = { key: 'watch', label: isWatched ? 'hide' : 'watch', act: () => void update($, sidekick, s => ({ ...s, watching: isWatched ? '' : entry.id })) }
+      const toMainButton = { key: 'main', label: 'give to main', act: () => void giveToMain($, entry.id) }
+      if (entry.status === 'running' || entry.status === 'queued') {
+        list.push(edit, watch, { key: 'stop', label: 'stop', act: () => void stopEntry($, entry.id) }, toMainButton)
+      } else if (entry.status === 'done' || entry.status === 'stopped' || entry.status === 'failed') {
+        list.push(edit, watch)
+        if (entry.status === 'done' && (entry.outcome?.shas.length ?? 0) > 0) list.push({ key: 'revert', label: 'revert', act: () => void revert($, entry.id) })
+        list.push(toMainButton)
+      } else if (entry.status === 'passed' && entry.verdict !== '' && !entry.isMissed) {
+        list.push({ key: 'missed', label: "should've been sidekick", act: () => void markMissed($, entry.id) })
+      }
+      if (list.length === 0) return null
+      return (
+        <Box key={`b-${entry.id}`}>
+          <Text>{'    '}</Text>
+          {list.flatMap((b, i) => [
+            ...(i > 0 ? [<Text key={`gap-${b.key}-${entry.id}`} dimColor> · </Text>] : []),
+            <Button key={`${b.key}-${entry.id}`} label={b.label} plain onPress={b.act} />,
+          ])}
+        </Box>
+      )
+    }
+
+    const watched = (entry: Entry) =>
+      state.watching !== entry.id ? null : (
+        <Box key={`w-${entry.id}`} flexDirection="column" marginLeft={4} borderStyle="single" borderColor="subtle" paddingX={1}>
+          <Text dimColor>{clip(`task: ${entry.task}`, width - 10)}</Text>
+          <Text color="suggestion">{clip(`judge   ${tallyLine(entry.judgeSpend)}`, width - 10)}</Text>
+          <Text color="suggestion">{clip(`worker  ${tallyLine(entry.workerSpend)}`, width - 10)}</Text>
+          {entry.steps.length === 0 && <Text dimColor>no commands yet</Text>}
+          {entry.steps.map((step, i) => (
+            <Text key={`s-${entry.id}-${i}`} color="subtle">
+              {clip(step, width - 10)}
+            </Text>
+          ))}
+          {entry.outcome !== null && entry.outcome.uncertain.length > 0 && (
+            <Text color="warning">{clip(`unsure: ${entry.outcome.uncertain.join('; ')}`, width - 10)}</Text>
+          )}
+          {entry.outcome !== null && entry.outcome.needsMain !== '' && (
+            <Text color="warning">{clip(`needs main: ${entry.outcome.needsMain}`, width - 10)}</Text>
+          )}
+        </Box>
+      )
+
+    const section = (key: string, title: string, color: string, count: number) => (
+      <Box key={`h-${key}`} marginTop={1}>
+        <Text bold color={color}>
+          {`▌ ${title}`}
+        </Text>
+        <Text dimColor>{` ${count}`}</Text>
+      </Box>
     )
+
+    const modeColor: Record<Mode, string> = { off: 'subtle', shadow: 'suggestion', auto: 'success' }
+    const cost = (entry: Entry) => entry.judgeSpend.usd + entry.workerSpend.usd
+
     return (
       <Box flexDirection="column">
-        <Box>
-          <Text bold>Sidekick </Text>
-          {modeButton('off')}
-          <Text> </Text>
-          {modeButton('shadow')}
-          <Text> </Text>
-          {modeButton('auto')}
+        <Box flexDirection="column" borderStyle="round" borderColor={modeColor[state.mode]} paddingX={1}>
+          <Box>
+            <Text bold color="claude">
+              ◆ SIDEKICK{'  '}
+            </Text>
+            {(['off', 'shadow', 'auto'] as const).flatMap((mode, i) => [
+              ...(i > 0 ? [<Text key={`mg-${mode}`}> </Text>] : []),
+              <Button
+                key={`mode-${mode}`}
+                label={state.mode === mode ? `● ${mode.toUpperCase()}` : `○ ${mode}`}
+                plain
+                dimColor={state.mode !== mode}
+                onPress={() => void setMode($, mode)}
+              />,
+            ])}
+          </Box>
+          <Box>
+            <Text color={running.length > 0 ? 'warning' : 'subtle'}>{`${running.length > 0 ? spin : '·'} ${running.length} running`}</Text>
+            <Text color={queued.length > 0 ? 'suggestion' : 'subtle'}>{`  ◷ ${queued.length} queued`}</Text>
+            <Text color={state.waiting.length > 0 ? 'warning' : 'subtle'}>{`  ⏸ ${state.waiting.length} waiting`}</Text>
+            <Text color="success">{`  ✓ ${state.totals.assists - state.totals.failed}`}</Text>
+            <Text color={state.totals.failed > 0 ? 'error' : 'subtle'}>{`  ✗ ${state.totals.failed}`}</Text>
+            <Text dimColor>{`  → ${state.totals.passed} to Claude`}</Text>
+          </Box>
+          <Text dimColor>
+            {clip(
+              `≈${usd(state.spend.usd)} this session · caching ${state.spend.savedUsd >= 0 ? 'saved' : 'cost'} ≈${usd(Math.abs(state.spend.savedUsd))} · API-equivalent · judge ${judgeModel} · worker ${workerModel}`,
+              width - 4,
+            )}
+          </Text>
         </Box>
-        <Text dimColor>
-          {clip(`${state.totals.assists} assists · ${state.totals.passed} to main · ${state.totals.failed} stopped/failed · judge ${judgeModel} · worker ${workerModel}`, width)}
-        </Text>
+
         {state.mode === 'off' && <Text dimColor>Off for this session. Pick shadow to watch the judge, auto to let it act.</Text>}
-        {state.waiting.map(held => (
-          <Box key={`w-${held.id}`}>
-            <Text color="warning">{clip(`◷ waiting for Claude: ${held.text}`, width - 12)} </Text>
-            <Button key={`send-${held.id}`} label="send now" onPress={() => void sendNow($, held.id)} />
-            <Text> · </Text>
-            <Button key={`edit-${held.id}`} label="edit" plain onPress={() => void $.prompt.fill({ text: held.text, mode: 'replace' })} />
+        {state.mode !== 'off' && state.entries.length === 0 && state.waiting.length === 0 && (
+          <Text dimColor>Nothing yet. Type a chore like "commit and push".</Text>
+        )}
+
+        {running.length > 0 && section('run', 'RUNNING', 'warning', running.length)}
+        {running.map(entry => (
+          <Box key={`e-${entry.id}`} flexDirection="column">
+            <Box>
+              <Text color="warning" bold>
+                {clip(`${spin} ${entry.prompt}`, width - 12)}
+              </Text>
+              <Text dimColor>{`  ${Math.max(0, Math.round((now - (entry.startedAt || entry.createdAt)) / 1000))}s`}</Text>
+            </Box>
+            <Text color="subtle">{clip(`    ↳ ${entry.steps.at(-1) ?? 'starting the worker…'}`, width)}</Text>
+            {buttonsFor(entry)}
+            {watched(entry)}
           </Box>
         ))}
-        {state.entries.length === 0 && state.mode !== 'off' && <Text dimColor>Nothing yet. Type a chore like "commit and push".</Text>}
-        {state.entries.slice(0, room).map(entry => {
-          const isWatched = state.watching === entry.id
-          const buttons: { key: string; label: string; act: () => void }[] = []
-          // A prompt the sidekick took never entered the up-arrow history; this is its recall.
-          const edit = { key: 'edit', label: 'edit', act: () => void $.prompt.fill({ text: entry.prompt, mode: 'replace' }) }
-          const watch = { key: 'watch', label: isWatched ? 'hide' : 'watch', act: () => void update($, sidekick, s => ({ ...s, watching: isWatched ? '' : entry.id })) }
-          if (entry.status === 'running' || entry.status === 'queued') {
-            buttons.push(edit, watch, { key: 'stop', label: 'stop', act: () => void stopEntry($, entry.id) })
-            buttons.push({ key: 'main', label: 'give to main', act: () => void giveToMain($, entry.id) })
-          } else if (entry.status === 'done' || entry.status === 'stopped' || entry.status === 'failed') {
-            buttons.push(edit, watch)
-            if (entry.status === 'done' && (entry.outcome?.shas.length ?? 0) > 0) buttons.push({ key: 'revert', label: 'revert', act: () => void revert($, entry.id) })
-            buttons.push({ key: 'main', label: 'give to main', act: () => void giveToMain($, entry.id) })
-          } else if (entry.status === 'passed' && entry.verdict !== '' && !entry.isMissed) {
-            buttons.push({ key: 'missed', label: "should've been sidekick", act: () => void markMissed($, entry.id) })
-          }
-          const color = entry.status === 'failed' || entry.status === 'stopped' ? 'error' : entry.status === 'done' ? 'success' : entry.status === 'running' ? 'warning' : undefined
+
+        {queued.length > 0 && section('queue', 'QUEUED', 'suggestion', queued.length)}
+        {queued.map(entry => (
+          <Box key={`e-${entry.id}`} flexDirection="column">
+            <Text color="suggestion">{clip(`◷ ${entry.prompt}`, width)}</Text>
+            {buttonsFor(entry)}
+          </Box>
+        ))}
+
+        {state.waiting.length > 0 && section('wait', 'WAITING FOR CLAUDE', 'warning', state.waiting.length)}
+        {state.waiting.map(held => (
+          <Box key={`wt-${held.id}`} flexDirection="column">
+            <Text color="warning">{clip(`⏸ ${held.text}`, width)}</Text>
+            <Box>
+              <Text>{'    '}</Text>
+              <Button key={`send-${held.id}`} label="send now" plain onPress={() => void sendNow($, held.id)} />
+              <Text dimColor> · </Text>
+              <Button key={`edit-${held.id}`} label="edit" plain onPress={() => void $.prompt.fill({ text: held.text, mode: 'replace' })} />
+            </Box>
+          </Box>
+        ))}
+
+        {finished.length > 0 && section('done', 'DONE', 'success', finished.length)}
+        {finished.slice(0, room).map(entry => {
+          const isOk = entry.status === 'done'
+          const seconds = Math.max(1, Math.round((entry.endedAt - (entry.startedAt || entry.createdAt)) / 1000))
           return (
             <Box key={`e-${entry.id}`} flexDirection="column">
-              <Text color={color} dimColor={entry.status === 'passed' || entry.status === 'shadow'}>
-                {clip(`${STATUS_MARK[entry.status]} ${entry.prompt}`, width)}
-              </Text>
-              <Text dimColor>{clip(`  ${entryDetail(entry, now)}`, width)}</Text>
-              {buttons.length > 0 && (
-                <Box>
-                  <Text>  </Text>
-                  {buttons.flatMap((b, i) => [
-                    ...(i > 0 ? [<Text key={`gap-${b.key}-${entry.id}`}> · </Text>] : []),
-                    <Button key={`${b.key}-${entry.id}`} label={b.label} plain onPress={b.act} />,
-                  ])}
-                </Box>
-              )}
-              {isWatched && (
-                <Box flexDirection="column">
-                  <Text dimColor>{clip(`  task: ${entry.task}`, width)}</Text>
-                  {entry.steps.map((step, i) => (
-                    <Text key={`s-${entry.id}-${i}`} dimColor>
-                      {clip(`  ${step}`, width)}
-                    </Text>
-                  ))}
-                  {entry.outcome !== null && entry.outcome.uncertain.length > 0 && (
-                    <Text color="warning">{clip(`  unsure: ${entry.outcome.uncertain.join('; ')}`, width)}</Text>
-                  )}
-                  {entry.outcome !== null && entry.outcome.needsMain !== '' && (
-                    <Text color="warning">{clip(`  needs main: ${entry.outcome.needsMain}`, width)}</Text>
-                  )}
-                </Box>
-              )}
+              <Box>
+                <Text color={isOk ? 'success' : 'error'}>{clip(`${STATUS_MARK[entry.status]} ${entry.prompt}`, width - 22)}</Text>
+                <Text dimColor>{`  ${seconds}s · ≈${usd(cost(entry))}`}</Text>
+              </Box>
+              <Text dimColor>{clip(`    ${entry.outcome?.summary ?? ''}`, width)}</Text>
+              {buttonsFor(entry)}
+              {watched(entry)}
             </Box>
           )
         })}
+
+        {passed.length > 0 && section('pass', 'TO CLAUDE', 'subtle', passed.length)}
+        {passed.slice(0, room).map(entry => (
+          <Box key={`e-${entry.id}`} flexDirection="column">
+            <Text dimColor>{clip(`${STATUS_MARK[entry.status]} ${entry.prompt}`, width)}</Text>
+            <Text dimColor>{clip(`    ${entryDetail(entry, now)}`, width)}</Text>
+            {buttonsFor(entry)}
+          </Box>
+        ))}
       </Box>
     )
   })
 
+  // The band says the sidekick is on and what it is doing; it stacks above any other band.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (isOff || e.props.hasSurvey) return next(e)
     const state = await read($, sidekick)
     if (state.mode === 'off') return next(e)
-    const running = state.entries.filter(x => x.status === 'running')
-    const queued = state.entries.filter(x => x.status === 'queued').length
-    if (running.length === 0 && queued === 0 && state.waiting.length === 0) return next(e)
+    const below = await next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     const width = e.props.bodyColumns ?? 80
+    const spin = SPINNER[state.tick % SPINNER.length] ?? '⟳'
+    const running = state.entries.filter(x => x.status === 'running')
+    const queued = state.entries.filter(x => x.status === 'queued').length
     const lead = running[0]
-    const parts = [
-      lead !== undefined ? `⟳ sidekick: ${lead.task}${lead.steps.length > 0 ? ` · ${lead.steps.at(-1)}` : ''}` : '◷ sidekick',
-      running.length > 1 ? `+${running.length - 1} running` : '',
-      queued > 0 ? `${queued} queued` : '',
-      state.waiting.length > 0 ? `${state.waiting.length} waiting for Claude` : '',
-    ].filter(part => part !== '')
+    const activity =
+      lead !== undefined
+        ? `${spin} ${lead.prompt}${lead.steps.length > 0 ? ` · ${lead.steps.at(-1)}` : ''}${running.length > 1 ? ` +${running.length - 1}` : ''}`
+        : 'idle'
+    const tail = [queued > 0 ? `◷ ${queued} queued` : '', state.waiting.length > 0 ? `⏸ ${state.waiting.length} waiting` : '', `${state.totals.assists} ${state.totals.assists === 1 ? 'assist' : 'assists'}`, `≈${usd(state.spend.usd)}`]
+      .filter(part => part !== '')
+      .join(' · ')
+    const room = Math.max(10, width - tail.length - 30)
     return (
-      <Box>
-        <Text key="line" color="warning">
-          {clip(parts.join(' · '), Math.max(10, width - 10))}{' '}
-        </Text>
-        <Button key="open" label="Open" onPress={() => void $.ui.open({ id: PANE, title: 'Sidekick' })} />
+      <Box flexDirection="column">
+        <Box key="sidekick-band">
+          <Text bold color="claude">
+            ◆ sidekick{' '}
+          </Text>
+          <Text bold inverse color={state.mode === 'auto' ? 'success' : 'suggestion'}>
+            {` ${state.mode.toUpperCase()} `}
+          </Text>
+          <Text dimColor> │ </Text>
+          <Text color={lead !== undefined ? 'warning' : 'subtle'}>{clip(activity, room)}</Text>
+          <Text dimColor>{` │ ${tail} `}</Text>
+          <Button key="open" label="Open" onPress={() => void $.ui.open({ id: PANE, title: 'Sidekick' })} />
+        </Box>
+        {below}
       </Box>
     )
   })

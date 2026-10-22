@@ -31,15 +31,29 @@ Everything else reaches the main session untouched.
     /sidekick off
     /sidekick           open the pane
 
-The pane lists every judgment and assist, with `edit`, `watch`, `stop`, `revert`,
-`give to main` and `should've been sidekick` (which records the miss for tuning).
+The pane is laid out by state, with a header card that shows the mode (click to switch) and the
+session's counts and spend, then **RUNNING** (a live spinner, elapsed time and the command the
+worker is on), **QUEUED**, **WAITING FOR CLAUDE**, **DONE** (time and cost per assist) and
+**TO CLAUDE** (what the judge passed on, and why). Each entry has `edit`, `watch`, `stop`,
+`revert`, `give to main` or `should've been sidekick` as fits; `watch` opens the commands the
+worker ran and its token and cost breakdown.
+
+While the sidekick is on, a band above the prompt shows the mode, what is running, the queue and
+the session's spend, and stacks above any other mod's band. A message it judges and passes to
+Claude gets a dim `→ to Claude: <reason>` line, so a pass is never mistaken for a sidekick that
+has gone. A notification arrives when an assist finishes or needs you.
 
 A message the sidekick takes is dropped before it reaches the main session, so it shows in the
 transcript as `❯ <your words> → sidekick (…)` but is **not** in the up-arrow prompt history (the
-mod API has no way to add to it). Use `edit` in the pane to put it back in the prompt box. A band above the prompt shows
-what is running, and a notification arrives when an assist finishes or needs you. The status line
-shows `sidekick: on (auto)` while it is on, and a message it judges and passes to Claude gets a
-dim `→ to Claude: <reason>` line, so a pass is never mistaken for a sidekick that has gone.
+mod API has no way to add to it). Use `edit` in the pane to put it back in the prompt box.
+
+### Cost
+
+Every judge call (draft judging and warm-ups included) and every worker run is priced at
+first-party API rates, as an **API-equivalent estimate**: on a subscription nothing is billed per
+token. Prompt caching is priced as the API prices it, with cache reads at 0.1x input and cache
+writes at 1.25x (5-minute) or 2x (1-hour), and the pane says what caching saved against sending
+every token uncached. The worker's figure matches Claude Code's own `costUSD` for the run.
 
 ## Options (`/config`)
 

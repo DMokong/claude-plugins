@@ -57,6 +57,8 @@ test('the worker runs lean, locked down and guarded', async () => {
   expect(argv[argv.indexOf('--permission-mode') + 1]).toBe('dontAsk')
   expect(argv[argv.indexOf('--setting-sources') + 1]).toBe('')
   expect(argv).toContain('Bash(git reset --hard:*)')
+  // Read-only helpers, so `cd repo && git ...` or `git log | head` is not refused whole.
+  for (const helper of ['Bash(cd:*)', 'Bash(head:*)', 'Bash(wc:*)']) expect(argv).toContain(helper)
   expect(argv[argv.indexOf('--settings') + 1]).toContain('/p/bin/sidekick-guard')
 })
 
@@ -87,6 +89,7 @@ test('an outcome is validated; prose still reports something', async () => {
 test('the chat line and the handoff note say what happened', async () => {
   const outcome = parseOutcome('{"status":"done","summary":"Committed 3f2a91c and pushed","shas":["3f2a91c"],"changed":["docs/a.md"]}', false)
   expect(chatLine(outcome, 'haiku', 11)).toBe('✓ Committed 3f2a91c and pushed · haiku · 11s')
+  expect(chatLine(outcome, 'haiku', 11, 0.0042)).toBe('✓ Committed 3f2a91c and pushed · haiku · 11s · ≈$0.0042')
   const note = handoffNote('commit and push', outcome, 'haiku')
   expect(note).toContain('"commit and push"')
   expect(note).toContain('SHAs: 3f2a91c')

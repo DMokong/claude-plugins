@@ -36,7 +36,7 @@ updates the registered source.
 | [`herdr-jutsu`](plugins/herdr-jutsu) | 0.5.1 | this repo | Raise an isolated crew inside Herdr — brief once, wait on a literal pane id, pull bounded results, handle blocked members, and hand long jobs to a fresh session. |
 | [`bd-issue-band`](plugins/bd-issue-band) | 0.2.1 | this repo | A Claude Code mod: a band above the prompt showing the bd (beads) issue this session holds and how long since its last comment. Dormant where no bd tracker resolves. |
 | [`crew-pane`](plugins/crew-pane) | 0.2.0 | this repo | A Claude Code mod: a status line and `/crew` pane for the crew a session raised inside Herdr, and the stream it conducts. Read-only. |
-| [`sidekick`](plugins/sidekick) | 0.1.2 | this repo | A Claude Code mod: per session, a cheap judge reads each message you type and hands mechanical chores (git, bd) to a lean worker session, so the main session never spends a turn on them. |
+| [`sidekick`](plugins/sidekick) | 0.2.0 | this repo | A Claude Code mod: per session, a cheap judge reads each message you type and hands mechanical chores (git, bd) to a lean worker session, so the main session never spends a turn on them. |
 | `speculator` | 2.21.3 | [DMokong/speculator](https://github.com/DMokong/speculator) | Spec-quality scoring and a 7-gate pipeline (4 required, 3 opt-in) with LLM-as-judge evaluation, worktree isolation, and beads tracking. Includes `asbuilt-quiz`. |
 | `lego-plan-builder` | 0.1.0 | [DMokong/lego-plan-builder](https://github.com/DMokong/lego-plan-builder) | Official-manual-style LEGO build instructions from an idea or image, with a deterministic physics/legality pipeline and a printable booklet. |
 
