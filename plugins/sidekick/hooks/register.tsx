@@ -4,6 +4,7 @@ import type { EngineInterface, PromptSubmitInput, PromptSubmitResult, Register }
 import { JUDGE_SYSTEM, canStart, judgePrompt, lockKeys, parseJudgment, precheck } from './lib/judge'
 import type { Judgment } from './lib/judge'
 import { NO_SPEND, addTally, tallyLine, tallyOf, usd } from './lib/cost'
+import { migrate } from './lib/state'
 import {
   chatLine,
   giveToMainPrompt,
@@ -28,6 +29,16 @@ export const EMPTY: SidekickState = {
 }
 
 const sidekick = atom({ plugin: 'sidekick', key: 'sidekick' } as const, EMPTY)
+
+/** The session's state, upgraded from whatever version wrote it. */
+async function load($: EngineInterface): Promise<SidekickState> {
+  return migrate(await read($, sidekick), EMPTY)
+}
+
+/** Writes the session's state through `fn`, which always sees it upgraded. */
+async function change($: EngineInterface, fn: (state: SidekickState) => SidekickState): Promise<void> {
+  await update($, sidekick, state => fn(migrate(state, EMPTY)))
+}
 
 const PANE = 'sidekick'
 // The agreed ceiling is 2 s on any message; this leaves room for the hook around the call.
@@ -90,15 +101,15 @@ function blankEntry(id: string, prompt: string, now: number): Entry {
 /** Adds one call's tokens and dollars to the session's spend. */
 async function addSpend($: EngineInterface, spend: Tally): Promise<void> {
   if (spend.input + spend.output + spend.cacheRead + spend.cacheWrite5m + spend.cacheWrite1h === 0) return
-  await update($, sidekick, s => ({ ...s, spend: addTally(s.spend, spend) }))
+  await change($, s => ({ ...s, spend: addTally(s.spend, spend) }))
 }
 
 async function addEntry($: EngineInterface, entry: Entry): Promise<void> {
-  await update($, sidekick, s => ({ ...s, entries: [entry, ...s.entries].slice(0, MAX_ENTRIES) }))
+  await change($, s => ({ ...s, entries: [entry, ...s.entries].slice(0, MAX_ENTRIES) }))
 }
 
 async function patchEntry($: EngineInterface, id: string, patch: (entry: Entry) => Partial<Entry>): Promise<void> {
-  await update($, sidekick, s => ({ ...s, entries: s.entries.map(x => (x.id === id ? { ...x, ...patch(x) } : x)) }))
+  await change($, s => ({ ...s, entries: s.entries.map(x => (x.id === id ? { ...x, ...patch(x) } : x)) }))
 }
 
 const isActive = (entry: Entry): boolean => ACTIVE.includes(entry.status)
@@ -217,7 +228,7 @@ async function warm($: EngineInterface): Promise<void> {
 
 /** Starts every queued assist whose locks are free, oldest first; when nothing is left, releases held prompts. */
 async function pump($: EngineInterface): Promise<void> {
-  const state = await read($, sidekick)
+  const state = await load($)
   const held = state.entries.filter(x => x.status === 'running').map(x => x.locks)
   const queued = state.entries.filter(x => x.status === 'queued').reverse()
   for (const entry of queued) {
@@ -226,15 +237,15 @@ async function pump($: EngineInterface): Promise<void> {
     await patchEntry($, entry.id, () => ({ status: 'running' }))
     void runAssist($, entry.id)
   }
-  const after = await read($, sidekick)
+  const after = await load($)
   if (!after.entries.some(x => x.status === 'running' || x.status === 'queued')) await releaseWaiting($)
 }
 
 /** Sends the prompts held for the main session, in the order they were typed. */
 async function releaseWaiting($: EngineInterface): Promise<void> {
-  const { waiting } = await read($, sidekick)
+  const { waiting } = await load($)
   if (waiting.length === 0) return
-  await update($, sidekick, s => ({ ...s, waiting: [] }))
+  await change($, s => ({ ...s, waiting: [] }))
   for (const held of waiting) await $.prompt.submit({ text: held.text, asUser: true })
 }
 
@@ -246,7 +257,7 @@ async function deliverNote($: EngineInterface, note: string): Promise<void> {
   } catch {
     // Kept below for the next prompt.
   }
-  await update($, sidekick, s => ({ ...s, notes: [...s.notes, note] }))
+  await change($, s => ({ ...s, notes: [...s.notes, note] }))
 }
 
 async function tell($: EngineInterface, text: string): Promise<void> {
@@ -262,11 +273,11 @@ async function tell($: EngineInterface, text: string): Promise<void> {
 async function finish($: EngineInterface, id: string, outcome: Outcome): Promise<void> {
   workers.delete(id)
   const now = await $.clock.now()
-  const entry = (await read($, sidekick)).entries.find(x => x.id === id)
+  const entry = (await load($)).entries.find(x => x.id === id)
   if (entry === undefined) return
   const status: EntryStatus = outcome.status === 'done' || outcome.status === 'partial' ? 'done' : outcome.status
   await patchEntry($, id, () => ({ status, outcome, endedAt: now }))
-  await update($, sidekick, s => ({
+  await change($, s => ({
     ...s,
     totals: {
       ...s.totals,
@@ -275,7 +286,7 @@ async function finish($: EngineInterface, id: string, outcome: Outcome): Promise
     },
   }))
   const seconds = Math.max(1, Math.round((now - (entry.startedAt || entry.createdAt)) / 1000))
-  const after = (await read($, sidekick)).entries.find(x => x.id === id)
+  const after = (await load($)).entries.find(x => x.id === id)
   $.ui.log(chatLine(outcome, workerModel, seconds, (after?.judgeSpend.usd ?? 0) + (after?.workerSpend.usd ?? 0)))
   await deliverNote($, handoffNote(entry.prompt, outcome, workerModel))
   await tell($, status === 'done' ? `✓ ${outcome.summary}` : `⚠ ${outcome.summary} — open /sidekick to hand it to main`)
@@ -283,14 +294,14 @@ async function finish($: EngineInterface, id: string, outcome: Outcome): Promise
 }
 
 async function runAssist($: EngineInterface, id: string): Promise<void> {
-  const entry = (await read($, sidekick)).entries.find(x => x.id === id)
+  const entry = (await load($)).entries.find(x => x.id === id)
   if (entry === undefined) return
   const startedAt = await $.clock.now()
   await patchEntry($, id, () => ({ startedAt }))
   let isStopped = false
   let result: { text: string; isError: boolean } | null = null
   // A running assist moves the clock once a second, so the pane's spinner and timers redraw.
-  const ticker = $.clock.every(1_000, () => void update($, sidekick, s => ({ ...s, tick: s.tick + 1 })).catch(() => {}))
+  const ticker = $.clock.every(1_000, () => void change($, s => ({ ...s, tick: s.tick + 1 })).catch(() => {}))
   const stream = $.process.spawn({
     argv: workerArgv(workerModel, guardPath),
     cwd,
@@ -370,9 +381,9 @@ async function enqueue($: EngineInterface, id: string, judgment: Judgment, repo:
 
 /** Lets a prompt through to the main session, carrying any handoff notes it hasn't read yet. */
 async function toMain($: EngineInterface, e: PromptSubmitInput, next: (e: PromptSubmitInput) => Promise<PromptSubmitResult>): Promise<PromptSubmitResult> {
-  const { notes } = await read($, sidekick)
+  const { notes } = await load($)
   if (notes.length === 0) return next(e)
-  await update($, sidekick, s => ({ ...s, notes: [] }))
+  await change($, s => ({ ...s, notes: [] }))
   return next({ ...e, context: [...(e.context ?? []), ...notes] })
 }
 
@@ -397,7 +408,7 @@ function clearRestored($: EngineInterface, dropped: string): void {
 }
 
 async function setMode($: EngineInterface, mode: Mode): Promise<void> {
-  await update($, sidekick, s => ({ ...s, mode }))
+  await change($, s => ({ ...s, mode }))
   if (mode !== 'off') void warm($)
 }
 
@@ -420,7 +431,7 @@ async function stopEntry($: EngineInterface, id: string): Promise<void> {
     live.stop()
     return
   }
-  const entry = (await read($, sidekick)).entries.find(x => x.id === id)
+  const entry = (await load($)).entries.find(x => x.id === id)
   if (entry?.status === 'queued') {
     const endedAt = await $.clock.now()
     await patchEntry($, id, () => ({ status: 'stopped', endedAt }))
@@ -429,14 +440,14 @@ async function stopEntry($: EngineInterface, id: string): Promise<void> {
 }
 
 async function giveToMain($: EngineInterface, id: string): Promise<void> {
-  const entry = (await read($, sidekick)).entries.find(x => x.id === id)
+  const entry = (await load($)).entries.find(x => x.id === id)
   if (entry === undefined) return
   if (isActive(entry)) await stopEntry($, id)
   await $.prompt.submit({ text: giveToMainPrompt(entry.prompt, entry.outcome, entry.steps), asUser: true })
 }
 
 async function revert($: EngineInterface, id: string): Promise<void> {
-  const entry = (await read($, sidekick)).entries.find(x => x.id === id)
+  const entry = (await load($)).entries.find(x => x.id === id)
   const shas = entry?.outcome?.shas ?? []
   if (entry === undefined || shas.length === 0) return
   const now = await $.clock.now()
@@ -457,16 +468,16 @@ async function revert($: EngineInterface, id: string): Promise<void> {
 }
 
 async function sendNow($: EngineInterface, waitingId: string): Promise<void> {
-  const { waiting } = await read($, sidekick)
+  const { waiting } = await load($)
   const held = waiting.find(w => w.id === waitingId)
   if (held === undefined) return
-  await update($, sidekick, s => ({ ...s, waiting: s.waiting.filter(w => w.id !== waitingId) }))
+  await change($, s => ({ ...s, waiting: s.waiting.filter(w => w.id !== waitingId) }))
   await $.prompt.submit({ text: held.text, asUser: true })
 }
 
 async function markMissed($: EngineInterface, id: string): Promise<void> {
   await patchEntry($, id, () => ({ isMissed: true }))
-  const entry = (await read($, sidekick)).entries.find(x => x.id === id)
+  const entry = (await load($)).entries.find(x => x.id === id)
   if (entry === undefined) return
   // Kept across sessions so the judge can be tuned from real misses.
   const key = 'missed'
@@ -521,9 +532,11 @@ export const register: Register = (on, options) => {
     cwd = e.cwd
     guardPath = `${$.plugin.root}/bin/sidekick-guard`
     // A reload keeps the session's mode; the new module's connection starts cold.
+    // Store the upgraded shape, so state written by an older version is current from here on.
+    await change($, state => state)
     // 0.1.2 kept the mode in the status line; the band carries it now, so clear what it left.
     $.ui.status(undefined)
-    const { mode } = await read($, sidekick)
+    const { mode } = await load($)
     if (mode !== 'off') void warm($)
     await $.command.register({
       name: 'sidekick',
@@ -536,7 +549,7 @@ export const register: Register = (on, options) => {
   // Typing is the cue a prompt is coming: judge the draft while the person types, not after.
   on('prompt.edit', async ($, e, next) => {
     const box = await next(e)
-    if (isOff || (await read($, sidekick)).mode !== 'auto') return box
+    if (isOff || (await load($)).mode !== 'auto') return box
     if (e.text === '') void warm($)
     judgeDraftSoon($, box.text)
     return box
@@ -548,7 +561,7 @@ export const register: Register = (on, options) => {
     const asked: Mode | null = arg === 'auto' ? 'auto' : arg === 'off' ? 'off' : arg === 'on' || arg === 'shadow' ? 'shadow' : null
     if (arg !== '' && asked === null) return { text: 'Usage: /sidekick [auto|shadow|off]' }
     if (asked !== null) await setMode($, asked)
-    const { mode } = await read($, sidekick)
+    const { mode } = await load($)
     if (mode !== 'off') await $.ui.open({ id: PANE, title: 'Sidekick' })
     const what: Record<Mode, string> = {
       off: 'Sidekick is off for this session.',
@@ -560,7 +573,7 @@ export const register: Register = (on, options) => {
 
   on('prompt.submit', async ($, e, next) => {
     if (isOff) return next(e)
-    const state = await read($, sidekick)
+    const state = await load($)
     const isUsers = e.origin.kind === 'composer'
     if (state.mode === 'off' || !isUsers || e.command !== undefined || e.isMeta === true) return toMain($, e, next)
 
@@ -582,7 +595,7 @@ export const register: Register = (on, options) => {
     const holdForAssists = async (why: string): Promise<PromptSubmitResult> => {
       if (!isBusy || isMidTurn) return toMain($, e, next)
       const id = newId(now)
-      await update($, sidekick, s => ({ ...s, waiting: [...s.waiting, { id, text: e.text }] }))
+      await change($, s => ({ ...s, waiting: [...s.waiting, { id, text: e.text }] }))
       clearRestored($, e.text)
       return { drop: `❯ ${clip(e.text.replace(/\s+/g, ' '), 160)} · held for Claude until the sidekick finishes (/sidekick → send now)` }
     }
@@ -596,7 +609,7 @@ export const register: Register = (on, options) => {
     await patchEntry($, id, () => ({ verdict: judgment.verdict, reason: judgment.reason, judgeMs: ms, judgeSpend: spend }))
     if (judgment.verdict !== 'mechanical') {
       await patchEntry($, id, () => ({ status: 'passed' }))
-      await update($, sidekick, s => ({ ...s, totals: { ...s.totals, passed: s.totals.passed + 1 } }))
+      await change($, s => ({ ...s, totals: { ...s.totals, passed: s.totals.passed + 1 } }))
       // A pass is a decision too: say so, or a sidekick that passes looks like one that is gone.
       $.ui.log(`→ to Claude: ${judgment.reason} · judged in ${(ms / 1000).toFixed(1)}s`)
       return holdForAssists(judgment.reason)
@@ -609,7 +622,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     // Read the state before any early return, so every draw subscribes and a later write redraws it.
-    const state = await read($, sidekick)
+    const state = await load($)
     const now = await $.clock.now()
     const width = Math.max(24, e.props.bodyColumns ?? 60)
     const spin = SPINNER[state.tick % SPINNER.length] ?? '⟳'
@@ -624,7 +637,7 @@ export const register: Register = (on, options) => {
       const list: { key: string; label: string; act: () => void }[] = []
       // A prompt the sidekick took never entered the up-arrow history; `edit` is its recall.
       const edit = { key: 'edit', label: 'edit', act: () => void $.prompt.fill({ text: entry.prompt, mode: 'replace' }) }
-      const watch = { key: 'watch', label: isWatched ? 'hide' : 'watch', act: () => void update($, sidekick, s => ({ ...s, watching: isWatched ? '' : entry.id })) }
+      const watch = { key: 'watch', label: isWatched ? 'hide' : 'watch', act: () => void change($, s => ({ ...s, watching: isWatched ? '' : entry.id })) }
       const toMainButton = { key: 'main', label: 'give to main', act: () => void giveToMain($, entry.id) }
       if (entry.status === 'running' || entry.status === 'queued') {
         list.push(edit, watch, { key: 'stop', label: 'stop', act: () => void stopEntry($, entry.id) }, toMainButton)
@@ -787,7 +800,7 @@ export const register: Register = (on, options) => {
   // The band says the sidekick is on and what it is doing; it stacks above any other band.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (isOff || e.props.hasSurvey) return next(e)
-    const state = await read($, sidekick)
+    const state = await load($)
     if (state.mode === 'off') return next(e)
     const below = await next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
