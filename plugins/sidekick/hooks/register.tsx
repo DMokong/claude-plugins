@@ -57,6 +57,8 @@ let workerModel = 'haiku'
 let maxConcurrent = 1
 let cwd = ''
 let guardPath = ''
+/** The loaded version, from the plugin's own manifest; shown in the pane so a stale load is visible. */
+let version = ''
 let sequence = 0
 /** When the judge's connection was last used; a cold one blows the budget (measured: 1.8 s+ against ~1.2 s warm). */
 let lastJudgeAt = 0
@@ -531,6 +533,12 @@ export const register: Register = (on, options) => {
     if (isOff || !e.isInteractive) return next(e)
     cwd = e.cwd
     guardPath = `${$.plugin.root}/bin/sidekick-guard`
+    try {
+      const manifest = JSON.parse(String(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))) as { version?: unknown }
+      version = typeof manifest.version === 'string' ? manifest.version : ''
+    } catch {
+      version = ''
+    }
     // A reload keeps the session's mode; the new module's connection starts cold.
     // Store the upgraded shape, so state written by an older version is current from here on.
     await change($, state => state)
@@ -696,7 +704,8 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column">
         <Box flexDirection="column" borderStyle="round" borderColor={modeColor[state.mode]} paddingX={1}>
-          <Box>
+          <Box justifyContent="space-between">
+            <Box>
             <Text bold color="claude">
               ◆ SIDEKICK{'  '}
             </Text>
@@ -710,6 +719,8 @@ export const register: Register = (on, options) => {
                 onPress={() => void setMode($, mode)}
               />,
             ])}
+            </Box>
+            {version !== '' && <Text dimColor>{`v${version}`}</Text>}
           </Box>
           <Box>
             <Text color={running.length > 0 ? 'warning' : 'subtle'}>{`${running.length > 0 ? spin : '·'} ${running.length} running`}</Text>
