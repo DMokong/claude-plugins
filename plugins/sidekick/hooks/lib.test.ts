@@ -1,6 +1,8 @@
 import { test, expect } from 'claude-code/testing'
 
 import { canStart, lockKeys, parseJudgment, precheck, resourcesOf } from './lib/judge'
+import { migrate } from './lib/state'
+import { EMPTY } from './register'
 import { chatLine, handoffNote, parseOutcome, parseStreamLine, splitLines, workerArgv } from './lib/worker'
 
 test('precheck lets short imperative chores through to the judge', async () => {
@@ -94,4 +96,24 @@ test('the chat line and the handoff note say what happened', async () => {
   expect(note).toContain('"commit and push"')
   expect(note).toContain('SHAs: 3f2a91c')
   expect(note.length).toBeLessThanOrEqual(700)
+})
+
+test("state an older version wrote is upgraded, so new fields are never undefined", async () => {
+  // What 0.1.2 left in a session: no spend, no tick, entries without spend.
+  const old = {
+    mode: 'auto',
+    entries: [{ id: 'a', prompt: 'git status', status: 'done', verdict: 'mechanical', reason: '', judgeMs: 1, task: 'git status', locks: [], backend: 'haiku', createdAt: 1, startedAt: 1, endedAt: 2, steps: [], outcome: null, isMissed: false }],
+    waiting: [],
+    notes: [],
+    watching: '',
+    totals: { assists: 1, passed: 0, failed: 0 },
+  }
+  const state = migrate(old as never, EMPTY)
+  expect(state.mode).toBe('auto')
+  expect(state.spend.usd).toBe(0)
+  expect(state.tick).toBe(0)
+  expect(state.entries[0]?.judgeSpend.usd).toBe(0)
+  expect(state.entries[0]?.workerSpend.cacheRead).toBe(0)
+  expect(state.entries[0]?.prompt).toBe('git status')
+  expect(migrate(undefined, EMPTY)).toEqual(EMPTY)
 })
