@@ -31,8 +31,12 @@ Everything else reaches the main session untouched.
     /sidekick off
     /sidekick           open the pane
 
-The pane lists every judgment and assist, with `watch`, `stop`, `revert`, `give to main` and
-`should've been sidekick` (which records the miss for tuning). A band above the prompt shows
+The pane lists every judgment and assist, with `edit`, `watch`, `stop`, `revert`,
+`give to main` and `should've been sidekick` (which records the miss for tuning).
+
+A message the sidekick takes is dropped before it reaches the main session, so it shows in the
+transcript as `❯ <your words> → sidekick (…)` but is **not** in the up-arrow prompt history (the
+mod API has no way to add to it). Use `edit` in the pane to put it back in the prompt box. A band above the prompt shows
 what is running, and a notification arrives when an assist finishes or needs you.
 
 ## Options (`/config`)

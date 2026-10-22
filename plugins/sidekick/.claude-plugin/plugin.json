@@ -1,8 +1,10 @@
 {
   "name": "sidekick",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Per-session sidekick: a cheap judge reads each message you type and hands mechanical chores (git, bd) to a separate worker session, so the main session never spends a turn on them",
-  "author": { "name": "Dustin Cheng" },
+  "author": {
+    "name": "Dustin Cheng"
+  },
   "license": "MIT",
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -10,7 +12,10 @@
       "type": "string",
       "title": "Sidekick",
       "description": "Allow /sidekick in sessions (each session still starts off)",
-      "options": ["on", "off"],
+      "options": [
+        "on",
+        "off"
+      ],
       "default": "on"
     },
     "judgeModel": {
@@ -29,7 +34,12 @@
       "type": "string",
       "title": "Parallel assists (experimental)",
       "description": "How many assists may run at once when they touch different resources",
-      "options": ["1", "2", "3", "4"],
+      "options": [
+        "1",
+        "2",
+        "3",
+        "4"
+      ],
       "default": "1"
     }
   }

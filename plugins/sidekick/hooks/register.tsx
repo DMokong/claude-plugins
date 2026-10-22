@@ -553,7 +553,7 @@ export const register: Register = (on, options) => {
       const id = newId(now)
       await update($, sidekick, s => ({ ...s, waiting: [...s.waiting, { id, text: e.text }] }))
       clearRestored($, e.text)
-      return { drop: `held for Claude until the sidekick finishes (/sidekick → send now)` }
+      return { drop: `❯ ${clip(e.text.replace(/\s+/g, ' '), 160)} · held for Claude until the sidekick finishes (/sidekick → send now)` }
     }
     if (isMidTurn) return toMain($, e, next)
     if (!pre.isJudged) return holdForAssists(pre.why)
@@ -570,7 +570,7 @@ export const register: Register = (on, options) => {
     }
     void enqueue($, id, judgment, repo).catch(() => {})
     clearRestored($, e.text)
-    return { drop: `→ sidekick (${workerModel}), judged in ${(ms / 1000).toFixed(1)}s` }
+    return { drop: `❯ ${e.text} → sidekick (${workerModel}) · judged in ${(ms / 1000).toFixed(1)}s` }
   }).catch(($, e, next) => next(e)) // fail open: any error lets the prompt through as typed
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -600,18 +600,22 @@ export const register: Register = (on, options) => {
           <Box key={`w-${held.id}`}>
             <Text color="warning">{clip(`◷ waiting for Claude: ${held.text}`, width - 12)} </Text>
             <Button key={`send-${held.id}`} label="send now" onPress={() => void sendNow($, held.id)} />
+            <Text> · </Text>
+            <Button key={`edit-${held.id}`} label="edit" plain onPress={() => void $.prompt.fill({ text: held.text, mode: 'replace' })} />
           </Box>
         ))}
         {state.entries.length === 0 && state.mode !== 'off' && <Text dimColor>Nothing yet. Type a chore like "commit and push".</Text>}
         {state.entries.slice(0, room).map(entry => {
           const isWatched = state.watching === entry.id
           const buttons: { key: string; label: string; act: () => void }[] = []
+          // A prompt the sidekick took never entered the up-arrow history; this is its recall.
+          const edit = { key: 'edit', label: 'edit', act: () => void $.prompt.fill({ text: entry.prompt, mode: 'replace' }) }
           const watch = { key: 'watch', label: isWatched ? 'hide' : 'watch', act: () => void update($, sidekick, s => ({ ...s, watching: isWatched ? '' : entry.id })) }
           if (entry.status === 'running' || entry.status === 'queued') {
-            buttons.push(watch, { key: 'stop', label: 'stop', act: () => void stopEntry($, entry.id) })
+            buttons.push(edit, watch, { key: 'stop', label: 'stop', act: () => void stopEntry($, entry.id) })
             buttons.push({ key: 'main', label: 'give to main', act: () => void giveToMain($, entry.id) })
           } else if (entry.status === 'done' || entry.status === 'stopped' || entry.status === 'failed') {
-            buttons.push(watch)
+            buttons.push(edit, watch)
             if (entry.status === 'done' && (entry.outcome?.shas.length ?? 0) > 0) buttons.push({ key: 'revert', label: 'revert', act: () => void revert($, entry.id) })
             buttons.push({ key: 'main', label: 'give to main', act: () => void giveToMain($, entry.id) })
           } else if (entry.status === 'passed' && entry.verdict !== '' && !entry.isMissed) {

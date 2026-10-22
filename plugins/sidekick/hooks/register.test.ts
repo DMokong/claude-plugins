@@ -123,6 +123,8 @@ test('in auto, a mechanical chore is dropped from main, done by the worker, and 
 
   const result = await $.prompt.submit({ text: 'commit and push', ...TYPED })
   expect(result.drop).toContain('→ sidekick (haiku)')
+  // The person's own words stay in the transcript even though the main session never sees them.
+  expect(result.drop?.startsWith('❯ commit and push')).toBe(true)
   expect(seen.toMain).toEqual([])
 
   const s = await until($, x => x.entries[0]?.status === 'done')
@@ -181,6 +183,7 @@ test('a prompt for main waits while an assist runs, then is sent in order', asyn
   await until($, x => x.entries[0]?.status === 'running')
   const held = await $.prompt.submit({ text: 'why does the stage-2 doc mention codex twice?', ...TYPED })
   expect(held.drop).toContain('until the sidekick finishes')
+  expect(held.drop).toContain('❯ why does the stage-2 doc mention codex twice?')
   expect(seen.toMain).toEqual([])
   expect((await state($)).waiting.map(w => w.text)).toEqual(['why does the stage-2 doc mention codex twice?'])
 
@@ -212,6 +215,11 @@ test('prompts the mod did not get from the person are never judged', async ($, o
 
 test('the pane draws the assist with its buttons on every surface', async ($, on) => {
   world(on, { judge: MECHANICAL, worker: DONE })
+  const filled: string[] = []
+  on('prompt.fill', async (_$, e) => {
+    filled.push(e.text)
+    return { isFilled: true }
+  })
   await $.session.start(START)
   await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
   await $.prompt.submit({ text: 'commit and push', ...TYPED })
@@ -226,6 +234,10 @@ test('the pane draws the assist with its buttons on every surface', async ($, on
     } as never)
     expect(await ui.find({ type: 'Text', text: /✓ commit and push/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Committed 3f2a91c/ })).toBeDefined()
+    // The handed-off prompt is not in the up-arrow history, so the pane recalls it.
+    filled.length = 0
+    await ui.press({ key: `edit-${(await state($)).entries[0]?.id}` })
+    expect(filled).toEqual(['commit and push'])
     await ui.unmount()
   }
 })
@@ -235,7 +247,9 @@ test('a draft judged while typing answers the submit without a second judge call
   on('prompt.edit', async (_$, e) => ({ text: e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end), cursor: e.start + e.inputText.length }))
   await $.session.start(START)
   await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
-  await $.prompt.edit({ origin: { kind: 'composer' }, text: '', cursor: 0, start: 0, end: 0, inputText: 'commit and push' } as never)
+  // The kit raises prompt.edit at run time; its typings leave it off the prompt noun.
+  const typing = $.prompt as unknown as { edit: (e: unknown) => Promise<unknown> }
+  await typing.edit({ origin: { kind: 'composer' }, text: '', cursor: 0, start: 0, end: 0, inputText: 'commit and push' })
   await clock.advance(500)
   await clock.advance(10)
   expect(seen.judgments.length).toBe(1)
