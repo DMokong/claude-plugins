@@ -37,7 +37,9 @@ The pane lists every judgment and assist, with `edit`, `watch`, `stop`, `revert`
 A message the sidekick takes is dropped before it reaches the main session, so it shows in the
 transcript as `❯ <your words> → sidekick (…)` but is **not** in the up-arrow prompt history (the
 mod API has no way to add to it). Use `edit` in the pane to put it back in the prompt box. A band above the prompt shows
-what is running, and a notification arrives when an assist finishes or needs you.
+what is running, and a notification arrives when an assist finishes or needs you. The status line
+shows `sidekick: on (auto)` while it is on, and a message it judges and passes to Claude gets a
+dim `→ to Claude: <reason>` line, so a pass is never mistaken for a sidekick that has gone.
 
 ## Options (`/config`)
 

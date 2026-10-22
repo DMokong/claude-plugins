@@ -43,6 +43,7 @@ function world(on: On, w: World) {
     spawned: [] as string[][],
     judged: 0,
     judgments: [] as string[],
+    status: [] as (string | undefined)[],
     release: () => release(),
   }
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
@@ -58,6 +59,10 @@ function world(on: On, w: World) {
     return { value: { isSent: true as const, channel: 'terminal_bell' as const } }
   })
   on('ui.toast', async () => ({ value: undefined }))
+  on('ui.status', async (_$, e) => {
+    seen.status.push(e.text)
+    return { value: undefined }
+  })
   on('session.append', async (_$, e, next) => {
     const block = e.message.content[0]
     seen.appended.push(block !== undefined && 'text' in block ? String(block.text) : '')
@@ -146,6 +151,9 @@ test('in auto, a message that needs the session goes to main', async ($, on) => 
   expect(result.drop).toBeUndefined()
   expect(seen.toMain.map(p => p.text)).toEqual(['rename the judge function'])
   expect((await state($)).entries[0]?.status).toBe('passed')
+  // The pass is visible in the transcript, and the status line says the sidekick is on.
+  expect(seen.logs.some(line => line.startsWith('→ to Claude:'))).toBe(true)
+  expect(seen.status.at(-1)).toBe('on (auto)')
 })
 
 test('a slow judge fails open within the budget', async ($, on) => {
