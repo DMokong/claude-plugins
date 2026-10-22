@@ -16,6 +16,7 @@ export function migrate(raw: Partial<SidekickState> | undefined, empty: Sidekick
     totals: { ...empty.totals, ...(state.totals ?? {}) },
     spend: { ...NO_SPEND, ...(state.spend ?? {}) },
     tick: typeof state.tick === 'number' ? state.tick : 0,
+    isWarming: state.isWarming === true,
   }
 }
 

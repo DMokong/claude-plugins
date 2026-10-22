@@ -1,9 +1,9 @@
 import { test, expect } from 'claude-code/testing'
 
-import { canStart, lockKeys, parseJudgment, precheck, resourcesOf } from './lib/judge'
+import { canStart, judgeSystem, lockKeys, parseJudgment, precheck, resourcesOf } from './lib/judge'
 import { migrate } from './lib/state'
 import { EMPTY } from './register'
-import { chatLine, handoffNote, parseOutcome, parseStreamLine, splitLines, workerArgv } from './lib/worker'
+import { WORKER_SYSTEM, chatLine, handoffNote, parseOutcome, parseStreamLine, splitLines, workerArgv } from './lib/worker'
 
 test('precheck lets short imperative chores through to the judge', async () => {
   expect(precheck('commit and push', false)).toEqual({ isJudged: true })
@@ -55,7 +55,7 @@ test('one at a time by default; in parallel only on different resources', async 
 test('the worker runs lean, locked down and guarded', async () => {
   const argv = workerArgv('haiku', '/p/bin/sidekick-guard')
   expect(argv.slice(0, 4)).toEqual(['claude', '-p', '--model', 'haiku'])
-  for (const flag of ['--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence']) expect(argv).toContain(flag)
+  for (const flag of ['--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence', '--exclude-dynamic-system-prompt-sections']) expect(argv).toContain(flag)
   expect(argv[argv.indexOf('--permission-mode') + 1]).toBe('dontAsk')
   expect(argv[argv.indexOf('--setting-sources') + 1]).toBe('')
   expect(argv).toContain('Bash(git reset --hard:*)')
@@ -72,7 +72,11 @@ test('streamed output splits on lines across chunks', async () => {
 
 test('stream lines become steps and a result', async () => {
   const step = parseStreamLine(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', input: { command: 'git push' } }] } }))
-  expect(step).toEqual({ kind: 'step', text: '$ git push' })
+  expect(step).toEqual({ kind: 'step', text: '$ git push', id: '' })
+  const refused = parseStreamLine(
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', is_error: true, content: 'Permission to use Bash has been denied.' }] } }),
+  )
+  expect(refused).toEqual({ kind: 'refused', id: 't1' })
   const result = parseStreamLine(JSON.stringify({ type: 'result', result: '{"status":"done"}', is_error: false, total_cost_usd: 0.01 }))
   expect(result).toEqual({ kind: 'result', text: '{"status":"done"}', isError: false, costUsd: 0.01 })
   expect(parseStreamLine('not json')).toEqual({ kind: 'other' })
@@ -116,4 +120,21 @@ test("state an older version wrote is upgraded, so new fields are never undefine
   expect(state.entries[0]?.workerSpend.cacheRead).toBe(0)
   expect(state.entries[0]?.prompt).toBe('git status')
   expect(migrate(undefined, EMPTY)).toEqual(EMPTY)
+})
+
+test("the person's misses steer the judge: recent ones become precedents, capped", async () => {
+  expect(judgeSystem([])).not.toContain('corrected you')
+  const many = Array.from({ length: 15 }, (_, i) => `tidy branch ${i}`)
+  const system = judgeSystem(many)
+  expect(system).toContain('corrected you')
+  expect(system).toContain('- tidy branch 14')
+  expect(system).not.toContain('- tidy branch 4\n')
+  expect(system.match(/^- tidy branch/gm)?.length).toBe(10)
+})
+
+test('the worker is told to keep braces out of git commands, which the permission layer refuses', async () => {
+  expect(WORKER_SYSTEM).not.toMatch(/git rev-list @\{u\}/)
+  expect(WORKER_SYSTEM).toContain('Never write @{u}')
+  // Claude Code's own prompt says to branch first on the default branch; the worker must not.
+  expect(WORKER_SYSTEM).toContain('Work on the branch that is checked out')
 })

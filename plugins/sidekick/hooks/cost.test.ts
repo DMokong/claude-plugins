@@ -46,6 +46,8 @@ test('tallies add up, and read as one line', async () => {
   expect(sum.cacheRead).toBe(30136)
   expect(tallyLine(tallyOf('haiku', WORKER_USAGE))).toBe('in 4 · out 160 · cache read 15.1k · write 1.6k (1h) · ≈$0.0006 · caching saved ≈$0.0012')
   expect(usd(0.00055948)).toBe('$0.0006')
+  // A judge call stays visible rather than rounding to zero.
+  expect(usd(tallyOf('haiku', { input_tokens: 312, output_tokens: 1 }).usd)).toBe('$0.000032')
   expect(usd(0.0312)).toBe('$0.031')
   expect(usd(-0.025)).toBe('-$0.025')
   expect(tokens(15068)).toBe('15.1k')
