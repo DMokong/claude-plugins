@@ -50,6 +50,10 @@ function world(on: On, w: World) {
   on('command.register', async (_$, e) => ({ value: { command: e.name } }))
   on('env.get', async () => ({ value: undefined }))
   on('ui.open', async () => ({ value: { isPlaced: true } }))
+  on('fs.read', async (_$, e) => {
+    if (e.path.endsWith('/.claude-plugin/plugin.json')) return { value: JSON.stringify({ name: 'sidekick', version: '9.9.9' }) }
+    throw new Error(`unexpected read: ${e.path}`)
+  })
   on('ui.log', async (_$, e) => {
     seen.logs.push(e.text)
     return { value: undefined }
@@ -258,6 +262,8 @@ test('the pane draws the assist with its buttons on every surface', async ($, on
     } as never)
     expect(await ui.find({ type: 'Text', text: /✓ commit and push/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /▌ DONE/ })).toBeDefined()
+    // The loaded version, read from the manifest, sits quietly in the header.
+    expect((await ui.find({ type: 'Text', text: /^v9\.9\.9$/ }))?.text).toBe('v9.9.9')
     expect(await ui.find({ type: 'Text', text: /caching saved/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Committed 3f2a91c/ })).toBeDefined()
     // The handed-off prompt is not in the up-arrow history, so the pane recalls it.
