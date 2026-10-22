@@ -371,8 +371,14 @@ function clearRestored($: EngineInterface, dropped: string): void {
   }
 }
 
+/** The status line says whether the sidekick is on, so a reload never leaves it in doubt. */
+function showMode($: EngineInterface, mode: Mode): void {
+  $.ui.status(mode === 'off' ? undefined : `on (${mode})`)
+}
+
 async function setMode($: EngineInterface, mode: Mode): Promise<void> {
   await update($, sidekick, s => ({ ...s, mode }))
+  showMode($, mode)
   if (mode !== 'off') void warm($)
 }
 
@@ -493,7 +499,9 @@ export const register: Register = (on, options) => {
     cwd = e.cwd
     guardPath = `${$.plugin.root}/bin/sidekick-guard`
     // A reload keeps the session's mode; the new module's connection starts cold.
-    if ((await read($, sidekick)).mode !== 'off') void warm($)
+    const { mode } = await read($, sidekick)
+    showMode($, mode)
+    if (mode !== 'off') void warm($)
     await $.command.register({
       name: 'sidekick',
       description: 'Sidekick for this session: hand mechanical chores (git, bd) to a cheap worker',
@@ -566,6 +574,8 @@ export const register: Register = (on, options) => {
     if (judgment.verdict !== 'mechanical') {
       await patchEntry($, id, () => ({ status: 'passed' }))
       await update($, sidekick, s => ({ ...s, totals: { ...s.totals, passed: s.totals.passed + 1 } }))
+      // A pass is a decision too: say so, or a sidekick that passes looks like one that is gone.
+      $.ui.log(`→ to Claude: ${judgment.reason} · judged in ${(ms / 1000).toFixed(1)}s`)
       return holdForAssists(judgment.reason)
     }
     void enqueue($, id, judgment, repo).catch(() => {})
