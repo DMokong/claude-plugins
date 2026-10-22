@@ -1,0 +1,36 @@
+{
+  "name": "sidekick",
+  "version": "0.1.0",
+  "description": "Per-session sidekick: a cheap judge reads each message you type and hands mechanical chores (git, bd) to a separate worker session, so the main session never spends a turn on them",
+  "author": { "name": "Dustin Cheng" },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "enabled": {
+      "type": "string",
+      "title": "Sidekick",
+      "description": "Allow /sidekick in sessions (each session still starts off)",
+      "options": ["on", "off"],
+      "default": "on"
+    },
+    "judgeModel": {
+      "type": "string",
+      "title": "Judge model",
+      "description": "Model alias or id that decides whether a message is a mechanical chore",
+      "default": "haiku"
+    },
+    "workerModel": {
+      "type": "string",
+      "title": "Worker model",
+      "description": "Model alias or id the worker session runs on",
+      "default": "haiku"
+    },
+    "maxConcurrent": {
+      "type": "string",
+      "title": "Parallel assists (experimental)",
+      "description": "How many assists may run at once when they touch different resources",
+      "options": ["1", "2", "3", "4"],
+      "default": "1"
+    }
+  }
+}

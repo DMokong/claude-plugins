@@ -143,6 +143,23 @@
         "status",
         "claude-code-only"
       ]
+    },
+    {
+      "name": "sidekick",
+      "source": "./plugins/sidekick",
+      "description": "Per-session sidekick mod: a cheap judge reads each message you type and hands mechanical chores (git, bd) to a separate lean worker session, returning a one-line outcome and a handoff note. Never loses work: destructive git is blocked in the tool layer.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Dustin Cheng"
+      },
+      "license": "MIT",
+      "keywords": [
+        "mod",
+        "git",
+        "delegation",
+        "haiku",
+        "claude-code-only"
+      ]
     }
   ]
 }

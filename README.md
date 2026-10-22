@@ -1,6 +1,6 @@
 # dmokong-plugins
 
-A plugin marketplace for **Claude Code and Codex**. Seven plugins, five of which live in this
+A plugin marketplace for **Claude Code and Codex**. Eight plugins, six of which live in this
 repo and two of which are vendored from their own repos by URL.
 
 ```bash
@@ -36,6 +36,7 @@ updates the registered source.
 | [`herdr-jutsu`](plugins/herdr-jutsu) | 0.5.1 | this repo | Raise an isolated crew inside Herdr — brief once, wait on a literal pane id, pull bounded results, handle blocked members, and hand long jobs to a fresh session. |
 | [`bd-issue-band`](plugins/bd-issue-band) | 0.2.1 | this repo | A Claude Code mod: a band above the prompt showing the bd (beads) issue this session holds and how long since its last comment. Dormant where no bd tracker resolves. |
 | [`crew-pane`](plugins/crew-pane) | 0.2.0 | this repo | A Claude Code mod: a status line and `/crew` pane for the crew a session raised inside Herdr, and the stream it conducts. Read-only. |
+| [`sidekick`](plugins/sidekick) | 0.1.0 | this repo | A Claude Code mod: per session, a cheap judge reads each message you type and hands mechanical chores (git, bd) to a lean worker session, so the main session never spends a turn on them. |
 | `speculator` | 2.21.3 | [DMokong/speculator](https://github.com/DMokong/speculator) | Spec-quality scoring and a 7-gate pipeline (4 required, 3 opt-in) with LLM-as-judge evaluation, worktree isolation, and beads tracking. Includes `asbuilt-quiz`. |
 | `lego-plan-builder` | 0.1.0 | [DMokong/lego-plan-builder](https://github.com/DMokong/lego-plan-builder) | Official-manual-style LEGO build instructions from an idea or image, with a deterministic physics/legality pipeline and a printable booklet. |
 
@@ -51,6 +52,7 @@ session works, fable-conductor orchestrates *many* across the model ladder.
 | `herdr-jutsu` | full — a Claude parent can brief Claude members with SendMessage, hear a blocking question or early warning back the same way, and use a background literal-pane wait for a non-injecting wake | supported where user-approved Codex rules let the parent run the required literal herdr commands outside the sandbox; a Codex parent may block on the literal-pane wait or pull later, with no autonomous background wake |
 | `bd-issue-band` | full | not offered — a mod (function hooks) runs on Claude Code only, so it is not in the Codex catalog |
 | `crew-pane` | full | not offered — a mod (function hooks) runs on Claude Code only, so it is not in the Codex catalog |
+| `sidekick` | full | not offered — a mod (function hooks) runs on Claude Code only, so it is not in the Codex catalog |
 
 `speculator` and `lego-plan-builder` are vendored from their own repos and are not covered by this
 table — see their own repos for surface support.
@@ -64,6 +66,7 @@ table — see their own repos for surface support.
 | `herdr-jutsu` | running inside a Herdr pane (`HERDR_ENV=1`), Herdr >= 0.8.2, `jq`, `git`, bash 3.2+; from a Codex parent also your own Codex rules allowing the `herdr` commands (and the spawn script's path) to run outside the sandbox — the launcher never edits user rules, but does install a child-only project deny policy |
 | `bd-issue-band` | Claude Code with mod support (early access; tested on 2.1.291); the `bd` CLI on PATH in a project with a bd tracker — without one the mod stays dormant |
 | `crew-pane` | Claude Code with mod support (early access; tested on 2.1.291), running inside a Herdr pane (`HERDR_ENV=1`); reads the `herdr-jutsu` registry and `fable-conductor` stream ledgers when present |
+| `sidekick` | Claude Code with mod support (tested on 2.1.308); `claude` and `python3` on PATH |
 
 ## Layout
 
