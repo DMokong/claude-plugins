@@ -4,6 +4,7 @@
  * store, 35 days at most.
  */
 import { priceOf } from './cost'
+import type { Totals } from '../../types'
 
 export type HistoryRow = {
   at: number
@@ -68,19 +69,7 @@ export function markGiven(rows: readonly HistoryRow[], id: string): HistoryRow[]
   return rows.map(r => (r.id === id && (r.kind === 'chore' || r.kind === 'investigate') ? { ...r, status: 'given' as const, savedUsd: 0 } : r))
 }
 
-export type Totals = {
-  done: number
-  chores: number
-  looks: number
-  toClaude: number
-  drafts: number
-  costUsd: number
-  savedUsd: number
-  draftUsd: number
-  choreUsd: number
-  lookUsd: number
-  claudeUsd: number
-}
+export type { Totals }
 
 export const NO_TOTALS: Totals = { done: 0, chores: 0, looks: 0, toClaude: 0, drafts: 0, costUsd: 0, savedUsd: 0, draftUsd: 0, choreUsd: 0, lookUsd: 0, claudeUsd: 0 }
 

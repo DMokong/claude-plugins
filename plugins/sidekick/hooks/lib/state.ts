@@ -19,6 +19,12 @@ export function migrate(raw: Partial<SidekickState> | undefined, empty: Sidekick
     isWarming: state.isWarming === true,
     learned: toTaught(state.learned),
     instructions: Array.isArray(state.instructions) ? state.instructions : null,
+    settings: { ...empty.settings, ...(state.settings ?? {}) },
+    panelOpen: state.panelOpen === true,
+    today: { ...empty.today, ...(state.today ?? {}) },
+    tab: state.tab === 'session' || state.tab === 'week' ? state.tab : 'today',
+    view: state.view === 'learned' || state.view === 'job' ? state.view : 'dashboard',
+    jobId: typeof state.jobId === 'string' ? state.jobId : '',
   }
 }
 

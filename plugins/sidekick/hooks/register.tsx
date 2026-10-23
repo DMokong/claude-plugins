@@ -5,6 +5,8 @@ import { MAX_MISSES, canStart, holdsMain, judgePrompt, judgeSystem, lockKeys, pa
 import type { Judgment } from './lib/judge'
 import { NO_SPEND, addTally, tallyLine, tallyOf, tokens, usd } from './lib/cost'
 import { migrate, toTaught } from './lib/state'
+import { NO_TOTALS } from './lib/history'
+import { defaultsFrom } from './lib/settings'
 import { DUMP_KEEP, configRoot, dumpDir, dumpName, dumpText } from './lib/dump'
 import type { Call } from './lib/dump'
 import {
@@ -32,6 +34,12 @@ export const EMPTY: SidekickState = {
   isWarming: false,
   learned: [],
   instructions: null,
+  settings: defaultsFrom({}),
+  panelOpen: false,
+  today: NO_TOTALS,
+  tab: 'today',
+  view: 'dashboard',
+  jobId: '',
 }
 
 const sidekick = atom({ plugin: 'sidekick', key: 'sidekick' } as const, EMPTY)

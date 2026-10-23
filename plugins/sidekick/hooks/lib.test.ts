@@ -7,6 +7,7 @@ import { INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPro
 import { COLORS, barCells, bigText, bigWidth, dayLevels, spaced, tileMoney } from './lib/draw'
 import { appendRow, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals } from './lib/history'
 import type { HistoryRow } from './lib/history'
+import { JUDGE_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
 import { DUMP_KEEP, dumpDir, dumpName, dumpText, redact } from './lib/dump'
 
 test('precheck lets short imperative chores through to the judge', async () => {
@@ -466,4 +467,27 @@ test("SAVED is one main-model turn the sidekick took, less what it spent", async
   expect(near(savedFor('opus', undefined, 0.002), 0.024)).toBe(true)
   expect(near(savedFor('some-unknown-model', 40_000, 0.002), 0.024)).toBe(true)
   expect(savedFor('opus', undefined, 1)).toBe(0)
+})
+
+test('settings: the plugin options are the defaults, and only changed fields are stored', async () => {
+  const defaults = defaultsFrom({ judgeModel: 'haiku', workerModel: '', maxConcurrent: '9' })
+  expect(defaults).toEqual({ judgeModel: 'haiku', workerModel: 'haiku', investigations: true, draftJudging: true, notifications: true, maxConcurrent: 4 })
+  const live = effective(defaults, { draftJudging: false, judgeModel: 3, maxConcurrent: 2 })
+  expect(live.draftJudging).toBe(false)
+  expect(live.judgeModel).toBe('haiku')
+  expect(live.maxConcurrent).toBe(2)
+  expect(effective(defaults, 'junk')).toEqual(defaults)
+  expect(withChange({ notifications: false }, 'draftJudging', false)).toEqual({ notifications: false, draftJudging: false })
+  expect(withChange(undefined, 'workerModel', 'sonnet')).toEqual({ workerModel: 'sonnet' })
+  expect(chipsFor(JUDGE_CHIPS, 'claude-sonnet-5-5').length).toBe(3)
+  expect(chipsFor(JUDGE_CHIPS, 'sonnet').length).toBe(2)
+})
+
+test('state from 0.3.0 gets the panel, settings and today defaults', async () => {
+  const state = migrate({ mode: 'auto' } as never, EMPTY)
+  expect(state.panelOpen).toBe(false)
+  expect(state.tab).toBe('today')
+  expect(state.view).toBe('dashboard')
+  expect(state.settings).toEqual(EMPTY.settings)
+  expect(state.today.done).toBe(0)
 })
