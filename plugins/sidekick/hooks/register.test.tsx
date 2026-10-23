@@ -20,12 +20,14 @@ type World = {
   worker: string
   /** When set, the worker waits for this promise before it reports. */
   workerGate?: Promise<void>
+  /** What the store holds before the session starts. */
+  stored?: Record<string, unknown>
 }
 
 /** The engine beneath the mod: answers every call it makes and records what it did. */
 function world(on: On, w: World) {
   clock = mock.clock(on)
-  mock.store(on)
+  mock.store(on, w.stored)
   latest = undefined
   on('state.set', async (_$, e, next) => {
     if (e.plugin === 'sidekick' && e.key === 'sidekick') latest = e.value as SidekickState
@@ -366,14 +368,14 @@ test('learned corrections can be listed and forgotten, from the pane and the com
   }
   const run = (args: string) => $.command.run({ command: 'sidekick', args, origin: { kind: 'composer' }, presentation: 'inline' } as never) as Promise<{ text: string }>
   const listed = (await run('learned')).text
-  expect(listed).toContain('1. sync with origin')
-  expect(listed).toContain('2. tidy up merged branches')
+  expect(listed).toContain('1. [chore] sync with origin')
+  expect(listed).toContain('2. [chore] tidy up merged branches')
 
   const ui = await pane()
   expect(await ui.find({ type: 'Text', text: /LEARNED/ })).toBeDefined()
   await ui.press({ key: 'forget-tidy up merged branches' })
   await ui.unmount()
-  expect((await state($)).learned).toEqual(['sync with origin'])
+  expect((await state($)).learned).toEqual([{ text: 'sync with origin', verdict: 'mechanical' }])
   await $.prompt.submit({ text: 'prune branches', ...TYPED })
   expect(seen.systems.at(-1)).not.toContain('- tidy up merged branches')
   expect(seen.systems.at(-1)).toContain('- sync with origin')
@@ -383,6 +385,40 @@ test('learned corrections can be listed and forgotten, from the pane and the com
   await $.prompt.submit({ text: 'prune more branches', ...TYPED })
   expect(seen.systems.at(-1)).not.toContain('corrected you')
   expect((await run('forget 3')).text).toContain('Usage')
+})
+
+test('corrections a 0.2.x store kept as plain strings still list, steer and forget', async ($, on) => {
+  // The store as 0.2.x left it.
+  const seen = world(on, { judge: NEEDS_MAIN, worker: DONE, stored: { missed: ['prune merged branches'] } })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const run = (args: string) => $.command.run({ command: 'sidekick', args, origin: { kind: 'composer' }, presentation: 'inline' } as never) as Promise<{ text: string }>
+  expect((await run('learned')).text).toContain('1. [chore] prune merged branches')
+  await $.prompt.submit({ text: 'sync with origin', ...TYPED })
+  expect(seen.systems.at(-1)).toContain('- prune merged branches')
+  expect((await run('forget 1')).text).toContain('prune merged branches')
+  expect((await state($)).learned).toEqual([])
+})
+
+test("should've been sidekick on a message about a running service teaches investigate", async ($, on) => {
+  const seen = world(on, { judge: NEEDS_MAIN, worker: DONE })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'acme-bot logs look wrong', ...TYPED })
+  const ui = await $.ui.mount({
+    plugin: 'sidekick',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'sidekick',
+    props: { title: 'Sidekick', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  } as never)
+  await ui.press({ key: `missed-${(await state($)).entries[0]?.id}` })
+  expect(await ui.find({ type: 'Text', text: /\[investigate\] acme-bot logs look wrong/ })).toBeDefined()
+  await ui.unmount()
+  expect((await state($)).learned).toEqual([{ text: 'acme-bot logs look wrong', verdict: 'investigate' }])
+  await $.prompt.submit({ text: 'acme-bot health', ...TYPED })
+  const system = seen.systems.at(-1) ?? ''
+  expect(system.slice(system.indexOf('investigation:'))).toContain('- acme-bot logs look wrong')
 })
 
 test("the worker gets the instruction files the main session loaded, and the pane says so", async ($, on) => {

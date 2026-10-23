@@ -1,7 +1,7 @@
 import { test, expect } from 'claude-code/testing'
 
-import { canStart, judgeSystem, lockKeys, parseJudgment, precheck, resourcesOf } from './lib/judge'
-import { migrate } from './lib/state'
+import { JUDGE_SYSTEM, canStart, judgeSystem, lockKeys, parseJudgment, precheck, resourcesOf } from './lib/judge'
+import { migrate, toTaught } from './lib/state'
 import { EMPTY } from './register'
 import { WORKER_SYSTEM, chatLine, handoffNote, instructionsPrompt, parseOutcome, parseStreamLine, splitLines, workerArgv } from './lib/worker'
 
@@ -18,6 +18,47 @@ test('precheck sends reasoning, long, pasted and conversational prompts straight
   expect(precheck('commit this', true).isJudged).toBe(false)
   expect(precheck('commit what we just discussed', false).isJudged).toBe(false)
   expect(precheck('   ', false).isJudged).toBe(false)
+})
+
+test('precheck lets operational why-questions through to the judge, but not code ones', async () => {
+  expect(precheck('why did morning-brief fail?', false).isJudged).toBe(true)
+  expect(precheck('why is acme-bot not replying', false).isJudged).toBe(true)
+  expect(precheck('how come acme-bot stopped', false).isJudged).toBe(true)
+  expect(precheck('why does parseOutcome return partial?', false).isJudged).toBe(false)
+  expect(precheck('why did the rebase fail?', false).isJudged).toBe(false)
+  expect(precheck('why did the tests fail?', false).isJudged).toBe(false)
+})
+
+test('investigate is a fourth verdict, holding the ops lock', async () => {
+  expect(parseJudgment('investigate', 'acme-bot stopped replying, look into it ')).toEqual({
+    verdict: 'investigate',
+    task: 'acme-bot stopped replying, look into it',
+    resources: ['ops'],
+    reason: 'investigation',
+  })
+  expect(lockKeys(['ops'], '/r/a')).toEqual(['ops'])
+  expect(canStart(['git:/r/a'], [['ops']], 2)).toBe(true)
+  expect(canStart(['ops'], [['ops']], 2)).toBe(false)
+})
+
+test('the judge rule names investigations and restarts, and four reply words', async () => {
+  expect(JUDGE_SYSTEM).toContain('"investigate"')
+  expect(JUDGE_SYSTEM).toMatch(/restart/i)
+  expect(JUDGE_SYSTEM).toContain('mechanical, investigate, needs-main or unclear')
+})
+
+test('precedents are split by the verdict they teach, capped in total', async () => {
+  const system = judgeSystem([
+    { text: 'tidy branches', verdict: 'mechanical' },
+    { text: 'check acme-bot logs', verdict: 'investigate' },
+  ])
+  const chores = system.indexOf('mechanical chore:')
+  const looks = system.indexOf('investigation:')
+  expect(chores).toBeGreaterThan(0)
+  expect(looks).toBeGreaterThan(0)
+  expect(system.indexOf('- tidy branches')).toBeGreaterThan(chores)
+  expect(system.slice(looks)).toContain('- check acme-bot logs')
+  expect(system.slice(looks)).not.toContain('- tidy branches')
 })
 
 test('a judgment is one word, read strictly; anything else routes to main', async () => {
@@ -145,9 +186,18 @@ test("state an older version wrote is upgraded, so new fields are never undefine
   expect(migrate(undefined, EMPTY)).toEqual(EMPTY)
 })
 
+test('stored corrections upgrade from bare strings; junk is dropped', async () => {
+  expect(toTaught(['a', { text: 'b', verdict: 'investigate' }, 3, { verdict: 'mechanical' }])).toEqual([
+    { text: 'a', verdict: 'mechanical' },
+    { text: 'b', verdict: 'investigate' },
+  ])
+  expect(migrate({ learned: ['a'] } as never, EMPTY).learned).toEqual([{ text: 'a', verdict: 'mechanical' }])
+  expect(toTaught(undefined)).toEqual([])
+})
+
 test("the person's misses steer the judge: recent ones become precedents, capped", async () => {
   expect(judgeSystem([])).not.toContain('corrected you')
-  const many = Array.from({ length: 15 }, (_, i) => `tidy branch ${i}`)
+  const many = Array.from({ length: 15 }, (_, i) => ({ text: `tidy branch ${i}`, verdict: 'mechanical' as const }))
   const system = judgeSystem(many)
   expect(system).toContain('corrected you')
   expect(system).toContain('- tidy branch 14')

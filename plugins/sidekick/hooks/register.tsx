@@ -1,10 +1,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PromptSubmitInput, PromptSubmitResult, Register } from 'claude-code'
 
-import { MAX_MISSES, canStart, judgePrompt, judgeSystem, lockKeys, parseJudgment, precheck } from './lib/judge'
+import { MAX_MISSES, canStart, judgePrompt, judgeSystem, lockKeys, parseJudgment, precheck, taughtVerdict } from './lib/judge'
 import type { Judgment } from './lib/judge'
 import { NO_SPEND, addTally, tallyLine, tallyOf, tokens, usd } from './lib/cost'
-import { migrate } from './lib/state'
+import { migrate, toTaught } from './lib/state'
 import {
   chatLine,
   giveToMainPrompt,
@@ -15,7 +15,7 @@ import {
   workerArgv,
   workerInput,
 } from './lib/worker'
-import type { Entry, EntryStatus, Mode, Outcome, SidekickState, Tally } from '../types'
+import type { Entry, EntryStatus, Mode, Outcome, SidekickState, Taught, Tally } from '../types'
 
 export const EMPTY: SidekickState = {
   mode: 'off',
@@ -66,7 +66,7 @@ let guardPath = ''
 /** The loaded version, from the plugin's own manifest; shown in the pane so a stale load is visible. */
 let version = ''
 /** The person's "should've been sidekick" corrections, across sessions; the judge learns from them. */
-let misses: string[] = []
+let misses: Taught[] = []
 const MISSES_KEY = 'missed'
 let sequence = 0
 /** When the judge's connection was last used; a cold one blows the budget (measured: 1.8 s+ against ~1.2 s warm). */
@@ -498,16 +498,16 @@ async function sendNow($: EngineInterface, waitingId: string): Promise<void> {
 }
 
 /** Replaces the corrections the judge learns from: in the store for later sessions, here for this one. */
-async function setLearned($: EngineInterface, list: string[]): Promise<void> {
+async function setLearned($: EngineInterface, list: Taught[]): Promise<void> {
   misses = list.slice(-200)
   // The judge follows this session even if the store refuses; the store carries it to the next.
   await $.store.set(MISSES_KEY, misses).catch(() => {})
   await change($, s => ({ ...s, learned: misses }))
 }
 
-async function storedMisses($: EngineInterface): Promise<string[]> {
+async function storedMisses($: EngineInterface): Promise<Taught[]> {
   const prior = await $.store.get(MISSES_KEY).catch(() => misses)
-  return Array.isArray(prior) ? prior.filter((m): m is string => typeof m === 'string') : misses
+  return Array.isArray(prior) ? toTaught(prior) : misses
 }
 
 async function markMissed($: EngineInterface, id: string): Promise<void> {
@@ -516,23 +516,26 @@ async function markMissed($: EngineInterface, id: string): Promise<void> {
   if (entry === undefined) return
   // Kept across sessions; the judge sees the latest few as precedents from its next call on.
   const known = await storedMisses($)
-  await setLearned($, [...known.filter(m => m !== entry.prompt), entry.prompt])
-  $.ui.toast(`Noted: messages like "${clip(entry.prompt, 40)}" go to the sidekick from now on`)
+  const verdict = taughtVerdict(entry.prompt)
+  await setLearned($, [...known.filter(m => m.text !== entry.prompt), { text: entry.prompt, verdict }])
+  $.ui.toast(`Noted: messages like "${clip(entry.prompt, 40)}" go to the sidekick (${verdictLabel(verdict)}) from now on`)
 }
 
 /** Drops one correction (or all of them) so the judge stops following it. */
 async function forget($: EngineInterface, which: string | 'all'): Promise<number> {
   const known = await storedMisses($)
-  const kept = which === 'all' ? [] : known.filter(m => m !== which)
+  const kept = which === 'all' ? [] : known.filter(m => m.text !== which)
   await setLearned($, kept)
   return known.length - kept.length
 }
 
 /** `/sidekick learned`: every stored correction, newest first, numbered for `/sidekick forget <n>`. */
-function learnedText(list: readonly string[]): string {
+const verdictLabel = (verdict: Taught['verdict']): string => (verdict === 'investigate' ? 'investigate' : 'chore')
+
+function learnedText(list: readonly Taught[]): string {
   if (list.length === 0) return "The judge has learned nothing yet. Press should've been sidekick on a TO CLAUDE entry to teach it."
   const newest = [...list].reverse()
-  const lines = newest.map((m, i) => `${String(i + 1).padStart(3)}. ${clip(m.replace(/\s+/g, ' '), 100)}${i < MAX_MISSES ? '' : '  (stored, not used)'}`)
+  const lines = newest.map((m, i) => `${String(i + 1).padStart(3)}. [${verdictLabel(m.verdict)}] ${clip(m.text.replace(/\s+/g, ' '), 100)}${i < MAX_MISSES ? '' : '  (stored, not used)'}`)
   return [`The judge follows the newest ${Math.min(MAX_MISSES, list.length)} of ${list.length} corrections:`, ...lines, '/sidekick forget <n> drops one; /sidekick forget all drops them all.'].join('\n')
 }
 
@@ -599,7 +602,7 @@ export const register: Register = (on, options) => {
     // A reload keeps the session's mode; the new module's connection starts cold.
     try {
       const stored = await $.store.get(MISSES_KEY)
-      misses = Array.isArray(stored) ? stored.filter((m): m is string => typeof m === 'string') : []
+      misses = toTaught(stored)
     } catch {
       misses = []
     }
@@ -652,8 +655,8 @@ export const register: Register = (on, options) => {
       if (what === 'all') return { text: `Forgot ${await forget($, 'all')} corrections; the judge is back to its defaults.` }
       const target = Number.isInteger(n) && n >= 1 ? newest[n - 1] : undefined
       if (target === undefined) return { text: 'Usage: /sidekick forget <n|all>. /sidekick learned shows the numbers.' }
-      await forget($, target)
-      return { text: `Forgot "${clip(target, 60)}"; the judge no longer follows it.` }
+      await forget($, target.text)
+      return { text: `Forgot "${clip(target.text, 60)}"; the judge no longer follows it.` }
     }
     const asked: Mode | null = arg === 'auto' ? 'auto' : arg === 'off' ? 'off' : arg === 'on' || arg === 'shadow' ? 'shadow' : null
     if (arg !== '' && asked === null) return { text: 'Usage: /sidekick [auto|shadow|off|learned|forget <n|all>]' }
@@ -907,10 +910,10 @@ export const register: Register = (on, options) => {
 
         {learned.length > 0 && section('learned', 'LEARNED', 'claude', state.learned.length)}
         {learned.map(m => (
-          <Box key={`l-${m}`}>
-            <Text dimColor>{clip(`✎ ${m.replace(/\s+/g, ' ')}`, width - 10)}</Text>
+          <Box key={`l-${m.text}`}>
+            <Text dimColor>{clip(`✎ [${verdictLabel(m.verdict)}] ${m.text.replace(/\s+/g, ' ')}`, width - 10)}</Text>
             <Text>{'  '}</Text>
-            <Button key={`forget-${m}`} label="forget" plain onPress={() => void forget($, m)} />
+            <Button key={`forget-${m.text}`} label="forget" plain onPress={() => void forget($, m.text)} />
           </Box>
         ))}
         {state.learned.length > learned.length && (
