@@ -3,7 +3,7 @@ import { test, expect } from 'claude-code/testing'
 import { JUDGE_SYSTEM, canStart, judgeSystem, lockKeys, parseJudgment, precheck, resourcesOf } from './lib/judge'
 import { migrate, toTaught } from './lib/state'
 import { EMPTY } from './register'
-import { WORKER_SYSTEM, chatLine, handoffNote, instructionsPrompt, parseOutcome, parseStreamLine, splitLines, workerArgv } from './lib/worker'
+import { INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, handoffNote, instructionsPrompt, parseOutcome, parseStreamLine, splitLines, workerArgv } from './lib/worker'
 
 test('precheck lets short imperative chores through to the judge', async () => {
   expect(precheck('commit and push', false)).toEqual({ isJudged: true })
@@ -109,6 +109,31 @@ test('the worker runs lean, locked down and guarded', async () => {
   expect(settings.autoMemoryEnabled).toBe(false)
   for (const rule of ['Read(**/.env)', 'Read(**/.mcp.json)']) expect(argv).toContain(rule)
   expect(argv[argv.indexOf('--append-system-prompt') + 1]).toBe(WORKER_SYSTEM)
+  expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe('/p/bin/sidekick-guard chore')
+})
+
+test('the investigation worker may run any command, but stays guarded and read-only', async () => {
+  const files = [{ path: '/repo/CLAUDE.md', kind: 'project', content: 'acme-bot logs to logs/acme.log.' }]
+  const argv = workerArgv('haiku', '/p/bin/sidekick-guard', files, 'investigate')
+  const allowed = argv.slice(argv.indexOf('--allowedTools') + 1, argv.indexOf('--disallowedTools'))
+  expect(allowed).toContain('Bash')
+  expect(allowed).not.toContain('Bash(git:*)')
+  const denied = argv.slice(argv.indexOf('--disallowedTools') + 1)
+  for (const rule of ['Edit', 'Write', 'NotebookEdit', 'Read(**/.env)', 'Read(**/.mcp.json)', 'Bash(git reset --hard:*)']) expect(denied).toContain(rule)
+  const settings = JSON.parse(argv[argv.indexOf('--settings') + 1] ?? '{}')
+  expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe('/p/bin/sidekick-guard investigate')
+  const system = argv[argv.indexOf('--append-system-prompt') + 1] ?? ''
+  expect(system.startsWith(INVESTIGATE_SYSTEM)).toBe(true)
+  expect(system.endsWith('acme-bot logs to logs/acme.log.')).toBe(true)
+  expect(argv[argv.indexOf('--permission-mode') + 1]).toBe('dontAsk')
+})
+
+test('the investigation prompt carries the restart, evidence and no-side-effect rules, and the same report', async () => {
+  for (const words of ['If the task asks for a restart, do it', 'verify', 'job manager', 'Never unload', 'Post or send anything', 'credential files', 'git reads only', 'An absence only counts']) {
+    expect(INVESTIGATE_SYSTEM).toContain(words)
+  }
+  const report = (prompt: string) => prompt.slice(prompt.indexOf('Finish with ONLY a JSON object'))
+  expect(report(INVESTIGATE_SYSTEM)).toBe(report(WORKER_SYSTEM))
 })
 
 test("the worker gets the main session's instruction files in its system prompt, within a size limit", async () => {

@@ -1,7 +1,7 @@
 import { usd } from './cost'
 import type { Usage } from './cost'
 import { firstJson } from './judge'
-import type { Instruction, Outcome } from '../../types'
+import type { Instruction, Outcome, Profile } from '../../types'
 
 /** What the worker may run. Anything else is refused by `--permission-mode dontAsk`. */
 export const ALLOWED_TOOLS = [
@@ -47,6 +47,9 @@ export const DENIED_TOOLS = [
   'Read(**/.mcp.json)',
 ]
 
+const REPORT = `Finish with ONLY a JSON object, no prose around it:
+{"status":"done"|"partial"|"stopped"|"failed","summary":"<one sentence a developer reads in chat>","commands":["<each command you ran>"],"shas":["<short shas you created or pushed>"],"changed":["<paths or refs changed>"],"uncertain":["<anything you guessed>"],"needsMain":"<why the main session should take over, or empty>"}`
+
 export const WORKER_SYSTEM = `You are a sidekick: you carry out ONE small, mechanical repository chore for a developer, then report back. You have no memory of their conversation; work only from what is on disk (git status, diff, log, bd).
 
 Rules:
@@ -61,8 +64,36 @@ Rules:
 - Pushing is allowed when asked.
 - Never read or print credential files (.env, .mcp.json, keys); scripts that need them load them themselves.
 
-Finish with ONLY a JSON object, no prose around it:
-{"status":"done"|"partial"|"stopped"|"failed","summary":"<one sentence a developer reads in chat>","commands":["<each command you ran>"],"shas":["<short shas you created or pushed>"],"changed":["<paths or refs changed>"],"uncertain":["<anything you guessed>"],"needsMain":"<why the main session should take over, or empty>"}`
+${REPORT}`
+
+/** What an investigation may run besides the deny rules below: any command; the guard holds the line. */
+export const INVESTIGATE_ALLOWED_TOOLS = ['Read', 'Glob', 'Grep', 'Bash']
+
+export const INVESTIGATE_SYSTEM = `You are a sidekick doing ONE quick first-pass investigation on this machine for a developer, then reporting back. Something is failing, stopped, slow or unknown (a service, bot, scheduled job, container, logs, metrics, health), or they asked for a restart. You have no memory of their conversation. A bigger model takes over from your report if you don't settle it, so an honest partial report beats a confident guess.
+
+How to work:
+- Use the developer's instructions below to find where things live: job definitions, log files, health and diagnostics scripts, how services are run. Don't guess a path the instructions name.
+- Order: the job manager or container state first (is it running, its pid, last exit code, restarts), then the newest log lines, then the project's own read-only health or diagnostics scripts, then metrics if the instructions name a way.
+- "Alive", "down" and "fixed" need live evidence: the job manager's own answer (launchctl print, docker inspect) or a pid you checked with ps -p. An absence only counts if your search could have found the thing: grepping process lists for a name that isn't in the command line proves nothing. Pid files can be stale.
+- Logs without timestamps: say you can't date them; use the file's modification time and line counts to bound when things happened.
+- Prefer one plain command per call; pipes into grep, head, tail, wc, sort and uniq are fine.
+
+Restarts:
+- If the task asks for a restart, do it even if the service looks healthy. Note its state first (pid, last exit), so the report can say what it was before.
+- Otherwise restart only when the evidence shows a hung or dead process.
+- Only restart in place: launchctl kickstart -k, docker restart / docker start, or a restart script the project names. Never unload, bootout, remove, disable, stop or recreate a job or container, and never kill processes yourself.
+- After a restart, wait a few seconds and verify: running, a new pid, and fresh healthy log lines or a passing health check. A restart you could not verify is "partial", never "done". Put "restarted: <name>" in changed.
+
+Never:
+- Edit, create, move or delete files, or install anything. Never change data (no SQL writes, no cache flushes).
+- Post or send anything: no chat or Slack messages, emails, webhooks, and don't rerun a scheduled job that has side effects. Reading an HTTP API is fine; writing to one is not.
+- Change a git repository: git reads only (status, log, diff, show).
+- Read or print credential files (.env, .mcp.json, keys); scripts that need them load them themselves.
+These are also blocked by the tool layer; if one is refused, stop that line of inquiry. Never look for another route to the same effect.
+
+The report: "done" only when the cause is found and either nothing needed doing or a restart was verified. Put every guess in uncertain. In needsMain, say what is still open and the exact next commands for the main session.
+
+${REPORT}`
 
 /** Room for the main session's instruction files in the worker's system prompt, in characters. */
 const INSTRUCTIONS_LIMIT = 80_000
@@ -94,13 +125,15 @@ export function instructionsPrompt(files: readonly Instruction[]): string {
 }
 
 /** The argument vector for one headless worker run. The task goes on stdin. */
-export function workerArgv(model: string, guardPath: string, instructions: readonly Instruction[] = []): string[] {
+export function workerArgv(model: string, guardPath: string, instructions: readonly Instruction[] = [], profile: Profile = 'chore'): string[] {
   const settings = JSON.stringify({
-    hooks: { PreToolUse: [{ matcher: 'Bash|Read|Grep', hooks: [{ type: 'command', command: guardPath }] }] },
+    // The guard is told the profile: an investigation's git must stay read-only.
+    hooks: { PreToolUse: [{ matcher: 'Bash|Read|Grep', hooks: [{ type: 'command', command: `${guardPath} ${profile}` }] }] },
     // The main session's memory files come in with its instructions; never the worker's own.
     autoMemoryEnabled: false,
   })
   const context = instructionsPrompt(instructions)
+  const system = profile === 'investigate' ? INVESTIGATE_SYSTEM : WORKER_SYSTEM
   return [
     'claude',
     '-p',
@@ -131,9 +164,9 @@ export function workerArgv(model: string, guardPath: string, instructions: reado
     '--settings',
     settings,
     '--append-system-prompt',
-    context === '' ? WORKER_SYSTEM : `${WORKER_SYSTEM}\n\n${context}`,
+    context === '' ? system : `${system}\n\n${context}`,
     '--allowedTools',
-    ...ALLOWED_TOOLS,
+    ...(profile === 'investigate' ? INVESTIGATE_ALLOWED_TOOLS : ALLOWED_TOOLS),
     '--disallowedTools',
     ...DENIED_TOOLS,
   ]
