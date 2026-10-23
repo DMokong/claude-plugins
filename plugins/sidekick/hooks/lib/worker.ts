@@ -187,15 +187,15 @@ export function splitLines(buffer: string, chunk: string): { lines: string[]; re
 
 export type StreamEvent =
   | { kind: 'init'; sessionId: string }
-  | { kind: 'step'; text: string; id: string }
+  | { kind: 'step'; text: string; id: string; full: string }
   | { kind: 'refused'; id: string }
   | { kind: 'output'; id: string; text: string; isError: boolean }
   | { kind: 'result'; text: string; isError: boolean; costUsd: number; usage: Usage | undefined }
   | { kind: 'other' }
 
-/** What a tool call ran, in a line: the command, the file read, or the search. */
+/** What a tool call ran, whole: the command, the file read, or the search. */
 function describeCall(name: unknown, input: Record<string, unknown>): string {
-  if (typeof input.command === 'string') return input.command.split('\n')[0] ?? ''
+  if (typeof input.command === 'string') return input.command
   if (typeof input.file_path === 'string') return `read ${input.file_path}`
   if (typeof input.pattern === 'string') return `${name === 'Glob' ? 'glob' : 'grep'} ${JSON.stringify(input.pattern)}${typeof input.path === 'string' ? ` ${input.path}` : ''}`
   return ''
@@ -248,7 +248,8 @@ export function parseStreamEvents(line: string): StreamEvent[] {
   for (const block of content) {
     if (block.type !== 'tool_use') continue
     const command = describeCall(block.name, (block.input ?? {}) as Record<string, unknown>)
-    if (command !== '') out.push({ kind: 'step', text: `$ ${command}`, id: typeof block.id === 'string' ? block.id : '' })
+    // The pane shows the first line; the record keeps the whole command.
+    if (command !== '') out.push({ kind: 'step', text: `$ ${command.split('\n')[0] ?? ''}`, id: typeof block.id === 'string' ? block.id : '', full: `$ ${command}` })
   }
   return out
 }

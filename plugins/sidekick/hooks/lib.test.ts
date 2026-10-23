@@ -170,7 +170,7 @@ test('streamed output splits on lines across chunks', async () => {
 
 test('stream lines become steps and a result', async () => {
   const step = parseStreamLine(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', input: { command: 'git push' } }] } }))
-  expect(step).toEqual({ kind: 'step', text: '$ git push', id: '' })
+  expect(step).toEqual({ kind: 'step', text: '$ git push', id: '', full: '$ git push' })
   const refused = parseStreamLine(
     JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', is_error: true, content: 'Permission to use Bash has been denied.' }] } }),
   )
@@ -193,9 +193,11 @@ test('a message with several tool calls or results yields an event for each', as
     }),
   )
   expect(calls).toEqual([
-    { kind: 'step', text: '$ launchctl list', id: 'a' },
-    { kind: 'step', text: '$ grep "ERROR" logs', id: 'b' },
+    { kind: 'step', text: '$ launchctl list', id: 'a', full: '$ launchctl list' },
+    { kind: 'step', text: '$ grep "ERROR" logs', id: 'b', full: '$ grep "ERROR" logs' },
   ])
+  const multi = parseStreamEvents(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'm', input: { command: 'for j in a b; do\n  echo $j\ndone' } }] } }))
+  expect(multi).toEqual([{ kind: 'step', text: '$ for j in a b; do', id: 'm', full: '$ for j in a b; do\n  echo $j\ndone' }])
   const results = parseStreamEvents(
     JSON.stringify({
       type: 'user',
@@ -234,6 +236,13 @@ test('credentials are redacted from what the record keeps', async () => {
   expect(redact(`x ${github} y`)).toBe('x [redacted] y')
   expect(redact('postgres://app:hunter2@db.example.com:5432/app')).toBe('postgres://app:[redacted]@db.example.com:5432/app')
   expect(redact('nothing secret here')).toBe('nothing secret here')
+  expect(redact(`key ${'AKIA'}${'ABCDEFGHIJKLMNOP'}`)).toBe('key [redacted]')
+  expect(redact(`jwt ${['eyJhbGciOi', 'eyJzdWIiOiIx', 'c2lnbmF0dXJl'].join('.')}`)).toBe('jwt [redacted]')
+  expect(redact(`OPENAI=sk-${'c'.repeat(24)}`)).toBe('OPENAI=[redacted]')
+  expect(redact('DB_PASSWORD=hunter22 port=5432')).toBe('DB_PASSWORD=[redacted] port=5432')
+  expect(redact('slack_token: "abcd1234efgh"')).toBe('slack_token: "[redacted]"')
+  expect(redact('Authorization: Bearer abc.def.ghi123')).toBe('Authorization: Bearer [redacted]')
+  expect(redact('tokens used: 42')).toBe('tokens used: 42')
 })
 
 test('the record has the prompt, each command and its output, cut to size, and the report', async () => {
@@ -245,6 +254,7 @@ test('the record has the prompt, each command and its output, cut to size, and t
       { command: '$ tail -n 5 logs/acme.log', output: `ENOTFOUND example.com\nSLACK_BOT_TOKEN=${slack}`, isError: false },
       { command: '$ cat big.log', output: 'z'.repeat(5_000), isError: false },
       { command: '$ rm x', output: 'sidekick guard: refused', isError: true },
+      { command: '$ for j in a b; do\n  echo $j\ndone', output: 'a\nb', isError: false },
     ],
     outcome,
     '≈$0.0050',
@@ -255,6 +265,7 @@ test('the record has the prompt, each command and its output, cut to size, and t
   expect(text).toContain('ENOTFOUND example.com')
   expect(text).toContain('[cut: 1000 more chars]')
   expect(text).toContain('### $ rm x (error)')
+  expect(text).toContain('### $ for j in a b; do …\n\n```sh\nfor j in a b; do\n  echo $j\ndone\n```')
   expect(text).toContain('## For the main session\n\ncheck DNS')
   expect(text).toContain('"summary": "acme-bot logs DNS failures"')
   expect(text).not.toContain(slack)

@@ -214,15 +214,20 @@ session loaded, and nothing about any project is built into the sidekick. In a s
 files haven't been captured yet (one that started before the sidekick was installed), an
 investigation goes to Claude instead, saying so.
 
-**What it may run.** Any command that helps, except what the guard refuses (see the table below).
-That covers reads (`ps`, `lsof`, `launchctl list/print`, `docker ps/logs/inspect`, `tail`,
-`grep`, `log show`, `curl` GETs) and your project's own scripts. Restarts in place are allowed:
+**What it may run.** Any command the guard knows only reads, any restart in place, and your
+project's own scripts (anything run by path from outside the system's folders, like
+`scripts/health-check.sh`). Reads include `ps`, `lsof`, `launchctl list/print`,
+`docker ps/logs/inspect`, `tail`, `grep`, `jq`, `log show`, `curl` GETs, and shell loops and
+`if`s around them. A command the guard doesn't know is refused, and the report says so; it
+comes back `partial` for Claude to finish. Restarts in place are allowed:
 `launchctl kickstart -k`, `docker restart` / `start`, `brew services restart`, or a restart script
 the project names. It restarts when you ask, or when the evidence shows a hung or dead process,
 and it reports `done` only after checking the service came back: running, a new pid, fresh healthy
 log lines.
 
-**What the guard refuses in an investigation**, on top of everything in the table above:
+**What the guard refuses in an investigation.** It works the other way round from a chore's
+blocklist: anything not known to be safe is refused. Examples of what that stops, on top of
+everything in the table above:
 
 | ⛔ Refused | Because |
 |---|---|
@@ -234,20 +239,24 @@ log lines.
 | `kill`, `pkill`, `killall` | restarts go through the job manager |
 | `curl -X POST`, `-d`, `-F`, `--json` | writes to an API (it also never posts to chat or reruns a job with side effects) |
 | `sudo`, `ssh`, package installs, `npx` | root, other machines, new software |
-| `python -c`, `node -e`, `osascript`, `eval`, a shell with no script | code the guard can't see into |
+| `python -c`, `node -e`, `osascript`, `awk 'BEGIN{system(…)}'`, `sed 'w file'`, a shell reading stdin | code the guard can't see into, or a reader's write mode |
+| `X=rm; $X …`, `GIT_PAGER=…`, `git -c …`, `grm` / `gsed -i` | a command hidden in a variable, an option or a GNU alias |
+| `printenv`, bare `env`, `security find-…-password` | prints environment secrets or Keychain passwords |
+| `tmux send-keys`, `herdr pane run`, `make`, `diskutil erase…`, `shutdown`, an unknown tool | runs things the guard can't follow, or isn't known to be safe |
 | git anything but reads | an investigation doesn't move a repo |
 | another Claude session's files under `~/.claude/projects/` | private, and stale |
 
-The guard looks inside `bash -c '…'`, `$(…)`, backticks, `xargs`, `find -exec`, `watch` and
-`docker exec`, and refuses a command it can't parse. **A script is the deliberate gap:** the guard
+The guard looks inside `bash -c '…'`, `$(…)`, `<(…)`, backticks, `xargs`, `find -exec`, `watch`,
+`eval`, loops and `docker exec`, and refuses a command it can't parse. **A script is the deliberate gap:** the guard
 can't see inside your project's own scripts, so those are your maintainers' call, and the worker is
 told to use the read-only or restart ones. The file and process rows hold for chores too.
 
 **What comes back.** The chat line, pane, band and notification as for a chore, plus
 `→ main: <what's still open>` when there is something. Claude's note ends with the path of a **full
 record**: every command the worker ran and its output (each cut to 4 KB), the report and the
-cost. Credentials that show up in output (API keys, Slack and GitHub tokens, passwords in URLs) are
-redacted. Records live in `~/.claude/sidekick/investigations/` (or under `CLAUDE_CONFIG_DIR`),
+cost. Credentials that show up in output are redacted: API keys (Anthropic, OpenAI, AWS, Google),
+Slack and GitHub tokens, JWTs, `Bearer` headers, `password=` / `token:` values and passwords in
+URLs. Records live in `~/.claude/sidekick/investigations/` (or under `CLAUDE_CONFIG_DIR`),
 outside any repository, and the newest 50 are kept. The pane's **`record`** button copies the
 path.
 

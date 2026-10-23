@@ -9,7 +9,9 @@ It refuses, in every profile:
 - outside git, anything that deletes or overwrites files, changes or removes containers, jobs or
   data, kills processes, writes to an API, installs, runs as root, or runs inline code the guard
   can't see into. Restarts in place (launchctl kickstart, docker restart/start) are allowed.
-In an investigation, git is reads only, and a command it can't parse is refused.
+In an investigation the guard works the other way round: only commands it knows how to read with
+(and the restarts in place, and the project's own scripts, run by path) get through. Anything else is
+refused, git is reads only, and a command it can't parse is refused.
 
 The worker's --disallowedTools prefix rules catch the common spellings; this catches the rest (a flag
 after other arguments, `git -C dir ...`, a command chained after `&&`, hidden in `bash -c` or
@@ -34,9 +36,26 @@ def git_args(words):
     return words[i:] if i < len(words) else None
 
 
+GIT_RUNS_COMMANDS = ("--upload-pack", "--receive-pack", "--exec", "-u", "--config")
+
+
+def global_refusal(words):
+    """git options before the subcommand that can make git run another program."""
+    for w in words[1:]:
+        if w == "-c" or w.startswith(("-c", "--config-env", "--exec-path=")) and w not in ("-C",):
+            return "git -c can make git run another program"
+        if not w.startswith("-"):
+            break
+    return None
+
+
 def refusal(args):
     sub, rest = args[0], args[1:]
     flags = set(rest)
+    if any(a.startswith(GIT_RUNS_COMMANDS) for a in rest) and sub in ("fetch", "pull", "push", "clone", "ls-remote", "archive", "submodule"):
+        return "an option that makes git run another program"
+    if sub == "config" and not (flags & {"--get", "--get-all", "--get-regexp", "--list", "-l", "--show-origin"}) and rest[:1] not in (["get"], ["list"]):
+        return "git config changes what git runs"
     if sub == "push":
         if any(a in ("-f", "--force", "--mirror", "-d", "--delete", "--prune") or a.startswith("--force") for a in rest):
             return "force or deleting push"
@@ -128,6 +147,15 @@ ALWAYS_REFUSED = {
     "dropdb": "drops a database", "dropuser": "drops a user", "pg_restore": "overwrites a database",
     "mysqladmin": "administers a database", "npx": "downloads and runs code", "bunx": "downloads and runs code",
     "pnpx": "downloads and runs code", "parallel": "runs commands the guard can't see",
+    "trash": "deletes files", "srm": "deletes files", "patch": "edits files", "zip": "writes files",
+    "ditto": "copies files", "split": "writes files", "csplit": "writes files",
+"shutdown": "stops the machine", "reboot": "stops the machine", "halt": "stops the machine",
+    "at": "schedules commands", "batch": "schedules commands", "nvram": "changes firmware settings",
+    "tmux": "runs commands in other terminals", "screen": "runs commands in other terminals",
+    "herdr": "runs commands in other terminals", "vim": "edits files", "vi": "edits files", "nvim": "edits files",
+    "nano": "edits files", "emacs": "edits files", "ed": "edits files", "ex": "edits files", "make": "runs build steps the guard can't see",
+    "coproc": "runs a command in the background the guard can't follow",
+    "claude": "starts another agent", "codex": "starts another agent", "open": "launches apps",
     "ssh": "reaches another machine", "scp": "copies to or from another machine", "sftp": "reaches another machine",
 }
 WRAPPERS = {"env", "nohup", "time", "nice", "command", "exec", "caffeinate"}
@@ -275,6 +303,8 @@ def curl_refusal(args):
             return "curl writes a file"
         if a.startswith("--output=") and a != "--output=/dev/null":
             return "curl writes a file"
+        if a in ("-K", "--config") or a.startswith("--config="):
+            return "curl -K reads options the guard can't see"
         if a in ("-O", "--remote-name", "--remote-name-all", "-J"):
             return "curl writes a file"
         # Short flags bunched together: -sd, -sO.
@@ -294,10 +324,38 @@ def wget_refusal(args):
 
 def simple_refusal(words, profile, check):
     """Why one simple command (no pipes or chains left in it) is refused, or None."""
+    for w in words:
+        if DANGEROUS_ASSIGNMENTS.match(w):
+            return f"setting {w.split('=')[0]} can make a program run another one"
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w):
+            break
+    first = base(words[0])
     words = strip_wrappers(words)
     if not words:
+        if first == "env" and profile == "investigate":
+            return "env prints environment variables, secrets included"
         return None
-    name, args = base(words[0]), words[1:]
+    if "$" in words[0] or "`" in words[0]:
+        return "a command name the guard can't see until the shell expands it"
+    path, args = words[0], words[1:]
+    name = base(path)
+    if name.startswith("g") and name[1:] in G_TOOLS:
+        name = name[1:]
+    # Shell syntax: a loop or case header holds no command (its $(...) is checked on its own);
+    # `do`, `then` and the like lead into the command after them.
+    if name in ("for", "select", "case", "function", "in", "esac", "done", "fi", "}", "]]", "[["):
+        return None
+    if name in ("do", "then", "else", "elif", "while", "until", "if", "!", "{"):
+        return simple_refusal(args, profile, check) if args else None
+    if name in ("export", "local", "readonly", "declare", "typeset") and [a for a in args if not a.startswith("-")]:
+        for a in args:
+            if DANGEROUS_ASSIGNMENTS.match(a):
+                return f"setting {a.split('=')[0]} can make a program run another one"
+        return None
+    if name in ("source", "."):
+        return None if args else "source with nothing to read"
+    if name in ("busybox", "toybox") and args:
+        return simple_refusal(args, profile, check)
     if name in ALWAYS_REFUSED:
         return f"{name} {ALWAYS_REFUSED[name]}"
     if name == "eval":
@@ -339,6 +397,8 @@ def simple_refusal(words, profile, check):
         return None
     if name == "sed" and any(a.startswith(("-i", "--in-place")) or re.match(r"^-[a-zA-Z]*i", a) for a in args):
         return "sed -i edits files in place"
+    if name == "uniq" and len([a for a in args if not a.startswith("-")]) > 1:
+        return "uniq writes its second file"
     if name == "tee" and any(not a.startswith("-") and a != "/dev/null" for a in args):
         return "tee writes a file"
     if name == "dd" and any(a.startswith("of=") for a in args):
@@ -389,11 +449,123 @@ def simple_refusal(words, profile, check):
         return sql_refusal(name, args)
     if name == "redis-cli":
         return redis_refusal(args)
+    if profile == "investigate":
+        # Run by path from outside the system's folders: the project's own script.
+        if "/" in path and not path.startswith(SYSTEM_BIN):
+            return None
+        return investigate_refusal(name, args, words)
+    return None
+
+
+# What an investigation may run: commands that only read (or restart in place), by name. Anything
+# else needs a rule above that lets it through, or it is refused.
+READERS = {
+    "ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "zgrep", "rg", "ag", "stat", "file", "du", "df",
+    "date", "uptime", "whoami", "id", "hostname", "uname", "sw_vers", "which", "type", "echo", "printf", "true",
+    "false", "test", "[", "sleep", "ps", "pgrep", "pidof", "lsof", "netstat", "nslookup", "dig", "host",
+    "dscacheutil", "ping", "traceroute", "uniq", "cut", "tr", "jq", "yq", "column", "nl", "rev", "tac", "fold",
+    "paste", "join", "comm", "diff", "cmp", "md5", "md5sum", "shasum", "sha256sum", "base64", "xxd", "od",
+    "strings", "basename", "dirname", "realpath", "readlink", "tree", "pwd", "cd", "vm_stat", "iostat",
+    "ioreg", "system_profiler", "mdfind", "mdls", "zcat", "gzcat", "bzcat", "xzcat", "journalctl", "less",
+    "seq", "expr", "nproc", "sysctl", "pmset", "diskutil", "nc", "log", "top", "scutil", "networksetup",
+    "plutil", "tmutil", "hdiutil", "csrutil", "defaults", "awk", "gawk", "nawk", "sed", "sort", "find",
+    "xargs", "watch", "tee", "dd", "tar", "gzip", "gunzip", "bzip2", "bunzip2", "xz", "unxz", "zstd",
+    "curl", "wget", "docker", "docker-compose", "launchctl", "systemctl", "brew", "kubectl", "bd", "git",
+    "npm", "pnpm", "yarn", "bun", "uv", "eval", "unzip", "read", "exit", "return", "break", "continue",
+    "wait", ":", "export", "local", "readonly", "declare", "typeset", "source", ".",
+} | SHELLS | INTERPRETERS | SQL_CLIENTS | {"redis-cli"}
+# A tool on the PATH of these folders is judged by its name; anything else run by path is a script.
+SYSTEM_BIN = ("/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/", "/usr/local/bin/", "/opt/homebrew/bin/", "/opt/homebrew/sbin/", "/usr/libexec/")
+# GNU tools Homebrew installs with a g in front: judged as the tool itself.
+G_TOOLS = {"rm", "mv", "cp", "ln", "sed", "awk", "dd", "shred", "truncate", "touch", "chmod", "chown", "install", "find", "tar", "sort", "split", "tee", "xargs", "date", "stat", "head", "tail", "cat", "ls", "grep", "du", "df", "readlink", "realpath", "timeout", "rmdir", "unlink", "mkdir"}
+SECRET_DUMPERS = {"printenv": "prints every environment variable, secrets included", "security": "reads the Keychain"}
+ENV_DUMPERS = {"env", "set", "export", "declare", "typeset", "compgen"}
+DANGEROUS_ASSIGNMENTS = re.compile(r"^(GIT_[A-Z_]+|PAGER|MANPAGER|EDITOR|VISUAL|LD_[A-Z_]+|DYLD_[A-Z_]+|PROMPT_COMMAND|BASH_ENV|ENV|SHELLOPTS|IFS|PATH|PERL5OPT|PYTHONSTARTUP|NODE_OPTIONS)=")
+
+
+def awk_refusal(args):
+    for a in args:
+        if a.startswith("-") and a not in ("-F", "-v"):
+            if a == "-f":
+                return "awk -f runs a program the guard can't see"
+            continue
+        if re.search(r"system\s*\(|\|\s*getline|(print|printf)[^;}]*(>|\|)|fflush|close\s*\(", a):
+            return "awk program runs commands or writes files"
+    return None
+
+
+def sed_refusal(args):
+    if any(a in ("-f", "--file") or a.startswith("--file=") for a in args):
+        return "sed -f runs a script the guard can't see"
+    for a in args:
+        if a.startswith("-"):
+            continue
+        if re.search(r"(^|[;{}\n]|^\s*[0-9$,/]*[^/]*)\s*[wWe](\s|$)", a) or re.search(r"/[gpIiMm0-9]*[we](\s|$|;)", a):
+            return "sed script writes files or runs commands"
+    return None
+
+
+def investigate_refusal(name, args, words):
+    """The investigation's own rules: readers with a write mode, and anything not known as a reader."""
+    if name in SECRET_DUMPERS:
+        return f"{name} {SECRET_DUMPERS[name]}"
+    if name in ENV_DUMPERS and not [a for a in args if not a.startswith("-")]:
+        return f"{name} prints environment variables, secrets included"
+    if name in ("awk", "gawk", "nawk"):
+        return awk_refusal(args)
+    if name == "sed":
+        return sed_refusal(args)
+    if name == "rg" and any(a.startswith("--pre") for a in args):
+        return "rg --pre runs a program on every file"
+    if name == "log" and args[:1] not in (["show"], ["stream"], ["stats"], ["help"]):
+        return "log changes the system log"
+    if name == "sysctl" and any(a == "-w" or "=" in a for a in args):
+        return "sysctl -w changes the kernel"
+    if name == "pmset" and args[:1] not in (["-g"],):
+        return "pmset changes power settings"
+    if name == "diskutil" and args[:1] not in (["list"], ["info"], ["apfs"]) or (name == "diskutil" and args[:1] == ["apfs"] and args[1:2] != ["list"]):
+        return "diskutil changes disks"
+    if name == "hdiutil" and args[:1] not in (["info"],):
+        return "hdiutil changes disk images"
+    if name == "tmutil" and args[:1] not in (["status"], ["listbackups"], ["latestbackup"], ["destinationinfo"]):
+        return "tmutil changes backups"
+    if name == "scutil" and not any(a in ("--get", "--dns", "--proxy", "--nwi", "-r") for a in args):
+        return "scutil changes network settings"
+    if name == "networksetup" and not all(a.startswith(("-get", "-list")) or not a.startswith("-") for a in args):
+        return "networksetup changes network settings"
+    if name == "plutil" and args[:1] not in (["-p"], ["-lint"], ["-help"]):
+        return "plutil writes property lists"
+    if name == "csrutil" and args[:1] != ["status"]:
+        return "csrutil changes system protection"
+    if name == "nc" and "-z" not in args:
+        return "nc can open a connection that sends data"
+    if name == "top" and "-l" not in args:
+        return "top needs -l (it never ends otherwise)"
+    if name == "less":
+        return "less waits for a keyboard"
+    if name == "bd" and args[:1] not in (["list"], ["show"], ["ready"], ["search"], ["stats"], ["comments"], ["blocked"], ["memories"], ["status"]):
+        return "bd changes the tracker; an investigation only reads it"
+    if name == "kubectl":
+        k = first_positional(args, {"-n", "--namespace", "--context", "-l"})
+        sub = args[k] if k is not None else ""
+        if sub == "rollout" and args[k + 1:k + 2] in (["restart"], ["status"], ["history"]):
+            return None
+        if sub == "config" and args[k + 1:k + 2] in (["view"], ["get-contexts"], ["current-context"]):
+            return None
+        if sub not in ("get", "describe", "logs", "top", "version", "cluster-info", "explain", "api-resources", "events", "auth"):
+            return f"kubectl {sub} changes the cluster"
+    if name in ("npm", "pnpm", "yarn", "bun", "uv"):
+        k = first_positional(args)
+        sub = args[k] if k is not None else ""
+        if sub not in ("run", "test", "ls", "list", "view", "info", "outdated", "why", "explain", "--version", "-v", ""):
+            return f"{name} {sub} changes installed software or runs unknown code"
+    if name not in READERS:
+        return f"{name} is not a command an investigation is known to use safely"
     return None
 
 
 # Pieces a command line is cut into: chains, pipes, subshells.
-CUTS = {"|", "||", "&&", ";", "&", "(", ")", "|&", ";;", "{", "}"}
+CUTS = {"|", "||", "&&", ";", "&", "(", ")", "|&", ";;", "{", "}", "<(", ">(", "$("}
 SAFE_REDIRECT_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr"}
 
 
@@ -444,6 +616,10 @@ def check_text(text, profile, session=""):
     def check(simple):
         if not simple:
             return None
+        if simple and base(simple[0]) == "git":
+            why = global_refusal(simple)
+            if why:
+                return why
         args = git_args(simple)
         if args:
             return refusal(args) or (git_read_refusal(args) if profile == "investigate" else None)
@@ -461,12 +637,16 @@ def check_text(text, profile, session=""):
         elif ">" in w and set(w) <= set("<>&|0123456789"):
             # A redirection: fine to a file descriptor or /dev/null, refused to anything else.
             target = words[k + 1] if k + 1 < len(words) else ""
+            if target == "(":
+                k += 1  # `>(cmd)`: a command, checked as one
+                continue
             if not (w.endswith("&") and re.match(r"^-?\d*$", target)) and target not in SAFE_REDIRECT_TARGETS:
                 return f"redirection writes a file: {target}"
             k += 2
             continue
         elif "<" in w and set(w) <= set("<&0123456789"):
-            k += 2  # input from a file or here-string: reading is fine
+            # Input from a file or here-string: reading is fine. `<(cmd)` is a command; check it.
+            k += 1 if k + 1 < len(words) and words[k + 1] == "(" else 2
             continue
         else:
             simple.append(w)

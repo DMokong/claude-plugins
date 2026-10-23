@@ -338,6 +338,16 @@ test('with no instruction files yet, an investigation goes to main instead', asy
   expect(seen.logs.some(line => line.includes('no instruction files yet'))).toBe(true)
   expect(seen.spawned).toEqual([])
   expect((await state($)).entries[0]?.status).toBe('passed')
+  // The judge was right; there's nothing for "should've been sidekick" to teach.
+  const ui = await $.ui.mount({
+    plugin: 'sidekick',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'sidekick',
+    props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  } as never)
+  expect(await ui.find({ key: `missed-${(await state($)).entries[0]?.id}` })).toBeUndefined()
+  await ui.unmount()
 })
 
 test('a running investigation does not hold prompts for the main session', async ($, on) => {

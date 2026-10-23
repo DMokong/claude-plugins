@@ -393,7 +393,7 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
             sessionId = event.sessionId
           } else if (event.kind === 'step') {
             const step = event.text
-            calls.set(event.id, { command: step, output: '', isError: false })
+            calls.set(event.id, { command: event.full, output: '', isError: false })
             await patchEntry($, id, x => ({ steps: [...x.steps, step].slice(-MAX_STEPS) }))
           } else if (event.kind === 'output') {
             const call = calls.get(event.id)
@@ -402,7 +402,7 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
             // Say which command was turned down, so a stopped assist can be explained and fixed.
             const command = calls.get(event.id)?.command ?? '(a tool call)'
             calls.set(event.id, { command, output: 'refused by the permission layer or the guard', isError: true })
-            const step = `✗ refused: ${command.replace(/^\$ /, '')}`
+            const step = `✗ refused: ${(command.split('\n')[0] ?? '').replace(/^\$ /, '')}`
             await patchEntry($, id, x => ({ steps: [...x.steps, step].slice(-MAX_STEPS) }))
           } else if (event.kind === 'result') {
             result = { text: event.text, isError: event.isError }
@@ -825,7 +825,8 @@ export const register: Register = (on, options) => {
         if (entry.status === 'done' && (entry.outcome?.shas.length ?? 0) > 0) list.push({ key: 'revert', label: 'revert', act: () => void revert($, entry.id) })
         if (entry.dump !== '') list.push({ key: 'dump', label: 'record', act: () => void copyDump($, entry.dump) })
         list.push(toMainButton)
-      } else if (entry.status === 'passed' && entry.verdict !== '' && !entry.isMissed) {
+      } else if (entry.status === 'passed' && entry.verdict !== '' && entry.verdict !== 'investigate' && !entry.isMissed) {
+        // An investigation sent to main for want of instruction files was judged right; nothing to teach.
         list.push({ key: 'missed', label: "should've been sidekick", act: () => void markMissed($, entry.id) })
       }
       if (list.length === 0) return null

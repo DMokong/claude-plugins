@@ -24,12 +24,20 @@ const SECRETS: readonly RegExp[] = [
   /AIza[A-Za-z0-9_-]{20,}/g,
   /sbp_[A-Za-z0-9]{16,}/g,
   /glc_[A-Za-z0-9+/=_-]{16,}/g,
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
+  /\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/g,
+  /\bsk-[A-Za-z0-9_-]{20,}/g,
 ]
+
+// `password=…`, `token: …`, `Authorization: Bearer …`: keep the name, drop the value.
+const NAMED = /\b((?:[A-Za-z0-9_]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|auth)[A-Za-z0-9_]*)\s*[=:]\s*["']?)(?!\[redacted\]|(?:Bearer|Basic)\b)[^\s"',;]{4,}/gi
+const BEARER = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/g
 
 /** The text with every credential it recognises replaced by `[redacted]`. */
 export function redact(text: string): string {
   let out = text
   for (const pattern of SECRETS) out = out.replace(pattern, '[redacted]')
+  out = out.replace(BEARER, '$1 [redacted]').replace(NAMED, '$1[redacted]')
   // scheme://user:password@host keeps the user and host.
   return out.replace(/([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:)[^\s@/]+@/gi, '$1[redacted]@')
 }
@@ -50,7 +58,9 @@ export function dumpText(entry: { prompt: string; createdAt: number }, calls: re
   parts.push(`## What it ran (${calls.length})`)
   for (const call of calls) {
     const output = call.output.trim() === '' ? '(no output)' : cut(call.output)
-    parts.push(`### ${call.command}${call.isError ? ' (error)' : ''}\n\n\`\`\`\n${output.replace(/```/g, '`\u200b``')}\n\`\`\``)
+    const [first = '', ...more] = call.command.split('\n')
+    const whole = more.length > 0 ? `\n\n\`\`\`sh\n${call.command.replace(/^\$ /, '')}\n\`\`\`` : ''
+    parts.push(`### ${first}${more.length > 0 ? ' …' : ''}${call.isError ? ' (error)' : ''}${whole}\n\n\`\`\`\n${output.replace(/```/g, '`\u200b``')}\n\`\`\``)
   }
   parts.push(`## Report\n\n\`\`\`json\n${JSON.stringify(outcome, null, 2)}\n\`\`\``)
   return redact(parts.join('\n\n'))
