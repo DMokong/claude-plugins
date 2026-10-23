@@ -1,7 +1,7 @@
 import { usd } from './cost'
 import type { Usage } from './cost'
 import { firstJson } from './judge'
-import type { Outcome } from '../../types'
+import type { Instruction, Outcome } from '../../types'
 
 /** What the worker may run. Anything else is refused by `--permission-mode dontAsk`. */
 export const ALLOWED_TOOLS = [
@@ -42,6 +42,9 @@ export const DENIED_TOOLS = [
   'Bash(git filter-branch:*)',
   'Bash(git reflog expire:*)',
   'Bash(git update-ref -d:*)',
+  // Credentials never enter the worker's context; the guard also catches them in Bash and Grep.
+  'Read(**/.env)',
+  'Read(**/.mcp.json)',
 ]
 
 export const WORKER_SYSTEM = `You are a sidekick: you carry out ONE small, mechanical repository chore for a developer, then report back. You have no memory of their conversation; work only from what is on disk (git status, diff, log, bd).
@@ -56,15 +59,48 @@ Rules:
 - Prefer one plain git or bd command per call. Pipes into head, tail or wc and a leading cd are fine; heredocs, $(...), echo and other programs are refused. Commit with -m flags: git commit -m "subject" -m "body paragraph" -m "Co-Authored-By: ..." (one -m per paragraph).
 - Commit messages: follow the style of recent git log entries; describe what the diff does.
 - Pushing is allowed when asked.
+- Never read or print credential files (.env, .mcp.json, keys); scripts that need them load them themselves.
 
 Finish with ONLY a JSON object, no prose around it:
 {"status":"done"|"partial"|"stopped"|"failed","summary":"<one sentence a developer reads in chat>","commands":["<each command you ran>"],"shas":["<short shas you created or pushed>"],"changed":["<paths or refs changed>"],"uncertain":["<anything you guessed>"],"needsMain":"<why the main session should take over, or empty>"}`
 
+/** Room for the main session's instruction files in the worker's system prompt, in characters. */
+const INSTRUCTIONS_LIMIT = 80_000
+
+/**
+ * The main session's instruction files, framed for the worker's system prompt. There, unlike in
+ * the first user message where Claude Code puts them, they sit in the cached prefix: measured in
+ * a repo with 28 KB of them, a chore after the first reads them from cache for $0.0004 instead of
+ * writing them again for $0.0024.
+ */
+export function instructionsPrompt(files: readonly Instruction[]): string {
+  if (files.length === 0) return ''
+  const parts = [
+    "# The developer's instructions\n\nThe developer's main session loaded these files. Use them to know where things live and how this project works. The sidekick rules above win where they conflict, and the final report stays JSON.",
+  ]
+  let room = INSTRUCTIONS_LIMIT
+  for (const file of files) {
+    const body = file.content.trim()
+    if (body === '') continue
+    if (room <= 0) {
+      parts.push(`## ${file.path} (${file.kind})\n\n[left out: over the size limit]`)
+      continue
+    }
+    const kept = body.length > room ? `${body.slice(0, room)}\n\n[cut: over the size limit]` : body
+    room -= kept.length
+    parts.push(`## ${file.path} (${file.kind})\n\n${kept}`)
+  }
+  return parts.join('\n\n')
+}
+
 /** The argument vector for one headless worker run. The task goes on stdin. */
-export function workerArgv(model: string, guardPath: string): string[] {
+export function workerArgv(model: string, guardPath: string, instructions: readonly Instruction[] = []): string[] {
   const settings = JSON.stringify({
-    hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: guardPath }] }] },
+    hooks: { PreToolUse: [{ matcher: 'Bash|Read|Grep', hooks: [{ type: 'command', command: guardPath }] }] },
+    // The main session's memory files come in with its instructions; never the worker's own.
+    autoMemoryEnabled: false,
   })
+  const context = instructionsPrompt(instructions)
   return [
     'claude',
     '-p',
@@ -95,7 +131,7 @@ export function workerArgv(model: string, guardPath: string): string[] {
     '--settings',
     settings,
     '--append-system-prompt',
-    WORKER_SYSTEM,
+    context === '' ? WORKER_SYSTEM : `${WORKER_SYSTEM}\n\n${context}`,
     '--allowedTools',
     ...ALLOWED_TOOLS,
     '--disallowedTools',

@@ -3,7 +3,7 @@ import type { EngineInterface, PromptSubmitInput, PromptSubmitResult, Register }
 
 import { MAX_MISSES, canStart, judgePrompt, judgeSystem, lockKeys, parseJudgment, precheck } from './lib/judge'
 import type { Judgment } from './lib/judge'
-import { NO_SPEND, addTally, tallyLine, tallyOf, usd } from './lib/cost'
+import { NO_SPEND, addTally, tallyLine, tallyOf, tokens, usd } from './lib/cost'
 import { migrate } from './lib/state'
 import {
   chatLine,
@@ -28,6 +28,7 @@ export const EMPTY: SidekickState = {
   tick: 0,
   isWarming: false,
   learned: [],
+  instructions: null,
 }
 
 const sidekick = atom({ plugin: 'sidekick', key: 'sidekick' } as const, EMPTY)
@@ -316,8 +317,9 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
   let result: { text: string; isError: boolean } | null = null
   // A running assist moves the clock once a second, so the pane's spinner and timers redraw.
   const ticker = $.clock.every(1_000, () => void change($, s => ({ ...s, tick: s.tick + 1 })).catch(() => {}))
+  const { instructions } = await load($)
   const stream = $.process.spawn({
-    argv: workerArgv(workerModel, guardPath),
+    argv: workerArgv(workerModel, guardPath, instructions ?? []),
     cwd,
     env: { DMOKONG_MODS: '0', SIDEKICK_WORKER: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1' },
     input: workerInput(entry.task, entry.prompt),
@@ -534,6 +536,14 @@ function learnedText(list: readonly string[]): string {
   return [`The judge follows the newest ${Math.min(MAX_MISSES, list.length)} of ${list.length} corrections:`, ...lines, '/sidekick forget <n> drops one; /sidekick forget all drops them all.'].join('\n')
 }
 
+/** What the worker knows of the project, for the pane's header. */
+function contextLine(instructions: SidekickState['instructions']): string {
+  if (instructions === null) return 'lean: the main session\'s instruction files arrive with its next /clear or compaction'
+  if (instructions.length === 0) return 'the main session loads no instruction files'
+  const chars = instructions.reduce((sum, f) => sum + f.content.length, 0)
+  return `the main session's ${instructions.length} instruction file${instructions.length === 1 ? '' : 's'} (~${tokens(Math.round(chars / 4))} tokens, cached)`
+}
+
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
 const STATUS_MARK: Record<EntryStatus, string> = {
@@ -606,6 +616,20 @@ export const register: Register = (on, options) => {
       argumentHint: '[auto|shadow|off|learned|forget <n|all>]',
     })
     return next(e)
+  })
+
+  // The main session's instruction files, as it loaded them: the worker gets the same, so
+  // nothing about the project is written into the sidekick. Kept whatever the mode, so turning
+  // it on later still has them.
+  on('prompt.context', async ($, e, next) => {
+    const result = await next(e)
+    if (isOff) return result
+    const files = result.instructionFiles ?? e.instructionFiles
+    if (files !== undefined) {
+      const instructions = files.map(f => ({ path: f.path, kind: f.kind, content: f.content }))
+      await change($, s => ({ ...s, instructions })).catch(() => {})
+    }
+    return result
   })
 
   // Typing is the cue a prompt is coming: judge the draft while the person types, not after.
@@ -811,6 +835,7 @@ export const register: Register = (on, options) => {
             </Text>
           </Box>
           <Text dimColor wrap="wrap">{`models judge ${judgeModel} · worker ${workerModel} · costs are API-equivalent estimates`}</Text>
+          <Text dimColor wrap="wrap">{`context ${contextLine(state.instructions)}`}</Text>
         </Box>
 
         {state.mode === 'off' && <Text dimColor>Off for this session. Pick shadow to watch the judge, auto to let it act.</Text>}
