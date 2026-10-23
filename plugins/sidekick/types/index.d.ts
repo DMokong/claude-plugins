@@ -46,6 +46,8 @@ export type Outcome = {
 
 export type Entry = {
   id: string
+  /** A git/bd chore or an investigation; chores before 0.3.0 read as chores. */
+  kind: Profile
   /** The prompt as the person typed it. */
   prompt: string
   status: EntryStatus

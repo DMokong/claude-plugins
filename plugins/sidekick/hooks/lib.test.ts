@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 
-import { JUDGE_SYSTEM, canStart, judgeSystem, lockKeys, parseJudgment, precheck, resourcesOf } from './lib/judge'
+import { JUDGE_SYSTEM, canStart, holdsMain, judgeSystem, lockKeys, parseJudgment, precheck, resourcesOf } from './lib/judge'
 import { migrate, toTaught } from './lib/state'
 import { EMPTY } from './register'
 import { INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, handoffNote, instructionsPrompt, parseOutcome, parseStreamLine, splitLines, workerArgv } from './lib/worker'
@@ -39,6 +39,14 @@ test('investigate is a fourth verdict, holding the ops lock', async () => {
   expect(lockKeys(['ops'], '/r/a')).toEqual(['ops'])
   expect(canStart(['git:/r/a'], [['ops']], 2)).toBe(true)
   expect(canStart(['ops'], [['ops']], 2)).toBe(false)
+})
+
+test('only assists that touch git or bd hold the main session', async () => {
+  expect(holdsMain(['git:/r/a'])).toBe(true)
+  expect(holdsMain(['bd'])).toBe(true)
+  expect(holdsMain(['*'])).toBe(true)
+  expect(holdsMain(['ops'])).toBe(false)
+  expect(holdsMain([])).toBe(false)
 })
 
 test('the judge rule names investigations and restarts, and four reply words', async () => {

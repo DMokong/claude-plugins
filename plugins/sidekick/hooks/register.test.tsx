@@ -52,6 +52,8 @@ function world(on: On, w: World) {
     release: () => release(),
   }
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  // The engine's own answer to a context build: the blocks it was given.
+  on('prompt.context', async (_$, e) => ({ blocks: e.blocks }))
   on('command.register', async (_$, e) => ({ value: { command: e.name } }))
   on('env.get', async () => ({ value: undefined }))
   on('ui.open', async () => ({ value: { isPlaced: true } }))
@@ -229,6 +231,70 @@ test('a prompt for main waits while an assist runs, then is sent in order', asyn
   open()
   await until($, x => x.entries[0]?.status === 'done' && x.waiting.length === 0)
   expect(seen.resubmitted).toEqual(['why does the stage-2 doc mention codex twice?'])
+})
+
+const INVESTIGATE = 'investigate'
+const LOOKED = '{"status":"done","summary":"acme-bot was hung; restarted it and it came back (pid 901)","commands":["launchctl print gui/501/com.example.acme"],"shas":[],"changed":["restarted: acme-bot"],"uncertain":[],"needsMain":""}'
+
+/** The main session's context build, carrying one instruction file the worker should get. */
+async function withInstructions($: { prompt: { context: (e: never) => Promise<unknown> } }): Promise<void> {
+  await $.prompt.context({ blocks: [], instructionFiles: [{ path: '/repo/CLAUDE.md', kind: 'project', content: 'acme-bot runs as com.example.acme.' }] } as never)
+}
+
+test('an investigation goes to the worker with the investigate profile and the ops lock', async ($, on) => {
+  const seen = world(on, { judge: INVESTIGATE, worker: LOOKED })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await withInstructions($ as never)
+  const result = await $.prompt.submit({ text: 'acme-bot stopped replying, look into it', ...TYPED })
+  expect(result.drop).toContain('→ sidekick (haiku) · investigating')
+  expect(seen.toMain).toEqual([])
+  const s = await until($, x => x.entries[0]?.status === 'done')
+  expect(s.entries[0]?.kind).toBe('investigate')
+  expect(s.entries[0]?.locks).toEqual(['ops'])
+  const argv = seen.spawned[0] ?? []
+  expect(argv[argv.indexOf('--settings') + 1]).toContain('sidekick-guard investigate')
+  expect(argv[argv.indexOf('--append-system-prompt') + 1]).toContain('acme-bot runs as com.example.acme.')
+})
+
+test('with no instruction files yet, an investigation goes to main instead', async ($, on) => {
+  const seen = world(on, { judge: INVESTIGATE, worker: LOOKED })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const result = await $.prompt.submit({ text: 'acme-bot stopped replying, look into it', ...TYPED })
+  expect(result.drop).toBeUndefined()
+  expect(seen.toMain.map(p => p.text)).toEqual(['acme-bot stopped replying, look into it'])
+  expect(seen.logs.some(line => line.includes('no instruction files yet'))).toBe(true)
+  expect(seen.spawned).toEqual([])
+  expect((await state($)).entries[0]?.status).toBe('passed')
+})
+
+test('a running investigation does not hold prompts for the main session', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  const seen = world(on, { judge: INVESTIGATE, worker: LOOKED, workerGate: gate })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await withInstructions($ as never)
+  await $.prompt.submit({ text: 'acme-bot stopped replying, look into it', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'running')
+  const through = await $.prompt.submit({ text: 'why does the stage-2 doc mention codex twice?', ...TYPED })
+  expect(through.drop).toBeUndefined()
+  expect(seen.toMain.map(p => p.text)).toEqual(['why does the stage-2 doc mention codex twice?'])
+  open()
+  await until($, x => x.entries.some(e => e.status === 'done'))
+})
+
+test('shadow says what it would investigate', async ($, on) => {
+  const seen = world(on, { judge: INVESTIGATE, worker: LOOKED })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'shadow', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'check the acme-bot logs', ...TYPED })
+  const s = await until($, x => x.entries[0]?.status === 'shadow')
+  expect(s.entries[0]?.reason).toContain('would investigate: check the acme-bot logs')
+  expect(seen.spawned).toEqual([])
 })
 
 test('shadow judges and logs, but everything still goes to main', async ($, on) => {
@@ -423,8 +489,6 @@ test("should've been sidekick on a message about a running service teaches inves
 
 test("the worker gets the instruction files the main session loaded, and the pane says so", async ($, on) => {
   const seen = world(on, { judge: MECHANICAL, worker: DONE })
-  // The engine's own answer: the blocks it was given.
-  on('prompt.context', async (_$, e) => ({ blocks: e.blocks }))
   await $.session.start(START)
   await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
   expect((await state($)).instructions).toBeNull()

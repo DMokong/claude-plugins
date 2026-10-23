@@ -41,6 +41,7 @@ export function toTaught(raw: unknown): Taught[] {
 function migrateEntry(raw: Partial<Entry>): Entry {
   return {
     id: '',
+    kind: 'chore',
     prompt: '',
     status: 'passed',
     verdict: '',

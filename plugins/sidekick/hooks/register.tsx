@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PromptSubmitInput, PromptSubmitResult, Register } from 'claude-code'
 
-import { MAX_MISSES, canStart, judgePrompt, judgeSystem, lockKeys, parseJudgment, precheck, taughtVerdict } from './lib/judge'
+import { MAX_MISSES, canStart, holdsMain, judgePrompt, judgeSystem, lockKeys, parseJudgment, precheck, taughtVerdict } from './lib/judge'
 import type { Judgment } from './lib/judge'
 import { NO_SPEND, addTally, tallyLine, tallyOf, tokens, usd } from './lib/cost'
 import { migrate, toTaught } from './lib/state'
@@ -15,7 +15,7 @@ import {
   workerArgv,
   workerInput,
 } from './lib/worker'
-import type { Entry, EntryStatus, Mode, Outcome, SidekickState, Taught, Tally } from '../types'
+import type { Entry, EntryStatus, Mode, Outcome, Profile, SidekickState, Taught, Tally } from '../types'
 
 export const EMPTY: SidekickState = {
   mode: 'off',
@@ -90,6 +90,7 @@ function newId(now: number): string {
 function blankEntry(id: string, prompt: string, now: number): Entry {
   return {
     id,
+    kind: 'chore',
     prompt,
     status: 'judging',
     verdict: '',
@@ -252,8 +253,12 @@ async function pump($: EngineInterface): Promise<void> {
     await patchEntry($, entry.id, () => ({ status: 'running' }))
     void runAssist($, entry.id)
   }
-  const after = await load($)
-  if (!after.entries.some(x => x.status === 'running' || x.status === 'queued')) await releaseWaiting($)
+  if (!holdingMain(await load($))) await releaseWaiting($)
+}
+
+/** Whether a running or queued assist holds prompts for the main session (chores do; investigations don't). */
+function holdingMain(state: SidekickState): boolean {
+  return state.entries.some(x => (x.status === 'running' || x.status === 'queued') && holdsMain(x.locks))
 }
 
 /** Sends the prompts held for the main session, in the order they were typed. */
@@ -319,7 +324,7 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
   const ticker = $.clock.every(1_000, () => void change($, s => ({ ...s, tick: s.tick + 1 })).catch(() => {}))
   const { instructions } = await load($)
   const stream = $.process.spawn({
-    argv: workerArgv(workerModel, guardPath, instructions ?? []),
+    argv: workerArgv(workerModel, guardPath, instructions ?? [], entry.kind),
     cwd,
     env: { DMOKONG_MODS: '0', SIDEKICK_WORKER: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1' },
     input: workerInput(entry.task, entry.prompt),
@@ -392,7 +397,9 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
 
 /** Queues an assist for a task and starts it if its locks are free. */
 async function enqueue($: EngineInterface, id: string, judgment: Judgment, repo: string): Promise<void> {
+  const kind: Profile = judgment.verdict === 'investigate' ? 'investigate' : 'chore'
   await patchEntry($, id, () => ({
+    kind,
     status: 'queued',
     task: judgment.task,
     locks: lockKeys(judgment.resources, repo),
@@ -436,11 +443,12 @@ async function setMode($: EngineInterface, mode: Mode): Promise<void> {
 
 async function shadowJudge($: EngineInterface, id: string, text: string): Promise<void> {
   const { judgment, ms, stateMs, spend } = await judge($, text, null)
-  const would = judgment.verdict === 'mechanical'
+  const would = judgment.verdict === 'mechanical' || judgment.verdict === 'investigate'
+  const what = judgment.verdict === 'investigate' ? 'would investigate' : 'would hand off'
   await patchEntry($, id, () => ({
     status: would ? 'shadow' : 'passed',
     verdict: judgment.verdict,
-    reason: `${would ? `would hand off: ${judgment.task}` : judgment.reason}${ms > JUDGE_TIMEOUT_MS ? ' · over budget' : ''} (git ${stateMs}ms)`,
+    reason: `${would ? `${what}: ${judgment.task}` : judgment.reason}${ms > JUDGE_TIMEOUT_MS ? ' · over budget' : ''} (git ${stateMs}ms)`,
     task: judgment.task,
     judgeMs: ms,
     judgeSpend: spend,
@@ -691,7 +699,7 @@ export const register: Register = (on, options) => {
     }
 
     // auto
-    const isBusy = state.entries.some(x => x.status === 'running' || x.status === 'queued')
+    const isBusy = holdingMain(state)
     const holdForAssists = async (why: string): Promise<PromptSubmitResult> => {
       if (!isBusy || isMidTurn) return toMain($, e, next)
       const id = newId(now)
@@ -706,17 +714,23 @@ export const register: Register = (on, options) => {
     await addEntry($, blankEntry(id, e.text, now))
     draftTimer?.cancel()
     const { judgment, ms, repo, spend } = await verdictFor($, e.text)
-    await patchEntry($, id, () => ({ verdict: judgment.verdict, reason: judgment.reason, judgeMs: ms, judgeSpend: spend }))
-    if (judgment.verdict !== 'mechanical') {
+    // An investigation without the main session's instruction files would guess where things live.
+    const isBlind = judgment.verdict === 'investigate' && (await load($)).instructions === null
+    const routed: Judgment = isBlind
+      ? { ...judgment, verdict: 'needs-main', reason: "no instruction files yet: the sidekick wouldn't know where things live (they arrive with the next /clear or compaction)" }
+      : judgment
+    await patchEntry($, id, () => ({ verdict: judgment.verdict, reason: routed.reason, judgeMs: ms, judgeSpend: spend }))
+    if (routed.verdict !== 'mechanical' && routed.verdict !== 'investigate') {
       await patchEntry($, id, () => ({ status: 'passed' }))
       await change($, s => ({ ...s, totals: { ...s.totals, passed: s.totals.passed + 1 } }))
       // A pass is a decision too: say so, or a sidekick that passes looks like one that is gone.
-      $.ui.log(`→ to Claude: ${judgment.reason} · judged in ${(ms / 1000).toFixed(1)}s`)
-      return holdForAssists(judgment.reason)
+      $.ui.log(`→ to Claude: ${routed.reason} · judged in ${(ms / 1000).toFixed(1)}s`)
+      return holdForAssists(routed.reason)
     }
-    void enqueue($, id, judgment, repo).catch(() => {})
+    void enqueue($, id, routed, repo).catch(() => {})
     clearRestored($, e.text)
-    return { drop: `❯ ${e.text} → sidekick (${workerModel}) · judged in ${(ms / 1000).toFixed(1)}s` }
+    const doing = routed.verdict === 'investigate' ? ' · investigating' : ''
+    return { drop: `❯ ${e.text} → sidekick (${workerModel})${doing} · judged in ${(ms / 1000).toFixed(1)}s` }
   }).catch(($, e, next) => next(e)) // fail open: any error lets the prompt through as typed
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

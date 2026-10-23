@@ -140,6 +140,14 @@ export function lockKeys(resources: readonly string[], repo: string): string[] {
   return keys.size === 0 ? ['*'] : [...keys]
 }
 
+/**
+ * Whether a running assist holds prompts for the main session until it finishes: chores do (the
+ * main session must not touch the repository or the tracker under them); investigations don't.
+ */
+export function holdsMain(locks: readonly string[]): boolean {
+  return locks.some(key => key === 'bd' || key === '*' || key.startsWith('git:'))
+}
+
 /** Whether an assist holding `wants` can start beside the assists holding `held`. */
 export function canStart(wants: readonly string[], held: readonly (readonly string[])[], maxConcurrent: number): boolean {
   if (held.length >= Math.max(1, maxConcurrent)) return false
