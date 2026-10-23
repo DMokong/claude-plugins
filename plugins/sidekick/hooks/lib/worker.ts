@@ -253,6 +253,16 @@ export function parseStreamEvents(line: string): StreamEvent[] {
   return out
 }
 
+/**
+ * The command that deletes what a finished worker session left on disk. `--no-session-persistence`
+ * keeps no transcript, but a large tool output is still saved under the session's folder (an
+ * investigation's `ps aux` was 35 KB). Null when the id isn't a session id, so nothing else can be named.
+ */
+export function cleanupArgv(configRoot: string, sessionId: string): string[] | null {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) return null
+  return ['find', `${configRoot.replace(/\/+$/, '')}/projects`, '-mindepth', '2', '-maxdepth', '2', '-type', 'd', '-name', sessionId, '-exec', 'rm', '-rf', '{}', '+']
+}
+
 /** The first event in a line, or `other`. */
 export function parseStreamLine(line: string): StreamEvent {
   return parseStreamEvents(line)[0] ?? { kind: 'other' }

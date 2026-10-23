@@ -107,6 +107,7 @@ function world(on: On, w: World) {
   })
   on('process.spawn', async function* (_$, e) {
     seen.spawned.push([...e.argv])
+    yield { stream: 'stdout' as const, text: `${JSON.stringify({ type: 'system', subtype: 'init', session_id: WORKER_SESSION })}\n` }
     yield { stream: 'stdout' as const, text: `${JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', input: { command: 'git commit -m x' } }] } })}\n` }
     if (w.workerGate !== undefined) await w.workerGate
     yield {
@@ -125,6 +126,7 @@ function world(on: On, w: World) {
 }
 
 const MECHANICAL = 'mechanical'
+const WORKER_SESSION = '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'
 const WORKER_USAGE = {
   input_tokens: 4,
   cache_creation_input_tokens: 1642,
@@ -296,6 +298,8 @@ test('a chore writes no record', async ($, on) => {
   await until($, x => x.entries[0]?.status === 'done')
   expect(seen.written).toEqual([])
   expect(seen.appended.at(-1)).not.toContain('Full record')
+  // What the worker session left on disk goes once it ends.
+  expect(seen.ran.some(argv => argv[0] === 'find' && argv.includes(WORKER_SESSION) && argv[1] === '/home/u/.claude/projects')).toBe(true)
 })
 
 test('with no instruction files yet, an investigation goes to main instead', async ($, on) => {

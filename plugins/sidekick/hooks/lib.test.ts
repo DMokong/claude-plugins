@@ -3,7 +3,7 @@ import { test, expect } from 'claude-code/testing'
 import { JUDGE_SYSTEM, canStart, holdsMain, judgeSystem, lockKeys, parseJudgment, precheck, resourcesOf } from './lib/judge'
 import { migrate, toTaught } from './lib/state'
 import { EMPTY } from './register'
-import { INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
+import { INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
 import { DUMP_KEEP, dumpDir, dumpName, dumpText, redact } from './lib/dump'
 
 test('precheck lets short imperative chores through to the judge', async () => {
@@ -214,6 +214,14 @@ test('a message with several tool calls or results yields an event for each', as
     { kind: 'refused', id: 'c' },
   ])
   expect(parseStreamEvents(JSON.stringify({ type: 'system', subtype: 'init', session_id: 's-1' }))).toEqual([{ kind: 'init', sessionId: 's-1' }])
+})
+
+test("a finished worker's session folder is deleted by id, and only a real session id is accepted", async () => {
+  const id = '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'
+  expect(cleanupArgv('/home/u/.claude/', id)).toEqual(['find', '/home/u/.claude/projects', '-mindepth', '2', '-maxdepth', '2', '-type', 'd', '-name', id, '-exec', 'rm', '-rf', '{}', '+'])
+  expect(cleanupArgv('/home/u/.claude', '*')).toBeNull()
+  expect(cleanupArgv('/home/u/.claude', '')).toBeNull()
+  expect(cleanupArgv('/home/u/.claude', '../x')).toBeNull()
 })
 
 test('credentials are redacted from what the record keeps', async () => {

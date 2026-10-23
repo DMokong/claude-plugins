@@ -56,10 +56,14 @@ export function dumpText(entry: { prompt: string; createdAt: number }, calls: re
   return redact(parts.join('\n\n'))
 }
 
+/** Claude's config folder: CLAUDE_CONFIG_DIR when set, else ~/.claude. */
+export function configRoot(home: string, configDir: string | undefined): string {
+  return (configDir !== undefined && configDir !== '' ? configDir : `${home}/.claude`).replace(/\/+$/, '')
+}
+
 /** Where records live: outside any repository, so nothing in them can be committed by accident. */
 export function dumpDir(home: string, configDir: string | undefined): string {
-  const root = configDir !== undefined && configDir !== '' ? configDir : `${home}/.claude`
-  return `${root.replace(/\/+$/, '')}/sidekick/investigations`
+  return `${configRoot(home, configDir)}/sidekick/investigations`
 }
 
 /** `2026-10-23-<id>.md`: sorts oldest first, so retention can drop from the front. */

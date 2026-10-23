@@ -5,10 +5,11 @@ import { MAX_MISSES, canStart, holdsMain, judgePrompt, judgeSystem, lockKeys, pa
 import type { Judgment } from './lib/judge'
 import { NO_SPEND, addTally, tallyLine, tallyOf, tokens, usd } from './lib/cost'
 import { migrate, toTaught } from './lib/state'
-import { DUMP_KEEP, dumpDir, dumpName, dumpText } from './lib/dump'
+import { DUMP_KEEP, configRoot, dumpDir, dumpName, dumpText } from './lib/dump'
 import type { Call } from './lib/dump'
 import {
   chatLine,
+  cleanupArgv,
   giveToMainPrompt,
   handoffNote,
   parseOutcome,
@@ -315,6 +316,19 @@ async function writeDump($: EngineInterface, entry: Entry, calls: readonly Call[
   }
 }
 
+/** Deletes the folder a finished worker session left under Claude's config folder. */
+async function cleanupSession($: EngineInterface, sessionId: string): Promise<void> {
+  try {
+    const home = await $.env.get('HOME')
+    const configDir = await $.env.get('CLAUDE_CONFIG_DIR')
+    if (typeof home !== 'string' || home === '') return
+    const argv = cleanupArgv(configRoot(home, typeof configDir === 'string' ? configDir : undefined), sessionId)
+    if (argv !== null) await $.process.run(argv, { timeoutMs: 5_000 })
+  } catch {
+    // Left behind is only disk space.
+  }
+}
+
 async function finish($: EngineInterface, id: string, outcome: Outcome, calls: readonly Call[] = []): Promise<void> {
   workers.delete(id)
   const now = await $.clock.now()
@@ -365,6 +379,7 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
   const timer = $.clock.after(WORKER_TIMEOUT_MS, stop)
   // Every tool call and what came back, in order, for an investigation's record.
   const calls = new Map<string, Call>()
+  let sessionId = ''
   try {
     let buffer = ''
     for await (const chunk of stream) {
@@ -374,7 +389,9 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
       buffer = split.rest
       for (const line of split.lines) {
         for (const event of parseStreamEvents(line)) {
-          if (event.kind === 'step') {
+          if (event.kind === 'init') {
+            sessionId = event.sessionId
+          } else if (event.kind === 'step') {
             const step = event.text
             calls.set(event.id, { command: step, output: '', isError: false })
             await patchEntry($, id, x => ({ steps: [...x.steps, step].slice(-MAX_STEPS) }))
@@ -403,6 +420,8 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
   }
   timer.cancel()
   ticker.cancel()
+  // After the stream ends, so the worker is done with its own saved output.
+  if (sessionId !== '') await cleanupSession($, sessionId)
   if (isStopped) {
     await finish($, id, {
       status: 'stopped',
