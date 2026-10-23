@@ -8,6 +8,12 @@ separate worker session. Claude never spends a turn on it, and its context stays
 result in one line, and Claude gets a short note so it knows what happened. Everything else goes to
 Claude exactly as before.
 
+It also does **quick first-pass investigations**. When you say *"the bot stopped replying, look
+into it"*, *"why did the nightly job fail?"* or *"restart acme-bot"*, the worker checks the job
+manager, the logs and the project's own health scripts, restarts in place if that's needed (or
+asked for), and checks that the service came back. Then it hands back what it found, with a full
+record Claude can read if the answer isn't enough.
+
 ![sidekick handing a chore to the worker while a question waits its turn](docs/hero.svg)
 
 <sub>A real session. On the left, `commit and push` goes to the sidekick, and a question typed
@@ -23,6 +29,7 @@ waiting, what's done and what went to Claude, with the cost.</sub>
 - [Quick start](#quick-start-60-seconds)
 - [How it works](#how-it-works)
 - [What it will and won't do](#what-it-will-and-wont-do)
+- [Looking into things](#looking-into-things)
 - [The pane](#the-pane)
 - [The band](#the-band)
 - [Modes](#modes)
@@ -44,6 +51,7 @@ waiting, what's done and what went to Claude, with the cost.</sub>
 | | |
 |---|---|
 | ⚡ **Hands off chores** | git and `bd` chores run in a separate worker session, and the main model never sees them |
+| 🔎 **Starts investigations** | "look into it", "why did X fail", "restart X": logs, job state and health checks first, for about a cent, with a full record for Claude |
 | 🧠 **Judges while you type** | A verdict is usually ready before you press Enter, so a submit waits about **0.0 s** |
 | 🛟 **Fails open** | Anything unsure, slow or unclear goes to Claude, so you never lose a message |
 | 🔒 **Never loses work** | Force-push, `reset --hard`, `clean`, `branch -D` and similar are blocked in the tool layer, not just discouraged |
@@ -122,9 +130,9 @@ To turn it off: `/sidekick off`.
 flowchart TD
     A[You type a message] --> B{Free precheck<br/>slash command? long? a question?<br/>pasted? typed mid-turn?}
     B -- yes --> M[Claude handles it, as usual]
-    B -- no --> J{Judge · Haiku<br/>mechanical chore?<br/>usually judged while you type}
+    B -- no --> J{Judge · Haiku<br/>chore? investigation?<br/>usually judged while you type}
     J -- needs the main session<br/>or unsure or slow --> M
-    J -- mechanical --> W[Worker · a separate lean<br/>claude -p session on Haiku]
+    J -- mechanical or investigate --> W[Worker · a separate lean<br/>claude -p session on Haiku]
     W --> R1[✓ one line in the chat]
     W --> R2[pane · band · notification]
     W --> R3[a short handoff note<br/>for Claude's next turn]
@@ -132,10 +140,11 @@ flowchart TD
 ```
 
 1. **Precheck (free, instant).** Slash commands, long or multi-line messages, pasted images,
-   "why…" or "how does…" questions, and anything you type while Claude is mid-reply go straight to
+   "why…" or "how does…" questions (unless they're about something running: *"why did the
+   nightly job fail?"* goes to the judge), and anything you type while Claude is mid-reply go straight to
    Claude. They never wait on a model.
 2. **Judge (Haiku, one word).** For everything else, a small model answers `mechanical`,
-   `needs-main` or `unclear`. It starts judging your **draft** as soon as you pause typing, so the
+   `investigate`, `needs-main` or `unclear`. It starts judging your **draft** as soon as you pause typing, so the
    verdict is usually ready when you press Enter. A submit never waits more than 5 s. A slow or
    failed judge sends the message to Claude.
 3. **Worker (Haiku, separate session).** A headless `claude -p` session runs in your repo with a
@@ -143,7 +152,8 @@ flowchart TD
    `git`, `bd` and a few read-only helpers. It does get **the instruction files your main session
    loaded** (CLAUDE.md, rules, `@` imports), so it knows the project the way Claude does. It does
    the chore from what's on disk (`git status`, the diff, `git log`) and reports back in a fixed
-   format.
+   format. An investigation gets a different setup, described in
+   [Looking into things](#looking-into-things).
 4. **Return path.** You get a chat line, a pane entry, a band update and a notification. Claude
    gets a note of up to 700 characters (what ran, the SHAs, what changed, anything the worker was
    unsure of), so it can pick up from there.
@@ -184,6 +194,66 @@ never decides to branch off or open a PR unless you ask.
 | `rename forecast() to getForecast() across the code` | **Claude** (a code change) |
 | `what does the readme say about caching?` | **Claude** (needs reading and reasoning) |
 | `why might forecast() be slow?` | **Claude** (a reasoning question, so the precheck sends it without asking the judge) |
+
+---
+
+## Looking into things
+
+A quick first look at something running on your machine that's failing, stopped, slow or
+unknown, so that a cheap model starts the investigation and Claude takes over only if needed.
+
+| You type | What happens |
+|---|---|
+| `the chat bot stopped replying overnight, look into it` | job state, pid, last exit, newest log lines, read-only health scripts |
+| `why did nightly-report fail?` · `check the logs for the nightly job` | the same, aimed at that job |
+| `is the healthcheck passing` · `which containers look unhealthy?` | runs the project's own checks, `docker ps`, `launchctl list` |
+| `restart acme-bot` | notes its state, restarts it in place, checks that it came back |
+
+**It knows your setup from your instruction files**, the same CLAUDE.md and rules your main
+session loaded, and nothing about any project is built into the sidekick. In a session where those
+files haven't been captured yet (one that started before the sidekick was installed), an
+investigation goes to Claude instead, saying so.
+
+**What it may run.** Any command that helps, except what the guard refuses (see the table below).
+That covers reads (`ps`, `lsof`, `launchctl list/print`, `docker ps/logs/inspect`, `tail`,
+`grep`, `log show`, `curl` GETs) and your project's own scripts. Restarts in place are allowed:
+`launchctl kickstart -k`, `docker restart` / `start`, `brew services restart`, or a restart script
+the project names. It restarts when you ask, or when the evidence shows a hung or dead process,
+and it reports `done` only after checking the service came back: running, a new pid, fresh healthy
+log lines.
+
+**What the guard refuses in an investigation**, on top of everything in the table above:
+
+| ⛔ Refused | Because |
+|---|---|
+| `rm`, `rmdir`, `shred`, `truncate`, `find -delete`, `mv`, `cp`, `ln`, `touch`, `chmod`, `rsync`, `tar x`, `unzip` | deletes or writes files |
+| `> file`, `tee file`, `sed -i`, `perl -i`, `dd of=`, `sort -o`, `curl -o`, `wget` to a file | overwrites file contents |
+| `docker rm / rmi / stop / kill / run / … prune`, `volume rm`, `compose down`, `--force-recreate` | removes or recreates containers |
+| `launchctl bootout / unload / load / remove / disable / kill`, `brew services stop` | removes or disables a job, where a restart doesn't |
+| SQL that writes (`DROP`, `DELETE`, `UPDATE`, …), `dropdb`, `redis-cli FLUSHALL / DEL / SET …` | changes data |
+| `kill`, `pkill`, `killall` | restarts go through the job manager |
+| `curl -X POST`, `-d`, `-F`, `--json` | writes to an API (it also never posts to chat or reruns a job with side effects) |
+| `sudo`, `ssh`, package installs, `npx` | root, other machines, new software |
+| `python -c`, `node -e`, `osascript`, `eval`, a shell with no script | code the guard can't see into |
+| git anything but reads | an investigation doesn't move a repo |
+| another Claude session's files under `~/.claude/projects/` | private, and stale |
+
+The guard looks inside `bash -c '…'`, `$(…)`, backticks, `xargs`, `find -exec`, `watch` and
+`docker exec`, and refuses a command it can't parse. **A script is the deliberate gap:** the guard
+can't see inside your project's own scripts, so those are your maintainers' call, and the worker is
+told to use the read-only or restart ones. The file and process rows hold for chores too.
+
+**What comes back.** The chat line, pane, band and notification as for a chore, plus
+`→ main: <what's still open>` when there is something. Claude's note ends with the path of a **full
+record**: every command the worker ran and its output (each cut to 4 KB), the report and the
+cost. Credentials that show up in output (API keys, Slack and GitHub tokens, passwords in URLs) are
+redacted. Records live in `~/.claude/sidekick/investigations/` (or under `CLAUDE_CONFIG_DIR`),
+outside any repository, and the newest 50 are kept. The pane's **`record`** button copies the
+path.
+
+**Cost.** A real healthcheck of about two dozen launchd jobs and their containers took 12 commands, 30 s and
+about **$0.01**. Investigations hold no git or bd lock, so **you can keep talking to Claude while
+one runs**. Two investigations never run at once.
 
 ---
 
@@ -256,9 +326,10 @@ You don't have to wait for a chore to finish.
 
 - **Another chore** joins the **QUEUED** section and runs when the current one finishes. (Running
   chores in parallel is an experimental option, see [Configuration](#configuration).)
-- **Anything for Claude** is **held** and sent the moment the sidekick is idle, in the order you
-  typed. Claude then reads the handoff notes first, so it never acts on a repo the worker is
-  halfway through. Press `send now` to skip the wait.
+- **Anything for Claude** is **held** while a chore runs, and sent the moment it's done, in the
+  order you typed. Claude then reads the handoff notes first, so it never acts on a repo the worker is
+  halfway through. Press `send now` to skip the wait. **An investigation holds nothing**: it
+  doesn't touch your repo, so you can keep talking to Claude while it looks.
 
 ```text
 ⏺ Prompt dropped by a hook: ❯ what's the best way to test forecast()? · held for Claude until the
@@ -276,8 +347,12 @@ If the judge sends a chore to Claude that the sidekick should have taken, press
 **`should've been sidekick`** on that entry in **TO CLAUDE**. A toast confirms it:
 
 ```text
-Noted: messages like "tidy up merged branches" go to the sidekick from now on
+Noted: messages like "tidy up merged branches" go to the sidekick (chore) from now on
 ```
+
+A correction about something running (*"the acme-bot logs look wrong"*) teaches **investigate**
+instead of chore. The pane and `/sidekick learned` show which one each correction teaches
+(`[chore]` / `[investigate]`), so a wrong guess is easy to spot and forget.
 
 Your last 10 corrections are shown to the judge as precedents from its next call on, and they're
 kept across sessions (up to 200 stored). The safety rules still apply, so a correction can't
@@ -377,7 +452,7 @@ different agent entirely) without touching the rest.
 |---|---|
 | **Judge** | Your message and the current directory. Never the conversation. |
 | **Worker** | Your message, your repo through the commands it runs, and the instruction files your main session loaded (CLAUDE.md, rules). Never the conversation, your MCP servers, your other plugins or your credential files. |
-| **Claude (main)** | The handoff note: what ran, SHAs, changed files, open questions. Never the worker's raw output. |
+| **Claude (main)** | The handoff note: what ran, SHAs, changed files, open questions, and for an investigation the path of its full record (read only if Claude needs it). Never the worker's raw output in the conversation. |
 
 All calls go through your own Claude Code login. The sidekick sends nothing anywhere else.
 "Should've been sidekick" corrections are stored locally in the mod's store.
@@ -394,8 +469,11 @@ All calls go through your own Claude Code login. The sidekick sends nothing anyw
 - **A busy moment can slow the judge.** If a verdict takes longer than 5 s, the message goes to
   Claude, and the pane says `judge timed out`. Nothing is lost; press `should've been sidekick` if
   it should have been a chore.
-- **Chores only.** git and bd for now. Anything that needs the conversation, your judgment or a
-  code change goes to Claude by design.
+- **Chores and first-pass investigations only.** git and bd chores, and looking into things on this
+  machine. Anything that needs the conversation, your judgment or a code change goes to Claude by
+  design, and so does debugging code (*"why does this function return null"*).
+- **Investigations don't follow up.** One question, one answer, back to Claude. They don't
+  watch, schedule or reach other machines.
 - **Messages typed while Claude is mid-reply** always go to Claude.
 
 ---
@@ -463,12 +541,14 @@ conversation at main-model prices for each chore. The sidekick is deliberately t
 tool-capable and conversation-free, which is why it only takes chores that can be done from disk.
 
 **Does it ever change my code?**
-No. The worker has no Edit or Write tool and can't redirect output into files. It changes your repo
-only through git (commits, pushes and the like) and your tracker through `bd`.
+No. The worker has no Edit or Write tool and can't redirect output into files. A chore changes your
+repo only through git (commits, pushes and the like) and your tracker through `bd`. An
+investigation changes nothing but a service's running state, by restarting it.
 
 **What happens if something goes wrong mid-chore?**
 It aborts its own operation (`rebase --abort`, `merge --abort`) so your tree is how it was, stops,
-and tells you. `give to main` hands the job to Claude with the worker's report attached.
+and tells you. `give to main` hands the job to Claude with the worker's report attached. On a
+finished entry it hands the report over **for context** instead, so Claude doesn't redo it.
 
 ---
 
@@ -477,6 +557,7 @@ and tells you. `give to main` hands the job to Claude with the worker's report a
 ```bash
 claude plugin validate plugins/sidekick   # manifest + what the module hooks and calls
 claude plugin test plugins/sidekick       # unit and flow tests (no model calls)
+python3 -m unittest discover -s plugins/sidekick/tests   # the guard, run as the worker runs it
 claude --plugin-dir plugins/sidekick      # a session with your working copy loaded
 ```
 
@@ -489,7 +570,8 @@ and rendered to SVG.
 
 | Version | |
 |---|---|
-| **0.2.5** | The worker gets the instruction files your main session loaded (CLAUDE.md, rules), in its cached system prompt; the pane shows them as `context`. Credential files (`.env`, `.mcp.json`, keys) can't be read by any worker tool. The worker no longer loads auto-memory of its own. |
+| **0.3.0** | **Investigations**: a fourth verdict, `investigate`, for "look into it", "why did X fail" and "restart X". The worker may run any command but the guard's (which now holds the data-loss line outside git too), restarts in place and verifies, and leaves a full redacted record Claude can read. Investigations don't hold your messages to Claude. Corrections teach chore or investigate. `give to main` on a finished entry hands it over for context, with SHAs, changes and doubts. The braces rule now says what's actually refused (`@{u}` in a range). Worker sessions no longer leave saved output on disk. |
+| 0.2.5 | The worker gets the instruction files your main session loaded (CLAUDE.md, rules), in its cached system prompt; the pane shows them as `context`. Credential files (`.env`, `.mcp.json`, keys) can't be read by any worker tool. The worker no longer loads auto-memory of its own. |
 | 0.2.4 | The judge gets 5 s at submit instead of 1.8 s, so a cold or busy judge still hands chores to the sidekick. Learned corrections are listed in the pane (**LEARNED**) and by `/sidekick learned`, and `forget` revokes them. |
 | 0.2.3 | Worker cache reuse across repos (`--exclude-dynamic-system-prompt-sections`). The worker stays on your branch. Refused steps are shown. `should've been sidekick` now teaches the judge. Roomier header. The band stays on one line and shows warm-up. A taller pane when inline. This README. |
 | 0.2.2 | The loaded version shows in the pane header. |

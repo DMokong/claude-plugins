@@ -22,7 +22,7 @@ test('precheck sends reasoning, long, pasted and conversational prompts straight
 })
 
 test('precheck lets operational why-questions through to the judge, but not code ones', async () => {
-  expect(precheck('why did morning-brief fail?', false).isJudged).toBe(true)
+  expect(precheck('why did nightly-report fail?', false).isJudged).toBe(true)
   expect(precheck('why is acme-bot not replying', false).isJudged).toBe(true)
   expect(precheck('how come acme-bot stopped', false).isJudged).toBe(true)
   expect(precheck('why does parseOutcome return partial?', false).isJudged).toBe(false)
@@ -281,6 +281,8 @@ test('an outcome is validated; prose still reports something', async () => {
   expect(prose.status).toBe('partial')
   expect(prose.summary).toBe('I committed it.')
   expect(parseOutcome('{"status":"done","summary":"x"}', true).status).toBe('failed')
+  // An investigation's next steps run long; 600 characters keep them whole.
+  expect(parseOutcome(JSON.stringify({ status: 'partial', summary: 'x', needsMain: 'n'.repeat(700) }), false).needsMain.length).toBe(600)
 })
 
 test('the chat line and the handoff note say what happened', async () => {

@@ -297,7 +297,7 @@ export function parseOutcome(text: string, isError: boolean): Outcome {
     shas: strings(obj.shas).map(sha => sha.slice(0, 12)),
     changed: strings(obj.changed),
     uncertain: strings(obj.uncertain),
-    needsMain: typeof obj.needsMain === 'string' ? obj.needsMain.trim().slice(0, 300) : '',
+    needsMain: typeof obj.needsMain === 'string' ? obj.needsMain.trim().slice(0, 600) : '',
   }
 }
 
