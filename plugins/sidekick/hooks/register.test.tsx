@@ -186,11 +186,11 @@ test('in auto, a message that needs the session goes to main', async ($, on) => 
 })
 
 test('a slow judge fails open within the budget', async ($, on) => {
-  const seen = world(on, { judge: MECHANICAL, judgeDelayMs: 5_000, worker: DONE })
+  const seen = world(on, { judge: MECHANICAL, judgeDelayMs: 8_000, worker: DONE })
   await $.session.start(START)
   await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
   const pending = $.prompt.submit({ text: 'push it', ...TYPED })
-  await clock.advance(1_800)
+  await clock.advance(5_000)
   const result = await pending
   seen.release()
   expect(result.drop).toBeUndefined()
@@ -344,6 +344,45 @@ test("should've been sidekick teaches the judge: the next judgment carries the m
   expect(seen.toasts.some(t => t.includes('tidy up merged branches'))).toBe(true)
   await $.prompt.submit({ text: 'tidy up stale branches', ...TYPED })
   expect(seen.systems.at(-1)).toContain('- tidy up merged branches')
+})
+
+test('learned corrections can be listed and forgotten, from the pane and the command', async ($, on) => {
+  const seen = world(on, { judge: NEEDS_MAIN, worker: DONE })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const pane = () =>
+    $.ui.mount({
+      plugin: 'sidekick',
+      surface: 'terminal',
+      component: 'Pane',
+      requestId: 'sidekick',
+      props: { title: 'Sidekick', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+    } as never)
+  for (const text of ['tidy up merged branches', 'sync with origin']) {
+    await $.prompt.submit({ text, ...TYPED })
+    const ui = await pane()
+    await ui.press({ key: `missed-${(await state($)).entries.find(x => x.prompt === text)?.id}` })
+    await ui.unmount()
+  }
+  const run = (args: string) => $.command.run({ command: 'sidekick', args, origin: { kind: 'composer' }, presentation: 'inline' } as never) as Promise<{ text: string }>
+  const listed = (await run('learned')).text
+  expect(listed).toContain('1. sync with origin')
+  expect(listed).toContain('2. tidy up merged branches')
+
+  const ui = await pane()
+  expect(await ui.find({ type: 'Text', text: /LEARNED/ })).toBeDefined()
+  await ui.press({ key: 'forget-tidy up merged branches' })
+  await ui.unmount()
+  expect((await state($)).learned).toEqual(['sync with origin'])
+  await $.prompt.submit({ text: 'prune branches', ...TYPED })
+  expect(seen.systems.at(-1)).not.toContain('- tidy up merged branches')
+  expect(seen.systems.at(-1)).toContain('- sync with origin')
+
+  expect((await run('forget 1')).text).toContain('sync with origin')
+  expect((await state($)).learned).toEqual([])
+  await $.prompt.submit({ text: 'prune more branches', ...TYPED })
+  expect(seen.systems.at(-1)).not.toContain('corrected you')
+  expect((await run('forget 3')).text).toContain('Usage')
 })
 
 test('the band stays on one line when narrow: the least useful parts give way first', async ($, on) => {

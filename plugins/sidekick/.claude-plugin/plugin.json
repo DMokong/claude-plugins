@@ -1,6 +1,6 @@
 {
   "name": "sidekick",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Per-session sidekick: a cheap judge reads each message you type and hands mechanical chores (git, bd) to a separate worker session, so the main session never spends a turn on them",
   "author": {
     "name": "Dustin Cheng"
