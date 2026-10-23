@@ -12,6 +12,9 @@ export type Tally = {
   cacheWrite1h: number
 }
 
+/** One instruction file the main session loaded (a CLAUDE.md, a rules file), as it loaded it. */
+export type Instruction = { path: string; kind: string; content: string }
+
 export type Verdict = 'mechanical' | 'needs-main' | 'unclear'
 
 export type EntryStatus =
@@ -83,6 +86,11 @@ export type SidekickState = {
   isWarming: boolean
   /** The "should've been sidekick" corrections the judge learns from, oldest first; a copy of the stored list, so the pane redraws when one is added or forgotten. */
   learned: string[]
+  /**
+   * The main session's instruction files, captured when it built its context; the worker gets the
+   * same. Null until that happens in a conversation this mod saw (it is redone after a compaction or /clear).
+   */
+  instructions: Instruction[] | null
 }
 
 declare module 'claude-code' {

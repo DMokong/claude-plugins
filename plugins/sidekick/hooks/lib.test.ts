@@ -3,7 +3,7 @@ import { test, expect } from 'claude-code/testing'
 import { canStart, judgeSystem, lockKeys, parseJudgment, precheck, resourcesOf } from './lib/judge'
 import { migrate } from './lib/state'
 import { EMPTY } from './register'
-import { WORKER_SYSTEM, chatLine, handoffNote, parseOutcome, parseStreamLine, splitLines, workerArgv } from './lib/worker'
+import { WORKER_SYSTEM, chatLine, handoffNote, instructionsPrompt, parseOutcome, parseStreamLine, splitLines, workerArgv } from './lib/worker'
 
 test('precheck lets short imperative chores through to the judge', async () => {
   expect(precheck('commit and push', false)).toEqual({ isJudged: true })
@@ -62,6 +62,29 @@ test('the worker runs lean, locked down and guarded', async () => {
   // Read-only helpers, so `cd repo && git ...` or `git log | head` is not refused whole.
   for (const helper of ['Bash(cd:*)', 'Bash(head:*)', 'Bash(wc:*)']) expect(argv).toContain(helper)
   expect(argv[argv.indexOf('--settings') + 1]).toContain('/p/bin/sidekick-guard')
+  // The guard sees reads too, so a credentials file never enters the worker's context.
+  const settings = JSON.parse(argv[argv.indexOf('--settings') + 1] ?? '{}')
+  expect(settings.hooks.PreToolUse[0].matcher).toBe('Bash|Read|Grep')
+  expect(settings.autoMemoryEnabled).toBe(false)
+  for (const rule of ['Read(**/.env)', 'Read(**/.mcp.json)']) expect(argv).toContain(rule)
+  expect(argv[argv.indexOf('--append-system-prompt') + 1]).toBe(WORKER_SYSTEM)
+})
+
+test("the worker gets the main session's instruction files in its system prompt, within a size limit", async () => {
+  const files = [
+    { path: '/repo/CLAUDE.md', kind: 'project', content: 'Logs live in logs/.' },
+    { path: '/repo/.claude/rules/empty.md', kind: 'project', content: '   ' },
+    { path: '/home/CLAUDE.md', kind: 'user', content: 'x'.repeat(90_000) },
+    { path: '/repo/late.md', kind: 'local', content: 'never fits' },
+  ]
+  const system = workerArgv('haiku', '/g', files)[workerArgv('haiku', '/g', files).indexOf('--append-system-prompt') + 1] ?? ''
+  expect(system.startsWith(WORKER_SYSTEM)).toBe(true)
+  expect(system).toContain('## /repo/CLAUDE.md (project)\n\nLogs live in logs/.')
+  expect(system).not.toContain('empty.md')
+  expect(system).toContain('[cut: over the size limit]')
+  expect(system).toContain('## /repo/late.md (local)\n\n[left out: over the size limit]')
+  expect(system.length).toBeLessThan(WORKER_SYSTEM.length + 82_000)
+  expect(instructionsPrompt([])).toBe('')
 })
 
 test('streamed output splits on lines across chunks', async () => {

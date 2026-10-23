@@ -385,6 +385,30 @@ test('learned corrections can be listed and forgotten, from the pane and the com
   expect((await run('forget 3')).text).toContain('Usage')
 })
 
+test("the worker gets the instruction files the main session loaded, and the pane says so", async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE })
+  // The engine's own answer: the blocks it was given.
+  on('prompt.context', async (_$, e) => ({ blocks: e.blocks }))
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  expect((await state($)).instructions).toBeNull()
+  await $.prompt.context({ blocks: [], instructionFiles: [{ path: '/repo/CLAUDE.md', kind: 'project', content: 'The bot logs to logs/bot.log.' }] })
+  expect((await state($)).instructions).toEqual([{ path: '/repo/CLAUDE.md', kind: 'project', content: 'The bot logs to logs/bot.log.' }])
+  await $.prompt.submit({ text: 'push it', ...TYPED })
+  await clock.advance(10)
+  const argv = seen.spawned.at(-1) ?? []
+  expect(argv[argv.indexOf('--append-system-prompt') + 1]).toContain('The bot logs to logs/bot.log.')
+  const ui = await $.ui.mount({
+    plugin: 'sidekick',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'sidekick',
+    props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  } as never)
+  expect(await ui.find({ type: 'Text', text: /1 instruction file/ })).toBeDefined()
+  await ui.unmount()
+})
+
 test('the band stays on one line when narrow: the least useful parts give way first', async ($, on) => {
   world(on, { judge: MECHANICAL, worker: DONE })
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => {

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""PreToolUse guard for the sidekick's worker session: refuses git commands that can lose work.
+"""PreToolUse guard for the sidekick's worker session: refuses git commands that can lose work,
+and any read of a credentials file (.env, .mcp.json, keys), whichever tool asks.
 
 The worker's --disallowedTools prefix rules catch the common spellings; this catches the rest
 (a flag after other arguments, `git -C dir ...`, a command chained after `&&`). Exit 2 blocks
 the call and shows stderr to the worker; any other exit lets it through.
 """
 import json
+import os
 import re
 import shlex
 import sys
@@ -54,23 +56,54 @@ def refusal(args):
     return None
 
 
+SECRET_NAMES = {".env", ".mcp.json", ".netrc", ".pgpass", "id_rsa", "id_ed25519", "id_ecdsa"}
+SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
+# A template beside the real file holds placeholders, not secrets.
+TEMPLATE_ENDINGS = ("example", "sample", "template", "dist")
+
+
+def is_secret(path):
+    """Whether a path names a credentials file. `HEAD:.env` and `<.env` count too."""
+    for part in re.split(r"[:<>=]", path or ""):
+        base = os.path.basename(part.strip().strip("'\"").rstrip("/"))
+        if base in SECRET_NAMES or base.endswith(SECRET_SUFFIXES):
+            return True
+        if base.startswith(".env.") and not base.endswith(TEMPLATE_ENDINGS):
+            return True
+    return False
+
+
+def refuse(why):
+    sys.stderr.write(f"sidekick guard: refused ({why}). Stop and report that the main session should handle this.\n")
+    return 2
+
+
 def main():
     try:
         event = json.load(sys.stdin)
     except Exception:
         return 0
-    command = (event.get("tool_input") or {}).get("command") or ""
+    tool = event.get("tool_name") or "Bash"
+    given = event.get("tool_input") or {}
+    if tool in ("Read", "Grep"):
+        for key in ("file_path", "path", "glob"):
+            if is_secret(given.get(key)):
+                return refuse(f"reading a credentials file: {given.get(key)}")
+        return 0
+    command = given.get("command") or ""
     for segment in re.split(r"&&|\|\||;|\||\n", command):
         try:
             words = shlex.split(segment)
         except ValueError:
             words = segment.split()
+        for word in words:
+            if is_secret(word):
+                return refuse(f"a credentials file: {word}")
         args = git_args(words)
         if args:
             why = refusal(args)
             if why:
-                sys.stderr.write(f"sidekick guard: refused ({why}). Stop and report that the main session should handle this.\n")
-                return 2
+                return refuse(why)
     return 0
 
 

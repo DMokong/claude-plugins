@@ -139,9 +139,11 @@ flowchart TD
    verdict is usually ready when you press Enter. A submit never waits more than 5 s. A slow or
    failed judge sends the message to Claude.
 3. **Worker (Haiku, separate session).** A headless `claude -p` session runs in your repo with a
-   lean setup: no MCP servers, skills, hooks or CLAUDE.md, and only Bash/Read/Glob/Grep, limited to
-   `git`, `bd` and a few read-only helpers. It does the chore from what's on disk (`git status`,
-   the diff, `git log`) and reports back in a fixed format.
+   lean setup: no MCP servers, skills, hooks or plugins, and only Bash/Read/Glob/Grep, limited to
+   `git`, `bd` and a few read-only helpers. It does get **the instruction files your main session
+   loaded** (CLAUDE.md, rules, `@` imports), so it knows the project the way Claude does. It does
+   the chore from what's on disk (`git status`, the diff, `git log`) and reports back in a fixed
+   format.
 4. **Return path.** You get a chat line, a pane entry, a band update and a notification. Claude
    gets a note of up to 700 characters (what ran, the SHAs, what changed, anything the worker was
    unsure of), so it can pick up from there.
@@ -162,10 +164,11 @@ is allowed. A bad commit can be reverted, so pushing is fine.
 | rebase **unpushed** commits | `checkout --` / `restore` over uncommitted changes |
 | `bd` create / update / comment / close / list | `stash drop / clear`, `filter-branch`, reflog expiry, `update-ref -d`, `gc --prune` |
 | `cd`, `head`, `tail`, `wc`, `ls`, `cat` (read-only helpers) | writing files by redirect (`> file`), `Edit`/`Write`, any other program |
+| templates like `.env.example` | **reading credentials**: `.env`, `.env.*`, `.mcp.json`, `.netrc`, `.pgpass`, SSH keys, `*.pem`/`*.key`, by any tool (Bash, Read, Grep) |
 
 The blocks are enforced in two layers: Claude Code's own permission rules (`dontAsk` mode with an
 allowlist), and a PreToolUse guard (`bin/sidekick-guard`) that also catches a flag placed after
-other arguments or chained after `&&`. If a step is refused, the worker **stops**, aborts any
+other arguments or chained after `&&`, and refuses credential reads whichever tool asks. If a step is refused, the worker **stops**, aborts any
 half-done rebase or merge so your tree is clean, and says why. The step shows in the pane as
 `✗ refused: …`.
 
@@ -324,6 +327,17 @@ last one wrote. The per-run details (cwd, date, git status) are moved out of tha
 | repo B, straight after | 2.0k / 13.8k | $0.00059 |
 | repo A again | **0** / 15.7k | $0.00021 |
 
+**Your instruction files go where they cache.** Claude Code would put CLAUDE.md in the first user
+message, next to the task, so every new chore writes it to the cache again. The sidekick puts the
+same files at the end of the worker's system prompt instead, which stays cached between chores.
+Measured in a repo with 28 KB of instructions:
+
+| Worker run | Cache written / read | ≈ cost |
+|---|---|---|
+| CLAUDE.md the way Claude Code loads it, every chore | 11.8k / 6.0k | $0.0024 |
+| **The sidekick's way**, first chore in the repo this hour | 13.1k / 4.5k | $0.0027 |
+| **The sidekick's way**, every chore after | **1.1k / 16.6k** | **$0.0004–0.0005** |
+
 The judge's prompt is too small to cache, which doesn't matter at $0.00003 a call. The cache
 expires after an hour without use; the first chore after that rewrites it (at most about $0.003 on
 Haiku). The sidekick never shares a cache with your main session, which runs a different model
@@ -362,7 +376,7 @@ different agent entirely) without touching the rest.
 | Who | Sees |
 |---|---|
 | **Judge** | Your message and the current directory. Never the conversation. |
-| **Worker** | Your message and your repo, through the git and bd commands it runs. Never the conversation, your CLAUDE.md, your MCP servers or your other plugins. |
+| **Worker** | Your message, your repo through the commands it runs, and the instruction files your main session loaded (CLAUDE.md, rules). Never the conversation, your MCP servers, your other plugins or your credential files. |
 | **Claude (main)** | The handoff note: what ran, SHAs, changed files, open questions. Never the worker's raw output. |
 
 All calls go through your own Claude Code login. The sidekick sends nothing anywhere else.
@@ -433,14 +447,20 @@ terminal the pane docks beside the chat.
 ## FAQ
 
 **Does the worker get my main session's context or cache?**
-No. It's a separate `claude -p` process on its own model with its own prompt. It shares neither
-the conversation nor the prompt cache with your main session. Its cache is shared across sidekick
-chores only.
+It gets the same **instruction files**: whatever CLAUDE.md, rules and `@` imports your main
+session loaded, captured as the session builds its context (`prompt.context`), so it knows where
+things live without the sidekick hardcoding anything. Your excludes and path-scoped rules apply
+exactly as they do for Claude. The pane's header shows what it has (`context`). If the sidekick
+was installed mid-conversation, the worker runs without them until your next `/clear` or
+compaction.
+
+It doesn't get the conversation, and it shares no prompt cache with your main session: it's a
+separate `claude -p` process on its own model. Its cache is shared across sidekick chores only.
 
 **Why not fork the main conversation instead?**
 A fork has no tools (it can't run git), and it would run on your main model, re-reading the whole
 conversation at main-model prices for each chore. The sidekick is deliberately the opposite: cheap,
-tool-capable and context-free, which is why it only takes chores that can be done from disk.
+tool-capable and conversation-free, which is why it only takes chores that can be done from disk.
 
 **Does it ever change my code?**
 No. The worker has no Edit or Write tool and can't redirect output into files. It changes your repo
@@ -469,7 +489,8 @@ and rendered to SVG.
 
 | Version | |
 |---|---|
-| **0.2.4** | The judge gets 5 s at submit instead of 1.8 s, so a cold or busy judge still hands chores to the sidekick. Learned corrections are listed in the pane (**LEARNED**) and by `/sidekick learned`, and `forget` revokes them. |
+| **0.2.5** | The worker gets the instruction files your main session loaded (CLAUDE.md, rules), in its cached system prompt; the pane shows them as `context`. Credential files (`.env`, `.mcp.json`, keys) can't be read by any worker tool. The worker no longer loads auto-memory of its own. |
+| 0.2.4 | The judge gets 5 s at submit instead of 1.8 s, so a cold or busy judge still hands chores to the sidekick. Learned corrections are listed in the pane (**LEARNED**) and by `/sidekick learned`, and `forget` revokes them. |
 | 0.2.3 | Worker cache reuse across repos (`--exclude-dynamic-system-prompt-sections`). The worker stays on your branch. Refused steps are shown. `should've been sidekick` now teaches the judge. Roomier header. The band stays on one line and shows warm-up. A taller pane when inline. This README. |
 | 0.2.2 | The loaded version shows in the pane header. |
 | 0.2.1 | Upgrades session state left by older versions (fixes a blank pane after updating). |

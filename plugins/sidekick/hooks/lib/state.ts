@@ -18,6 +18,7 @@ export function migrate(raw: Partial<SidekickState> | undefined, empty: Sidekick
     tick: typeof state.tick === 'number' ? state.tick : 0,
     isWarming: state.isWarming === true,
     learned: Array.isArray(state.learned) ? state.learned : [],
+    instructions: Array.isArray(state.instructions) ? state.instructions : null,
   }
 }
 
