@@ -3,7 +3,8 @@ import { test, expect } from 'claude-code/testing'
 import { JUDGE_SYSTEM, canStart, holdsMain, judgeSystem, lockKeys, parseJudgment, precheck, resourcesOf } from './lib/judge'
 import { migrate, toTaught } from './lib/state'
 import { EMPTY } from './register'
-import { INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, handoffNote, instructionsPrompt, parseOutcome, parseStreamLine, splitLines, workerArgv } from './lib/worker'
+import { INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
+import { DUMP_KEEP, dumpDir, dumpName, dumpText, redact } from './lib/dump'
 
 test('precheck lets short imperative chores through to the judge', async () => {
   expect(precheck('commit and push', false)).toEqual({ isJudged: true })
@@ -177,6 +178,91 @@ test('stream lines become steps and a result', async () => {
   const result = parseStreamLine(JSON.stringify({ type: 'result', result: '{"status":"done"}', is_error: false, total_cost_usd: 0.01 }))
   expect(result).toEqual({ kind: 'result', text: '{"status":"done"}', isError: false, costUsd: 0.01 })
   expect(parseStreamLine('not json')).toEqual({ kind: 'other' })
+})
+
+test('a message with several tool calls or results yields an event for each', async () => {
+  const calls = parseStreamEvents(
+    JSON.stringify({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'tool_use', id: 'a', name: 'Bash', input: { command: 'launchctl list' } },
+          { type: 'tool_use', id: 'b', name: 'Grep', input: { pattern: 'ERROR', path: 'logs' } },
+        ],
+      },
+    }),
+  )
+  expect(calls).toEqual([
+    { kind: 'step', text: '$ launchctl list', id: 'a' },
+    { kind: 'step', text: '$ grep "ERROR" logs', id: 'b' },
+  ])
+  const results = parseStreamEvents(
+    JSON.stringify({
+      type: 'user',
+      message: {
+        content: [
+          { type: 'tool_result', tool_use_id: 'a', content: '- 0 com.example.acme' },
+          { type: 'tool_result', tool_use_id: 'b', content: [{ type: 'text', text: 'logs/a.log:3' }], is_error: false },
+          { type: 'tool_result', tool_use_id: 'c', is_error: true, content: 'sidekick guard: refused (rm deletes files).' },
+        ],
+      },
+    }),
+  )
+  expect(results).toEqual([
+    { kind: 'output', id: 'a', text: '- 0 com.example.acme', isError: false },
+    { kind: 'output', id: 'b', text: 'logs/a.log:3', isError: false },
+    { kind: 'refused', id: 'c' },
+  ])
+  expect(parseStreamEvents(JSON.stringify({ type: 'system', subtype: 'init', session_id: 's-1' }))).toEqual([{ kind: 'init', sessionId: 's-1' }])
+})
+
+test('credentials are redacted from what the record keeps', async () => {
+  // Built from parts, so this file never holds a whole token-shaped string.
+  const slack = ['xoxb', '1234567890', 'abcdefghij'].join('-')
+  const anthropic = `sk-ant-${'a'.repeat(20)}`
+  const github = `ghp_${'b'.repeat(30)}`
+  expect(redact(`token=${slack} ok`)).toBe('token=[redacted] ok')
+  expect(redact(anthropic)).toBe('[redacted]')
+  expect(redact(`x ${github} y`)).toBe('x [redacted] y')
+  expect(redact('postgres://app:hunter2@db.example.com:5432/app')).toBe('postgres://app:[redacted]@db.example.com:5432/app')
+  expect(redact('nothing secret here')).toBe('nothing secret here')
+})
+
+test('the record has the prompt, each command and its output, cut to size, and the report', async () => {
+  const outcome = parseOutcome('{"status":"partial","summary":"acme-bot logs DNS failures","uncertain":["when they began"],"needsMain":"check DNS"}', false)
+  const slack = ['xoxb', '1234567890', 'abcdefghij'].join('-')
+  const text = dumpText(
+    { prompt: 'acme-bot stopped replying', createdAt: Date.UTC(2026, 9, 23, 6, 0) },
+    [
+      { command: '$ tail -n 5 logs/acme.log', output: `ENOTFOUND example.com\nSLACK_BOT_TOKEN=${slack}`, isError: false },
+      { command: '$ cat big.log', output: 'z'.repeat(5_000), isError: false },
+      { command: '$ rm x', output: 'sidekick guard: refused', isError: true },
+    ],
+    outcome,
+    '≈$0.0050',
+  )
+  expect(text).toContain('# sidekick investigation: acme-bot stopped replying')
+  expect(text).toContain('2026-10-23T06:00:00.000Z · partial · ≈$0.0050')
+  expect(text).toContain('### $ tail -n 5 logs/acme.log')
+  expect(text).toContain('ENOTFOUND example.com')
+  expect(text).toContain('[cut: 1000 more chars]')
+  expect(text).toContain('### $ rm x (error)')
+  expect(text).toContain('## For the main session\n\ncheck DNS')
+  expect(text).toContain('"summary": "acme-bot logs DNS failures"')
+  expect(text).not.toContain(slack)
+  expect(DUMP_KEEP).toBe(50)
+  expect(dumpDir('/home/u', undefined)).toBe('/home/u/.claude/sidekick/investigations')
+  expect(dumpDir('/home/u', '/cfg/')).toBe('/cfg/sidekick/investigations')
+  expect(dumpName(Date.UTC(2026, 9, 23), 'mh1x-3')).toBe('2026-10-23-mh1x-3.md')
+})
+
+test('the handoff note points at the record, and a long summary never cuts the pointer', async () => {
+  const outcome = parseOutcome(JSON.stringify({ status: 'done', summary: 'y'.repeat(900) }), false)
+  const note = handoffNote('look into acme-bot', outcome, 'haiku', '/home/u/.claude/sidekick/investigations/2026-10-23-a.md')
+  expect(note.length).toBeLessThanOrEqual(700)
+  expect(note).toContain('Full record (every command and its output): /home/u/.claude/sidekick/investigations/2026-10-23-a.md.')
+  expect(note.endsWith('Treat this as already done; take over only if the user asks or it needs you.')).toBe(true)
+  expect(handoffNote('push', outcome, 'haiku')).not.toContain('Full record')
 })
 
 test('an outcome is validated; prose still reports something', async () => {

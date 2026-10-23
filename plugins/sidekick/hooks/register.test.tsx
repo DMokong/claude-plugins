@@ -20,6 +20,8 @@ type World = {
   worker: string
   /** When set, the worker waits for this promise before it reports. */
   workerGate?: Promise<void>
+  /** What the record folder holds, as `$.fs.list` answers. */
+  listed?: { name: string; kind: 'file'; size: number; mtimeMs: number; isLink: boolean }[]
   /** What the store holds before the session starts. */
   stored?: Record<string, unknown>
 }
@@ -44,6 +46,8 @@ function world(on: On, w: World) {
     appended: [] as string[],
     resubmitted: [] as string[],
     spawned: [] as string[][],
+    written: [] as { path: string; text: string }[],
+    ran: [] as string[][],
     judged: 0,
     judgments: [] as string[],
     systems: [] as string[],
@@ -55,7 +59,12 @@ function world(on: On, w: World) {
   // The engine's own answer to a context build: the blocks it was given.
   on('prompt.context', async (_$, e) => ({ blocks: e.blocks }))
   on('command.register', async (_$, e) => ({ value: { command: e.name } }))
-  on('env.get', async () => ({ value: undefined }))
+  on('env.get', async (_$, e) => ({ value: e.name === 'HOME' ? '/home/u' : undefined }))
+  on('fs.write', async (_$, e) => {
+    seen.written.push({ path: e.path, text: e.text })
+    return { value: undefined }
+  })
+  on('fs.list', async () => ({ value: w.listed ?? [] }))
   on('ui.open', async () => ({ value: { isPlaced: true } }))
   on('fs.read', async (_$, e) => {
     if (e.path.endsWith('/.claude-plugin/plugin.json')) return { value: JSON.stringify({ name: 'sidekick', version: '9.9.9' }) }
@@ -83,6 +92,7 @@ function world(on: On, w: World) {
     return next(e)
   })
   on('process.run', async (_$, e) => {
+    seen.ran.push([...e.argv])
     const out = e.argv.includes('rev-parse') ? '/repo\n' : '## main...origin/main\n M a.txt\n'
     return { value: { exitCode: 0, stdout: out, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -255,6 +265,37 @@ test('an investigation goes to the worker with the investigate profile and the o
   const argv = seen.spawned[0] ?? []
   expect(argv[argv.indexOf('--settings') + 1]).toContain('sidekick-guard investigate')
   expect(argv[argv.indexOf('--append-system-prompt') + 1]).toContain('acme-bot runs as com.example.acme.')
+})
+
+test("a finished investigation writes its record outside the repo and the note points to it; chores don't", async ($, on) => {
+  const listed = Array.from({ length: 52 }, (_, i) => ({ name: `2026-10-${String(i).padStart(2, '0')}-x.md`, kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false }))
+  const seen = world(on, { judge: INVESTIGATE, worker: LOOKED, listed })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await withInstructions($ as never)
+  await $.prompt.submit({ text: 'acme-bot stopped replying, look into it', ...TYPED })
+  const s = await until($, x => x.entries[0]?.status === 'done')
+  const dump = s.entries[0]?.dump ?? ''
+  expect(dump).toMatch(/^\/home\/u\/\.claude\/sidekick\/investigations\/\d{4}-\d{2}-\d{2}-.+\.md$/)
+  expect(seen.written.map(w => w.path)).toEqual([dump])
+  expect(seen.written[0]?.text).toContain('### $ git commit -m x')
+  expect(seen.written[0]?.text).toContain('restarted: acme-bot')
+  expect(seen.appended.at(-1)).toContain(`Full record (every command and its output): ${dump}.`)
+  // The two oldest of 52 go; the newest 50 stay.
+  expect(seen.ran.filter(argv => argv[0] === 'rm')).toEqual([
+    ['rm', '-f', '/home/u/.claude/sidekick/investigations/2026-10-00-x.md'],
+    ['rm', '-f', '/home/u/.claude/sidekick/investigations/2026-10-01-x.md'],
+  ])
+})
+
+test('a chore writes no record', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'done')
+  expect(seen.written).toEqual([])
+  expect(seen.appended.at(-1)).not.toContain('Full record')
 })
 
 test('with no instruction files yet, an investigation goes to main instead', async ($, on) => {

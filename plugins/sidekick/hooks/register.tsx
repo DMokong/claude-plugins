@@ -5,12 +5,14 @@ import { MAX_MISSES, canStart, holdsMain, judgePrompt, judgeSystem, lockKeys, pa
 import type { Judgment } from './lib/judge'
 import { NO_SPEND, addTally, tallyLine, tallyOf, tokens, usd } from './lib/cost'
 import { migrate, toTaught } from './lib/state'
+import { DUMP_KEEP, dumpDir, dumpName, dumpText } from './lib/dump'
+import type { Call } from './lib/dump'
 import {
   chatLine,
   giveToMainPrompt,
   handoffNote,
   parseOutcome,
-  parseStreamLine,
+  parseStreamEvents,
   splitLines,
   workerArgv,
   workerInput,
@@ -107,6 +109,7 @@ function blankEntry(id: string, prompt: string, now: number): Entry {
     isMissed: false,
     judgeSpend: NO_SPEND,
     workerSpend: NO_SPEND,
+    dump: '',
   }
 }
 
@@ -290,11 +293,36 @@ async function tell($: EngineInterface, text: string): Promise<void> {
   $.ui.toast(text)
 }
 
-async function finish($: EngineInterface, id: string, outcome: Outcome): Promise<void> {
+/**
+ * Writes an investigation's full record outside any repository and keeps the newest few. Returns
+ * its path, or '' when there is nowhere to write it; a record is a help, never a reason to fail.
+ */
+async function writeDump($: EngineInterface, entry: Entry, calls: readonly Call[], outcome: Outcome, now: number): Promise<string> {
+  try {
+    const home = await $.env.get('HOME')
+    const configDir = await $.env.get('CLAUDE_CONFIG_DIR')
+    if (typeof home !== 'string' || home === '') return ''
+    const dir = dumpDir(home, typeof configDir === 'string' ? configDir : undefined)
+    const path = `${dir}/${dumpName(now, entry.id)}`
+    const cost = usd(entry.judgeSpend.usd + entry.workerSpend.usd)
+    await $.fs.write(path, dumpText(entry, calls, outcome, cost === '$0' ? 'cost unknown' : `≈${cost}`))
+    const kept = (await $.fs.list(dir)).filter(f => f.kind === 'file' && f.name.endsWith('.md')).map(f => f.name).sort()
+    // $.fs has no delete; these are the mod's own files.
+    for (const name of kept.slice(0, Math.max(0, kept.length - DUMP_KEEP))) await $.process.run(['rm', '-f', `${dir}/${name}`], { timeoutMs: 2_000 })
+    return path
+  } catch {
+    return ''
+  }
+}
+
+async function finish($: EngineInterface, id: string, outcome: Outcome, calls: readonly Call[] = []): Promise<void> {
   workers.delete(id)
   const now = await $.clock.now()
-  const entry = (await load($)).entries.find(x => x.id === id)
-  if (entry === undefined) return
+  const found = (await load($)).entries.find(x => x.id === id)
+  if (found === undefined) return
+  const dump = found.kind === 'investigate' ? await writeDump($, found, calls, outcome, now) : ''
+  if (dump !== '') await patchEntry($, id, () => ({ dump }))
+  const entry = { ...found, dump }
   const status: EntryStatus = outcome.status === 'done' || outcome.status === 'partial' ? 'done' : outcome.status
   await patchEntry($, id, () => ({ status, outcome, endedAt: now }))
   await change($, s => ({
@@ -308,7 +336,7 @@ async function finish($: EngineInterface, id: string, outcome: Outcome): Promise
   const seconds = Math.max(1, Math.round((now - (entry.startedAt || entry.createdAt)) / 1000))
   const after = (await load($)).entries.find(x => x.id === id)
   $.ui.log(chatLine(outcome, workerModel, seconds, (after?.judgeSpend.usd ?? 0) + (after?.workerSpend.usd ?? 0)))
-  await deliverNote($, handoffNote(entry.prompt, outcome, workerModel))
+  await deliverNote($, handoffNote(entry.prompt, outcome, workerModel, entry.dump))
   await tell($, status === 'done' ? `✓ ${outcome.summary}` : `⚠ ${outcome.summary} — open /sidekick to hand it to main`)
   await pump($)
 }
@@ -335,31 +363,38 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
   }
   workers.set(id, { stop })
   const timer = $.clock.after(WORKER_TIMEOUT_MS, stop)
+  // Every tool call and what came back, in order, for an investigation's record.
+  const calls = new Map<string, Call>()
   try {
     let buffer = ''
-    const commands = new Map<string, string>()
     for await (const chunk of stream) {
       if (isStopped) break
       if (chunk.stream !== 'stdout') continue
       const split = splitLines(buffer, chunk.text)
       buffer = split.rest
       for (const line of split.lines) {
-        const event = parseStreamLine(line)
-        if (event.kind === 'step') {
-          const step = event.text
-          commands.set(event.id, step)
-          await patchEntry($, id, x => ({ steps: [...x.steps, step].slice(-MAX_STEPS) }))
-        } else if (event.kind === 'refused') {
-          // Say which command was turned down, so a stopped assist can be explained and fixed.
-          const step = `✗ refused: ${(commands.get(event.id) ?? '(a tool call)').replace(/^\$ /, '')}`
-          await patchEntry($, id, x => ({ steps: [...x.steps, step].slice(-MAX_STEPS) }))
-        } else if (event.kind === 'result') {
-          result = { text: event.text, isError: event.isError }
-          const priced = tallyOf(workerModel, event.usage)
-          // An unpriced model still has Claude Code's own figure for the run.
-          const workerSpend = priced.usd === 0 && event.costUsd > 0 ? { ...priced, usd: event.costUsd } : priced
-          await patchEntry($, id, () => ({ workerSpend }))
-          await addSpend($, workerSpend)
+        for (const event of parseStreamEvents(line)) {
+          if (event.kind === 'step') {
+            const step = event.text
+            calls.set(event.id, { command: step, output: '', isError: false })
+            await patchEntry($, id, x => ({ steps: [...x.steps, step].slice(-MAX_STEPS) }))
+          } else if (event.kind === 'output') {
+            const call = calls.get(event.id)
+            if (call !== undefined) calls.set(event.id, { ...call, output: event.text, isError: event.isError })
+          } else if (event.kind === 'refused') {
+            // Say which command was turned down, so a stopped assist can be explained and fixed.
+            const command = calls.get(event.id)?.command ?? '(a tool call)'
+            calls.set(event.id, { command, output: 'refused by the permission layer or the guard', isError: true })
+            const step = `✗ refused: ${command.replace(/^\$ /, '')}`
+            await patchEntry($, id, x => ({ steps: [...x.steps, step].slice(-MAX_STEPS) }))
+          } else if (event.kind === 'result') {
+            result = { text: event.text, isError: event.isError }
+            const priced = tallyOf(workerModel, event.usage)
+            // An unpriced model still has Claude Code's own figure for the run.
+            const workerSpend = priced.usd === 0 && event.costUsd > 0 ? { ...priced, usd: event.costUsd } : priced
+            await patchEntry($, id, () => ({ workerSpend }))
+            await addSpend($, workerSpend)
+          }
         }
       }
     }
@@ -377,7 +412,7 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
       changed: [],
       uncertain: ['It may have run some commands before it stopped; check git status.'],
       needsMain: 'Stopped by you or by the time limit.',
-    })
+    }, [...calls.values()])
     return
   }
   if (result === null) {
@@ -389,10 +424,10 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
       changed: [],
       uncertain: ['Check git status and git log.'],
       needsMain: 'The worker session did not finish.',
-    })
+    }, [...calls.values()])
     return
   }
-  await finish($, id, parseOutcome(result.text, result.isError))
+  await finish($, id, parseOutcome(result.text, result.isError), [...calls.values()])
 }
 
 /** Queues an assist for a task and starts it if its locks are free. */

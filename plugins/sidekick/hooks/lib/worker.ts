@@ -186,52 +186,76 @@ export function splitLines(buffer: string, chunk: string): { lines: string[]; re
 }
 
 export type StreamEvent =
+  | { kind: 'init'; sessionId: string }
   | { kind: 'step'; text: string; id: string }
   | { kind: 'refused'; id: string }
+  | { kind: 'output'; id: string; text: string; isError: boolean }
   | { kind: 'result'; text: string; isError: boolean; costUsd: number; usage: Usage | undefined }
   | { kind: 'other' }
 
-/** One line of `--output-format stream-json`, reduced to what the pane shows. */
-export function parseStreamLine(line: string): StreamEvent {
+/** What a tool call ran, in a line: the command, the file read, or the search. */
+function describeCall(name: unknown, input: Record<string, unknown>): string {
+  if (typeof input.command === 'string') return input.command.split('\n')[0] ?? ''
+  if (typeof input.file_path === 'string') return `read ${input.file_path}`
+  if (typeof input.pattern === 'string') return `${name === 'Glob' ? 'glob' : 'grep'} ${JSON.stringify(input.pattern)}${typeof input.path === 'string' ? ` ${input.path}` : ''}`
+  return ''
+}
+
+/** A tool result's text, whether it came back as a string or as text blocks. */
+function resultText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return JSON.stringify(content ?? '')
+  return content.map(part => (part !== null && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string' ? (part as { text: string }).text : '')).join('\n')
+}
+
+/** Every event in one line of `--output-format stream-json`: a message can carry several tool calls or results. */
+export function parseStreamEvents(line: string): StreamEvent[] {
   let raw: unknown
   try {
     raw = JSON.parse(line)
   } catch {
-    return { kind: 'other' }
+    return []
   }
-  if (raw === null || typeof raw !== 'object') return { kind: 'other' }
+  if (raw === null || typeof raw !== 'object') return []
   const event = raw as Record<string, unknown>
+  if (event.type === 'system' && event.subtype === 'init' && typeof event.session_id === 'string') return [{ kind: 'init', sessionId: event.session_id }]
   if (event.type === 'result') {
-    return {
-      kind: 'result',
-      text: typeof event.result === 'string' ? event.result : '',
-      isError: event.is_error === true,
-      costUsd: typeof event.total_cost_usd === 'number' ? event.total_cost_usd : 0,
-      usage: event.usage !== null && typeof event.usage === 'object' ? (event.usage as Usage) : undefined,
-    }
+    return [
+      {
+        kind: 'result',
+        text: typeof event.result === 'string' ? event.result : '',
+        isError: event.is_error === true,
+        costUsd: typeof event.total_cost_usd === 'number' ? event.total_cost_usd : 0,
+        usage: event.usage !== null && typeof event.usage === 'object' ? (event.usage as Usage) : undefined,
+      },
+    ]
   }
-  // A tool call the permission layer or the guard turned down comes back as an errored result.
-  if (event.type === 'user') {
-    const message = event.message as { content?: unknown } | undefined
-    for (const block of (Array.isArray(message?.content) ? message.content : []) as Record<string, unknown>[]) {
-      const said = typeof block.content === 'string' ? block.content : JSON.stringify(block.content ?? '')
-      if (block.type === 'tool_result' && block.is_error === true && /denied|refused|not allowed/i.test(said)) {
-        return { kind: 'refused', id: typeof block.tool_use_id === 'string' ? block.tool_use_id : '' }
-      }
-    }
-    return { kind: 'other' }
-  }
-  if (event.type !== 'assistant') return { kind: 'other' }
   const message = event.message as { content?: unknown } | undefined
-  const content = Array.isArray(message?.content) ? message.content : []
-  for (const block of content as Record<string, unknown>[]) {
-    if (block.type === 'tool_use') {
-      const input = (block.input ?? {}) as Record<string, unknown>
-      const command = typeof input.command === 'string' ? input.command : typeof input.file_path === 'string' ? `read ${input.file_path}` : ''
-      if (command !== '') return { kind: 'step', text: `$ ${command.split('\n')[0]}`, id: typeof block.id === 'string' ? block.id : '' }
+  const content = (Array.isArray(message?.content) ? message.content : []) as Record<string, unknown>[]
+  const out: StreamEvent[] = []
+  if (event.type === 'user') {
+    for (const block of content) {
+      if (block.type !== 'tool_result') continue
+      const id = typeof block.tool_use_id === 'string' ? block.tool_use_id : ''
+      const said = resultText(block.content)
+      // A tool call the permission layer or the guard turned down comes back as an errored result.
+      if (block.is_error === true && /denied|refused|not allowed/i.test(said)) out.push({ kind: 'refused', id })
+      else out.push({ kind: 'output', id, text: said, isError: block.is_error === true })
     }
+    return out
   }
-  return { kind: 'other' }
+  if (event.type !== 'assistant') return []
+  for (const block of content) {
+    if (block.type !== 'tool_use') continue
+    const command = describeCall(block.name, (block.input ?? {}) as Record<string, unknown>)
+    if (command !== '') out.push({ kind: 'step', text: `$ ${command}`, id: typeof block.id === 'string' ? block.id : '' })
+  }
+  return out
+}
+
+/** The first event in a line, or `other`. */
+export function parseStreamLine(line: string): StreamEvent {
+  return parseStreamEvents(line)[0] ?? { kind: 'other' }
 }
 
 const strings = (value: unknown): string[] =>
@@ -279,7 +303,7 @@ export function chatLine(outcome: Outcome, backend: string, seconds: number, cos
 const HANDOFF_LIMIT = 700
 
 /** The note the main session reads with its next prompt, so it knows what the sidekick did. */
-export function handoffNote(prompt: string, outcome: Outcome, backend: string): string {
+export function handoffNote(prompt: string, outcome: Outcome, backend: string, dumpPath = ''): string {
   const parts = [
     `[sidekick] The user's message "${prompt}" was handled by the sidekick mod (${backend}) in a separate session, not by you. Result: ${outcome.status}. ${outcome.summary}`,
   ]
@@ -287,9 +311,14 @@ export function handoffNote(prompt: string, outcome: Outcome, backend: string): 
   if (outcome.changed.length > 0) parts.push(`Changed: ${outcome.changed.join(', ')}.`)
   if (outcome.uncertain.length > 0) parts.push(`Unsure about: ${outcome.uncertain.join('; ')}.`)
   if (outcome.needsMain !== '') parts.push(`Needs you: ${outcome.needsMain}`)
-  parts.push('Treat this as already done; take over only if the user asks or it needs you.')
-  const note = parts.join(' ')
-  return note.length > HANDOFF_LIMIT ? `${note.slice(0, HANDOFF_LIMIT - 1)}…` : note
+  // The pointer and the closing line are never cut; the body gives way.
+  const tail = [
+    ...(dumpPath !== '' ? [`Full record (every command and its output): ${dumpPath}.`] : []),
+    'Treat this as already done; take over only if the user asks or it needs you.',
+  ].join(' ')
+  const body = parts.join(' ')
+  const room = HANDOFF_LIMIT - tail.length - 1
+  return `${body.length > room ? `${body.slice(0, room - 1)}…` : body} ${tail}`
 }
 
 /** The prompt that hands a stopped or failed assist to the main session. */

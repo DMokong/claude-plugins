@@ -72,6 +72,8 @@ export type Entry = {
   /** The judge's call for this prompt and the worker's run. */
   judgeSpend: Tally
   workerSpend: Tally
+  /** Where an investigation's full record was written; empty for chores and older entries. */
+  dump: string
 }
 
 /** A prompt bound for the main session, held while assists run. */

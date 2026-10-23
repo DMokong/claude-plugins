@@ -56,6 +56,7 @@ function migrateEntry(raw: Partial<Entry>): Entry {
     steps: [],
     outcome: null,
     isMissed: false,
+    dump: '',
     ...raw,
     judgeSpend: { ...NO_SPEND, ...(raw.judgeSpend ?? {}) },
     workerSpend: { ...NO_SPEND, ...(raw.workerSpend ?? {}) },
