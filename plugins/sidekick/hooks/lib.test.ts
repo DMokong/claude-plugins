@@ -357,9 +357,12 @@ test("the person's misses steer the judge: recent ones become precedents, capped
   expect(system.match(/^- tidy branch/gm)?.length).toBe(10)
 })
 
-test('the worker is told to keep braces out of git commands, which the permission layer refuses', async () => {
-  expect(WORKER_SYSTEM).not.toMatch(/git rev-list @\{u\}/)
-  expect(WORKER_SYSTEM).toContain('Never write @{u}')
+test('the worker is told to name the upstream in ranges, where braces are refused', async () => {
+  // Measured on Claude Code 2.1.309 under dontAsk: `git rev-parse --abbrev-ref @{u}` and
+  // `git log -1 @{u}` run, `git log origin/main..HEAD` runs, but `git log @{u}..HEAD` and
+  // `git rev-list --left-right --count @{u}...HEAD` are refused.
+  expect(WORKER_SYSTEM).toContain('git log origin/main..HEAD, not @{u}..HEAD')
+  expect(WORKER_SYSTEM).not.toContain('braces are refused')
   // Claude Code's own prompt says to branch first on the default branch; the worker must not.
   expect(WORKER_SYSTEM).toContain('Work on the branch that is checked out')
 })

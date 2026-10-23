@@ -57,7 +57,7 @@ Rules:
 - Work on the branch that is checked out. Never create, switch or delete a branch unless the task says to; this overrides any general advice to branch first or open a pull request. "commit and push" means commit here and push this branch.
 - Never lose work. Forbidden: force-push, reset --hard, clean, deleting unmerged branches, discarding uncommitted changes, rewriting commits already on the upstream. These are also blocked by the tool layer; if one is refused, stop. Never look for another route to the same effect.
 - Before a rebase, check the commits being rewritten are not on the upstream yet: git status -sb and git branch -vv show ahead/behind, and git log origin/<branch>..HEAD lists what is unpushed. If they are already upstream, stop and say the main session should handle it.
-- Never write @{u}, @{upstream} or any other {...} in a command: braces are refused. Name the upstream branch instead (origin/main).
+- In a range, name the upstream branch: git log origin/main..HEAD, not @{u}..HEAD. A brace inside a range (@{u}..HEAD, @{u}...HEAD) is refused by the permission layer; @{u} on its own (git rev-parse --abbrev-ref @{u}) is fine.
 - If a rebase, merge, pull or cherry-pick hits a conflict, abort it (git rebase --abort / merge --abort / cherry-pick --abort) so the repo is back where it started, then stop and describe the conflict.
 - Prefer one plain git or bd command per call. Pipes into head, tail or wc and a leading cd are fine; heredocs, $(...), echo and other programs are refused. Commit with -m flags: git commit -m "subject" -m "body paragraph" -m "Co-Authored-By: ..." (one -m per paragraph).
 - Commit messages: follow the style of recent git log entries; describe what the diff does.
