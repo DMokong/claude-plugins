@@ -4,6 +4,7 @@ import { JUDGE_SYSTEM, canStart, holdsMain, judgeSystem, lockKeys, parseJudgment
 import { migrate, toTaught } from './lib/state'
 import { EMPTY } from './register'
 import { INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPrompt, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
+import { COLORS, barCells, bigText, bigWidth, dayLevels, spaced, tileMoney } from './lib/draw'
 import { DUMP_KEEP, dumpDir, dumpName, dumpText, redact } from './lib/dump'
 
 test('precheck lets short imperative chores through to the judge', async () => {
@@ -378,4 +379,34 @@ test('the worker is told to name the upstream in ranges, where braces are refuse
   expect(WORKER_SYSTEM).not.toContain('braces are refused')
   // Claude Code's own prompt says to branch first on the default branch; the worker must not.
   expect(WORKER_SYSTEM).toContain('Work on the branch that is checked out')
+})
+
+test('segment digits are five rows tall and line up', async () => {
+  const rows = bigText('27')
+  expect(rows.length).toBe(5)
+  expect(rows[0]).toBe('╶──╮ ╶──╮')
+  expect(bigWidth('27')).toBe(9)
+  for (const row of rows) expect(row.length).toBe(9)
+  expect(bigText('$4.18')[0]?.startsWith('$')).toBe(true)
+  expect(new Set(bigText('$0.21').map(r => r.length)).size).toBe(1)
+  expect(COLORS.claude).toBe('#d97757')
+})
+
+test('tile money is short: cents, dollars, thousands, never negative', async () => {
+  expect(tileMoney(0)).toBe('$0')
+  expect(tileMoney(-1)).toBe('$0')
+  expect(tileMoney(0.0042)).toBe('$.004')
+  expect(tileMoney(4.183)).toBe('$4.18')
+  expect(tileMoney(42.4)).toBe('$42')
+  expect(tileMoney(1234)).toBe('$1.2k')
+})
+
+test('bars and day blocks share one scale, and anything above zero shows', async () => {
+  expect(barCells(19, 63, 30)).toEqual({ filled: 9, empty: 21 })
+  expect(barCells(1, 1000, 30).filled).toBe(1)
+  expect(barCells(0, 5, 30)).toEqual({ filled: 0, empty: 30 })
+  expect(barCells(5, 0, 30)).toEqual({ filled: 0, empty: 30 })
+  expect(dayLevels([3, 9, 27])).toEqual([1, 1, 4])
+  expect(dayLevels([0, 0])).toEqual([0, 0])
+  expect(spaced('NOW')).toBe('N O W')
 })
