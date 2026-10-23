@@ -527,7 +527,13 @@ async function giveToMain($: EngineInterface, id: string): Promise<void> {
   const entry = (await load($)).entries.find(x => x.id === id)
   if (entry === undefined) return
   if (isActive(entry)) await stopEntry($, id)
-  await $.prompt.submit({ text: giveToMainPrompt(entry.prompt, entry.outcome, entry.steps), asUser: true })
+  await $.prompt.submit({ text: giveToMainPrompt(entry.prompt, entry.outcome, entry.steps, entry.dump), asUser: true })
+}
+
+/** Puts an investigation's record path on the clipboard; says it in a toast where there is none. */
+async function copyDump($: EngineInterface, path: string): Promise<void> {
+  const copied = await $.ui.copy({ text: path }).catch(() => ({ isCopied: false as const, reason: 'no clipboard' }))
+  $.ui.toast(copied.isCopied ? `Copied: ${path}` : `Record: ${path}`)
 }
 
 async function revert($: EngineInterface, id: string): Promise<void> {
@@ -621,6 +627,9 @@ const STATUS_MARK: Record<EntryStatus, string> = {
   passed: '→',
   shadow: '◌',
 }
+
+/** `investigate · ` before an investigation's prompt in the pane; chores need no tag. */
+const kindTag = (entry: Entry): string => (entry.kind === 'investigate' ? 'investigate · ' : '')
 
 function clip(text: string, width: number): string {
   return text.length <= width ? text : `${text.slice(0, Math.max(1, width - 1))}…`
@@ -814,6 +823,7 @@ export const register: Register = (on, options) => {
       } else if (entry.status === 'done' || entry.status === 'stopped' || entry.status === 'failed') {
         list.push(edit, watch)
         if (entry.status === 'done' && (entry.outcome?.shas.length ?? 0) > 0) list.push({ key: 'revert', label: 'revert', act: () => void revert($, entry.id) })
+        if (entry.dump !== '') list.push({ key: 'dump', label: 'record', act: () => void copyDump($, entry.dump) })
         list.push(toMainButton)
       } else if (entry.status === 'passed' && entry.verdict !== '' && !entry.isMissed) {
         list.push({ key: 'missed', label: "should've been sidekick", act: () => void markMissed($, entry.id) })
@@ -919,7 +929,7 @@ export const register: Register = (on, options) => {
           <Box key={`e-${entry.id}`} flexDirection="column">
             <Box>
               <Text color="warning" bold>
-                {clip(`${spin} ${entry.prompt}`, width - 12)}
+                {clip(`${spin} ${kindTag(entry)}${entry.prompt}`, width - 12)}
               </Text>
               <Text dimColor>{`  ${Math.max(0, Math.round((now - (entry.startedAt || entry.createdAt)) / 1000))}s`}</Text>
             </Box>
@@ -932,7 +942,7 @@ export const register: Register = (on, options) => {
         {queued.length > 0 && section('queue', 'QUEUED', 'suggestion', queued.length)}
         {queued.map(entry => (
           <Box key={`e-${entry.id}`} flexDirection="column">
-            <Text color="suggestion">{clip(`◷ ${entry.prompt}`, width)}</Text>
+            <Text color="suggestion">{clip(`◷ ${kindTag(entry)}${entry.prompt}`, width)}</Text>
             {buttonsFor(entry)}
           </Box>
         ))}
@@ -957,7 +967,7 @@ export const register: Register = (on, options) => {
           return (
             <Box key={`e-${entry.id}`} flexDirection="column">
               <Box>
-                <Text color={isOk ? 'success' : 'error'}>{clip(`${STATUS_MARK[entry.status]} ${entry.prompt}`, width - 22)}</Text>
+                <Text color={isOk ? 'success' : 'error'}>{clip(`${STATUS_MARK[entry.status]} ${kindTag(entry)}${entry.prompt}`, width - 22)}</Text>
                 <Text dimColor>{`  ${seconds}s · ≈${usd(cost(entry))}`}</Text>
               </Box>
               <Text dimColor>{clip(`    ${entry.outcome?.summary ?? ''}`, width)}</Text>

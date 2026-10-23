@@ -305,7 +305,8 @@ const MARK: Record<Outcome['status'], string> = { done: '✓', partial: '◐', s
 
 /** The line shown in the transcript where a reply would have been. */
 export function chatLine(outcome: Outcome, backend: string, seconds: number, costUsd = 0): string {
-  const tail = outcome.status === 'done' ? '' : outcome.needsMain !== '' ? ` · ${outcome.needsMain} (pane → give to main)` : ' · see the sidekick pane'
+  const handBack = outcome.status === 'done' ? '' : ' (pane → give to main)'
+  const tail = outcome.needsMain !== '' ? ` → main: ${outcome.needsMain}${handBack}` : outcome.status === 'done' ? '' : ' · see the sidekick pane'
   const cost = costUsd > 0 ? ` · ≈${usd(costUsd)}` : ''
   return `${MARK[outcome.status]} ${outcome.summary} · ${backend} · ${seconds}s${cost}${tail}`
 }
@@ -331,13 +332,25 @@ export function handoffNote(prompt: string, outcome: Outcome, backend: string, d
   return `${body.length > room ? `${body.slice(0, room - 1)}…` : body} ${tail}`
 }
 
-/** The prompt that hands a stopped or failed assist to the main session. */
-export function giveToMainPrompt(prompt: string, outcome: Outcome | null, steps: readonly string[]): string {
-  const lines = [`The sidekick mod tried my request "${prompt}" and handed it back. Please take over.`]
+/**
+ * The prompt "give to main" sends. A finished assist is handed over for context, not as work to
+ * redo; a stopped, failed or partial one asks the main session to take over.
+ */
+export function giveToMainPrompt(prompt: string, outcome: Outcome | null, steps: readonly string[], dumpPath = ''): string {
+  const isDone = outcome !== null && outcome.status === 'done'
+  const lines = [
+    isDone
+      ? `The sidekick mod did my request "${prompt}". Here is its report, for your context; it is already done, so don't redo it.`
+      : `The sidekick mod tried my request "${prompt}" and handed it back. Please take over.`,
+  ]
   if (outcome !== null) {
     lines.push(`Its report: ${outcome.status} — ${outcome.summary}`)
-    if (outcome.needsMain !== '') lines.push(`Why it stopped: ${outcome.needsMain}`)
+    if (outcome.shas.length > 0) lines.push(`SHAs: ${outcome.shas.join(', ')}`)
+    if (outcome.changed.length > 0) lines.push(`Changed: ${outcome.changed.join(', ')}`)
+    if (outcome.uncertain.length > 0) lines.push(`Unsure about: ${outcome.uncertain.join('; ')}`)
+    if (outcome.needsMain !== '') lines.push(`${isDone ? 'Still open' : 'Why it stopped'}: ${outcome.needsMain}`)
   }
   if (steps.length > 0) lines.push(`Commands it ran: ${steps.slice(-8).join(' ; ')}`)
+  if (dumpPath !== '') lines.push(`Full record (every command and its output): ${dumpPath}`)
   return lines.join('\n')
 }

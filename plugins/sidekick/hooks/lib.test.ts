@@ -3,7 +3,7 @@ import { test, expect } from 'claude-code/testing'
 import { JUDGE_SYSTEM, canStart, holdsMain, judgeSystem, lockKeys, parseJudgment, precheck, resourcesOf } from './lib/judge'
 import { migrate, toTaught } from './lib/state'
 import { EMPTY } from './register'
-import { INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
+import { INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPrompt, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
 import { DUMP_KEEP, dumpDir, dumpName, dumpText, redact } from './lib/dump'
 
 test('precheck lets short imperative chores through to the judge', async () => {
@@ -291,6 +291,31 @@ test('the chat line and the handoff note say what happened', async () => {
   expect(note).toContain('"commit and push"')
   expect(note).toContain('SHAs: 3f2a91c')
   expect(note.length).toBeLessThanOrEqual(700)
+})
+
+test('give to main hands a finished assist over for context, and an unfinished one as work', async () => {
+  const done = parseOutcome('{"status":"done","summary":"Pulled; already up to date","shas":["3f2a91c"],"changed":["main"],"uncertain":["whether a.txt is meant to stay dirty"]}', false)
+  const text = giveToMainPrompt('git pull', done, ['$ git pull'], '/home/u/.claude/sidekick/investigations/x.md')
+  expect(text).toContain('for your context')
+  expect(text).not.toContain('Please take over')
+  for (const part of ['SHAs: 3f2a91c', 'Changed: main', 'Unsure about: whether a.txt is meant to stay dirty', 'Commands it ran: $ git pull', 'Full record (every command and its output): /home/u/.claude/sidekick/investigations/x.md']) {
+    expect(text).toContain(part)
+  }
+  const failed = parseOutcome('{"status":"failed","summary":"Push rejected","needsMain":"origin moved"}', false)
+  const back = giveToMainPrompt('push', failed, [])
+  expect(back).toContain('Please take over')
+  expect(back).toContain('Why it stopped: origin moved')
+  expect(back).not.toContain('Full record')
+  expect(giveToMainPrompt('push', null, [])).toContain('Please take over')
+})
+
+test('the chat line hands what is left to main in a few words', async () => {
+  const partial = parseOutcome('{"status":"partial","summary":"acme-bot logs DNS failures","needsMain":"check DNS"}', false)
+  expect(chatLine(partial, 'haiku', 40)).toBe('◐ acme-bot logs DNS failures · haiku · 40s → main: check DNS (pane → give to main)')
+  const done = parseOutcome('{"status":"done","summary":"Restarted acme-bot","needsMain":"watch it overnight"}', false)
+  expect(chatLine(done, 'haiku', 40)).toBe('✓ Restarted acme-bot · haiku · 40s → main: watch it overnight')
+  const quiet = parseOutcome('{"status":"stopped","summary":"Stopped"}', false)
+  expect(chatLine(quiet, 'haiku', 1)).toBe('■ Stopped · haiku · 1s · see the sidekick pane')
 })
 
 test("state an older version wrote is upgraded, so new fields are never undefined", async () => {

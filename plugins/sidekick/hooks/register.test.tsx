@@ -290,6 +290,32 @@ test("a finished investigation writes its record outside the repo and the note p
   ])
 })
 
+test("the pane tags an investigation, and its record button copies the record's path", async ($, on) => {
+  const seen = world(on, { judge: INVESTIGATE, worker: LOOKED })
+  const copied: string[] = []
+  on('ui.copy', async (_$, e) => {
+    copied.push(e.text)
+    return { value: { isCopied: true as const } }
+  })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await withInstructions($ as never)
+  await $.prompt.submit({ text: 'check the acme-bot logs', ...TYPED })
+  const s = await until($, x => x.entries[0]?.status === 'done')
+  const ui = await $.ui.mount({
+    plugin: 'sidekick',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'sidekick',
+    props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  } as never)
+  expect(await ui.find({ type: 'Text', text: /investigate · check the acme-bot logs/ })).toBeDefined()
+  await ui.press({ key: `dump-${s.entries[0]?.id}` })
+  await ui.unmount()
+  expect(copied).toEqual([s.entries[0]?.dump ?? ''])
+  expect(seen.toasts.some(t => t.startsWith('Copied: /home/u/.claude/sidekick/investigations/'))).toBe(true)
+})
+
 test('a chore writes no record', async ($, on) => {
   const seen = world(on, { judge: MECHANICAL, worker: DONE })
   await $.session.start(START)
