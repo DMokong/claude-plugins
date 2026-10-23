@@ -5,10 +5,10 @@ import { MAX_MISSES, canStart, holdsMain, judgePrompt, judgeSystem, lockKeys, pa
 import type { Judgment } from './lib/judge'
 import { NO_SPEND, addTally, tallyLine, tallyOf, tokens, usd } from './lib/cost'
 import { migrate, toTaught } from './lib/state'
-import { HISTORY_KEY, NO_TOTALS, appendRow, markGiven, savedFor, startOfDay, toRows, totals } from './lib/history'
+import { HISTORY_KEY, NO_TOTALS, appendRow, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals } from './lib/history'
 import type { HistoryRow } from './lib/history'
 import { JUDGE_CHIPS, SETTINGS_KEY, WORKER_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
-import { COLORS, spaced, tileMoney } from './lib/draw'
+import { COLORS, barCells, bigText, dayLevels, spaced, tileMoney } from './lib/draw'
 import { DUMP_KEEP, configRoot, dumpDir, dumpName, dumpText } from './lib/dump'
 import type { Call } from './lib/dump'
 import {
@@ -890,14 +890,11 @@ export const register: Register = (on, options) => {
     const state = await load($)
     const now = await $.clock.now()
     const width = Math.max(24, e.props.bodyColumns ?? 60)
-    const spin = SPINNER[state.tick % SPINNER.length] ?? '⟳'
     const running = state.entries.filter(x => x.status === 'running')
     const queued = state.entries.filter(x => x.status === 'queued')
-    const finished = state.entries.filter(x => x.status === 'done' || x.status === 'stopped' || x.status === 'failed')
-    const passed = state.entries.filter(x => x.status === 'passed' || x.status === 'shadow' || x.status === 'judging')
-    const room = Math.max(3, Math.floor(((e.viewport?.rows ?? 40) - 16) / 3))
     // The corrections the judge follows now, newest first; each can be forgotten.
     const learned = state.learned.slice(-MAX_MISSES).reverse()
+    const rows = toRows(await $.store.get(HISTORY_KEY).catch(() => []))
 
     const buttonsFor = (entry: Entry) => {
       const isWatched = state.watching === entry.id
@@ -950,142 +947,263 @@ export const register: Register = (on, options) => {
         </Box>
       )
 
-    const section = (key: string, title: string, color: string, count: number) => (
-      <Box key={`h-${key}`} marginTop={1}>
-        <Text bold color={color}>
-          {`▌ ${title}`}
-        </Text>
-        <Text dimColor>{` ${count}`}</Text>
+    const rule = (key: string, title: string, right = '') => (
+      <Box key={key} flexDirection="column" marginTop={1}>
+        <Box flexWrap="nowrap">
+          <Text bold>{title}</Text>
+          <Box flexGrow={1} />
+          <Text dimColor>{right}</Text>
+        </Box>
+        <Text color={COLORS.line}>{'─'.repeat(Math.max(4, width - 2))}</Text>
+      </Box>
+    )
+    const modePill =
+      state.mode === 'auto' ? (
+        <Text key="mp" bold backgroundColor={COLORS.green} color={COLORS.ink}>{' ● AUTO '}</Text>
+      ) : state.mode === 'shadow' ? (
+        <Text key="mp" bold backgroundColor={COLORS.purple} color={COLORS.ink}>{' ◌ SHADOW '}</Text>
+      ) : (
+        <Text key="mp" dimColor>{'○ OFF'}</Text>
+      )
+    const back = (
+      <Button key="back" plain onPress={() => void change($, s => ({ ...s, view: 'dashboard', jobId: '' }))}>
+        <Text color={COLORS.yellow}>{'← back'}</Text>
+      </Button>
+    )
+    const header = (right: unknown) => (
+      <Box key="hdr" borderStyle="round" borderColor={COLORS.line} paddingX={1} flexWrap="nowrap">
+        <Text bold color={COLORS.claude}>{'✦ SIDEKICK  '}</Text>
+        {modePill}
+        <Text dimColor>{`  ${state.settings.judgeModel} · ${state.settings.workerModel}`}</Text>
+        {version !== '' && <Text dimColor>{'  '}</Text>}
+        {version !== '' && <Text dimColor>{`v${version}`}</Text>}
+        <Box flexGrow={1} />
+        {right as never}
       </Box>
     )
 
-    const modeColor: Record<Mode, string> = { off: 'subtle', shadow: 'suggestion', auto: 'success' }
-    const cost = (entry: Entry) => entry.judgeSpend.usd + entry.workerSpend.usd
+    // ── one job, in words: everything it did, and what can be done with it
+    const job = state.view === 'job' ? state.entries.find(x => x.id === state.jobId) : undefined
+    if (job !== undefined) {
+      const seconds = Math.max(1, Math.round(((job.endedAt || now) - (job.startedAt || job.createdAt)) / 1000))
+      const color = job.status === 'done' ? COLORS.green : job.status === 'failed' || job.status === 'stopped' ? COLORS.pink : COLORS.yellow
+      return (
+        <Box flexDirection="column">
+          {header(back)}
+          <Box flexWrap="nowrap" marginTop={1}>
+            <Text bold color={color}>{`${STATUS_MARK[job.status]} `}</Text>
+            <Text bold>{clip(`${kindTag(job)}${job.prompt}`, width - 24)}</Text>
+            <Box flexGrow={1} />
+            <Text dimColor>{`${seconds}s · ≈${usd(job.judgeSpend.usd + job.workerSpend.usd)}`}</Text>
+          </Box>
+          <Text dimColor wrap="wrap">{job.outcome?.summary ?? entryDetail(job, now)}</Text>
+          {buttonsFor(job)}
+          {watched({ ...job, id: job.id }) ?? null}
+          {state.watching !== job.id && (
+            <Box flexDirection="column" marginLeft={4}>
+              {job.steps.slice(-8).map((step, i) => (
+                <Text key={`js-${i}`} color="subtle">
+                  {clip(step, width - 6)}
+                </Text>
+              ))}
+            </Box>
+          )}
+        </Box>
+      )
+    }
 
+    // ── what it learned: each correction the judge follows, with forget
+    if (state.view === 'learned') {
+      return (
+        <Box flexDirection="column">
+          {header(back)}
+          {rule('lh', 'LEARNED', `${state.learned.length} stored`)}
+          {learned.length === 0 && <Text dimColor>{"Nothing yet. Press should've been sidekick on a job that went to Claude."}</Text>}
+          {learned.map(m => (
+            <Box key={`l-${m.text}`} flexWrap="nowrap">
+              <Text color={m.verdict === 'investigate' ? COLORS.orange : COLORS.yellow}>{`✎ [${verdictLabel(m.verdict)}] `}</Text>
+              <Text>{clip(m.text.replace(/\s+/g, ' '), width - 30)}</Text>
+              <Box flexGrow={1} />
+              <Button key={`forget-${m.text}`} label="forget" plain onPress={() => void forget($, m.text)} />
+            </Box>
+          ))}
+          {state.learned.length > learned.length && <Text dimColor>{`+${state.learned.length - learned.length} older, stored but not used · /sidekick learned`}</Text>}
+        </Box>
+      )
+    }
+
+    // ── the dashboard
+    const ids = new Set(state.entries.map(x => x.id))
+    const span =
+      state.tab === 'session'
+        ? { ...totals(rows.filter(r => ids.has(r.id)), 0), costUsd: state.spend.usd }
+        : totals(rows, state.tab === 'today' ? startOfDay(now) : startOfDay(now) - 6 * 24 * 60 * 60 * 1000)
+    const tabs = (['session', 'today', 'week'] as const).map(tab => (
+      <Button key={`tab-${tab}`} plain onPress={() => void change($, s => ({ ...s, tab }))}>
+        {state.tab === tab ? (
+          <Text bold backgroundColor={COLORS.yellow} color={COLORS.ink}>{` ${tab[0]!.toUpperCase()}${tab.slice(1)} `}</Text>
+        ) : (
+          <Text dimColor>{` ${tab[0]!.toUpperCase()}${tab.slice(1)} `}</Text>
+        )}
+      </Button>
+    ))
+    const isStacked = width < 60
+    const isPlain = width < 40
+    const tileW = isStacked ? width - 2 : Math.floor((width - 2) / 3)
+    const mainModel = await $.session.model().catch(() => 'the main model')
+    const tile = (key: string, title: string, value: string, color: string, caption: string) => (
+      <Box key={key} flexDirection="column" borderStyle="round" borderColor={COLORS.line} paddingX={1} width={tileW}>
+        <Text dimColor>{title}</Text>
+        {isPlain ? (
+          <Text bold color={color}>{value}</Text>
+        ) : (
+          bigText(value).map((row, i) => (
+            <Text key={`${key}-r${i}`} bold color={color}>
+              {row}
+            </Text>
+          ))
+        )}
+        <Text dimColor>{clip(caption, tileW - 4)}</Text>
+      </Box>
+    )
+    const counts = [
+      { glyph: '●', n: running.length, label: 'running', color: COLORS.pink },
+      { glyph: '◷', n: queued.length, label: 'queued', color: COLORS.blue },
+      { glyph: '⏸', n: state.waiting.length, label: 'waiting', color: COLORS.yellow },
+    ]
+    const barW = Math.max(6, Math.min(30, width - 34))
+    const where = [
+      { key: 'chores', label: 'chores', n: span.chores, cost: span.choreUsd, color: COLORS.yellow },
+      { key: 'looks', label: 'investigations', n: span.looks, cost: span.lookUsd, color: COLORS.pink },
+      { key: 'claude', label: 'to Claude', n: span.toClaude, cost: span.claudeUsd, color: COLORS.purple },
+      { key: 'drafts', label: 'draft judging', n: span.drafts, cost: span.draftUsd, color: '#8b93a7' },
+    ]
+    const top = Math.max(...where.map(w => w.n))
+    const days = perDay(rows, now)
+    const levels = dayLevels(days.map(d => d.jobs))
+    const best = bestDay(days)
+    const days_ = streak(days)
+    const colW = Math.max(5, Math.min(9, Math.floor((width - 2) / 7)))
+    const recent = state.entries.filter(x => !ACTIVE.includes(x.status)).slice(0, 6)
     return (
       <Box flexDirection="column">
-        <Box flexDirection="column" borderStyle="round" borderColor={modeColor[state.mode]} paddingX={1} paddingY={0}>
-          <Box justifyContent="space-between">
-            <Text bold color="claude">
-              ◆ SIDEKICK
-            </Text>
-            {version !== '' && <Text dimColor>{`v${version}`}</Text>}
-          </Box>
-          <Box>
-            <Text dimColor>{'mode   '}</Text>
-            {(['off', 'shadow', 'auto'] as const).flatMap((mode, i) => [
-              ...(i > 0 ? [<Text key={`mg-${mode}`}>{'  '}</Text>] : []),
-              <Button
-                key={`mode-${mode}`}
-                label={state.mode === mode ? `● ${mode.toUpperCase()}` : `○ ${mode}`}
-                plain
-                dimColor={state.mode !== mode}
-                onPress={() => void setMode($, mode)}
-              />,
-            ])}
-          </Box>
-          <Box flexWrap="wrap">
-            <Text dimColor>{'now    '}</Text>
-            <Text color={running.length > 0 ? 'warning' : 'subtle'}>{`${running.length > 0 ? spin : '·'} ${running.length} running`}</Text>
-            <Text color={queued.length > 0 ? 'suggestion' : 'subtle'}>{`   ◷ ${queued.length} queued`}</Text>
-            <Text color={state.waiting.length > 0 ? 'warning' : 'subtle'}>{`   ⏸ ${state.waiting.length} waiting`}</Text>
-          </Box>
-          <Box flexWrap="wrap">
-            <Text dimColor>{'total  '}</Text>
-            <Text color="success">{`✓ ${state.totals.assists - state.totals.failed} done`}</Text>
-            <Text color={state.totals.failed > 0 ? 'error' : 'subtle'}>{`   ✗ ${state.totals.failed} stopped`}</Text>
-            <Text dimColor>{`   → ${state.totals.passed} to Claude`}</Text>
-          </Box>
-          <Box flexWrap="wrap">
-            <Text dimColor>{'cost   '}</Text>
-            <Text bold>{`≈${usd(state.spend.usd)}`}</Text>
-            <Text dimColor>{' this session   '}</Text>
-            <Text color={state.spend.savedUsd >= 0 ? 'success' : 'warning'}>
-              {`caching ${state.spend.savedUsd >= 0 ? 'saved' : 'cost'} ≈${usd(Math.abs(state.spend.savedUsd))}`}
-            </Text>
-          </Box>
-          <Text dimColor wrap="wrap">{`models judge ${live.judgeModel} · worker ${live.workerModel} · costs are API-equivalent estimates`}</Text>
-          <Text dimColor wrap="wrap">{`context ${contextLine(state.instructions)}`}</Text>
+        {header(
+          <Box key="hdr-r" flexWrap="nowrap">
+            <Button key="view-learned" plain onPress={() => void change($, s => ({ ...s, view: 'learned' }))}>
+              <Text color={COLORS.purple}>{`✎ ${state.learned.length}  `}</Text>
+            </Button>
+            {tabs}
+          </Box>,
+        )}
+        <Box flexDirection={isStacked ? 'column' : 'row'} marginTop={1}>
+          {tile('tile-done', 'DONE', String(span.done), COLORS.yellow, `${span.chores} chores · ${span.looks} looks`)}
+          {tile('tile-saved', 'SAVED', tileMoney(span.savedUsd), COLORS.green, `est. vs ${mainModel}`)}
+          {tile('tile-cost', 'COST', tileMoney(span.costUsd), COLORS.blue, 'judge + worker')}
+        </Box>
+        <Box flexWrap="wrap" marginTop={1}>
+          {counts.map(c => (
+            <Box key={`lc-${c.label}`} flexWrap="nowrap">
+              <Text color={c.n > 0 ? c.color : COLORS.dim}>{`${c.glyph} `}</Text>
+              <Text bold>{String(c.n)}</Text>
+              <Text dimColor>{` ${c.label}   `}</Text>
+            </Box>
+          ))}
+          <Text dimColor>{'·  '}</Text>
+          <Text color={COLORS.green}>{'caching saved '}</Text>
+          <Text bold>{usd(Math.max(0, state.spend.savedUsd))}</Text>
         </Box>
 
-        {state.mode === 'off' && <Text dimColor>Off for this session. Pick shadow to watch the judge, auto to let it act.</Text>}
-        {state.mode !== 'off' && state.entries.length === 0 && state.waiting.length === 0 && (
-          <Text dimColor>Nothing yet. Type a chore like "commit and push".</Text>
-        )}
-
-        {running.length > 0 && section('run', 'RUNNING', 'warning', running.length)}
+        {rule('h-now', 'NOW')}
+        {running.length === 0 && queued.length === 0 && <Text dimColor>{'nothing running'}</Text>}
         {running.map(entry => (
-          <Box key={`e-${entry.id}`} flexDirection="column">
-            <Box>
-              <Text color="warning" bold>
-                {clip(`${spin} ${kindTag(entry)}${entry.prompt}`, width - 12)}
-              </Text>
-              <Text dimColor>{`  ${Math.max(0, Math.round((now - (entry.startedAt || entry.createdAt)) / 1000))}s`}</Text>
+          <Box key={`n-${entry.id}`} flexDirection="column">
+            <Box flexWrap="nowrap">
+              <Text color={COLORS.pink}>{'● '}</Text>
+              <Button key={`job-${entry.id}`} plain onPress={() => void change($, s => ({ ...s, view: 'job', jobId: entry.id }))}>
+                <Text bold>{clip(`${kindTag(entry)}${entry.prompt}`, width - 26)}</Text>
+              </Button>
+              <Box flexGrow={1} />
+              <Text bold color={COLORS.pink}>{'Working'}</Text>
+              <Text dimColor>{` ${Math.round((now - (entry.startedAt || entry.createdAt)) / 1000)}s`}</Text>
             </Box>
-            <Text color={(entry.steps.at(-1) ?? '').startsWith('✗') ? 'error' : 'text'}>{clip(`    ↳ ${entry.steps.at(-1) ?? 'starting the worker…'}`, width)}</Text>
-            {buttonsFor(entry)}
-            {watched(entry)}
+            <Text dimColor>{clip(`  ↳ ${(entry.steps.at(-1) ?? 'starting the worker…').replace(/^\$ /, '')}`, width - 2)}</Text>
           </Box>
         ))}
-
-        {queued.length > 0 && section('queue', 'QUEUED', 'suggestion', queued.length)}
-        {queued.map(entry => (
-          <Box key={`e-${entry.id}`} flexDirection="column">
-            <Text color="suggestion">{clip(`◷ ${kindTag(entry)}${entry.prompt}`, width)}</Text>
-            {buttonsFor(entry)}
+        {[...queued].reverse().map((entry, i) => (
+          <Box key={`n-${entry.id}`} flexWrap="nowrap">
+            <Text color={COLORS.blue}>{'◷ '}</Text>
+            <Text>{clip(`${kindTag(entry)}${entry.prompt}`, width - 12)}</Text>
+            <Box flexGrow={1} />
+            <Text dimColor>{i === 0 ? 'Next' : 'Then'}</Text>
           </Box>
         ))}
-
-        {state.waiting.length > 0 && section('wait', 'WAITING FOR CLAUDE', 'warning', state.waiting.length)}
         {state.waiting.map(held => (
-          <Box key={`wt-${held.id}`} flexDirection="column">
-            <Text color="warning">{clip(`⏸ ${held.text}`, width)}</Text>
-            <Box>
-              <Text>{'    '}</Text>
-              <Button key={`send-${held.id}`} label="send now" plain onPress={() => void sendNow($, held.id)} />
-              <Text dimColor> · </Text>
-              <Button key={`edit-${held.id}`} label="edit" plain onPress={() => void $.prompt.fill({ text: held.text, mode: 'replace' })} />
-            </Box>
+          <Box key={`wt-${held.id}`} flexWrap="nowrap">
+            <Text color={COLORS.yellow}>{'⏸ '}</Text>
+            <Text>{clip(held.text, width - 24)}</Text>
+            <Box flexGrow={1} />
+            <Button key={`send-${held.id}`} label="send now" plain onPress={() => void sendNow($, held.id)} />
           </Box>
         ))}
 
-        {finished.length > 0 && section('done', 'DONE', 'success', finished.length)}
-        {finished.slice(0, room).map(entry => {
-          const isOk = entry.status === 'done'
-          const seconds = Math.max(1, Math.round((entry.endedAt - (entry.startedAt || entry.createdAt)) / 1000))
+        {rule('h-where', 'WHERE IT WENT', 'jobs     cost')}
+        {where.map(w => {
+          const cells = barCells(w.n, top, barW)
           return (
-            <Box key={`e-${entry.id}`} flexDirection="column">
-              <Box>
-                <Text color={isOk ? 'success' : 'error'}>{clip(`${STATUS_MARK[entry.status]} ${kindTag(entry)}${entry.prompt}`, width - 22)}</Text>
-                <Text dimColor>{`  ${seconds}s · ≈${usd(cost(entry))}`}</Text>
-              </Box>
-              <Text dimColor>{clip(`    ${entry.outcome?.summary ?? ''}`, width)}</Text>
-              {buttonsFor(entry)}
-              {watched(entry)}
+            <Box key={`w-${w.key}`} flexWrap="nowrap">
+              <Text color={w.color}>{'● '}</Text>
+              <Text>{w.label.padEnd(16)}</Text>
+              <Text color={w.color}>{'━'.repeat(cells.filled)}</Text>
+              <Text color={COLORS.line}>{'─'.repeat(cells.empty)}</Text>
+              <Box flexGrow={1} />
+              <Text bold>{String(w.n).padStart(5)}</Text>
+              <Text dimColor>{` ${usd(w.cost).padStart(8)}`}</Text>
             </Box>
           )
         })}
 
-        {passed.length > 0 && section('pass', 'TO CLAUDE', 'permission', passed.length)}
-        {passed.slice(0, room).map(entry => (
-          <Box key={`e-${entry.id}`} flexDirection="column">
-            <Text dimColor>{clip(`${STATUS_MARK[entry.status]} ${entry.prompt}`, width)}</Text>
-            <Text dimColor>{clip(`    ${entryDetail(entry, now)}`, width)}</Text>
-            {buttonsFor(entry)}
+        {rule('h-days', 'LAST 7 DAYS', 'jobs a day')}
+        {[4, 3, 2, 1].map(level => (
+          <Box key={`d-${level}`} flexWrap="nowrap">
+            {levels.map((l, i) => (
+              <Text key={`d-${level}-${i}`} color={COLORS.blue}>
+                {(l >= level ? '▆'.repeat(colW - 2) : ' '.repeat(colW - 2)) + '  '}
+              </Text>
+            ))}
           </Box>
         ))}
+        <Box flexWrap="nowrap">
+          {days.map((d, i) => (
+            <Text key={`dl-${i}`} bold={d.isToday} dimColor={!d.isToday}>
+              {d.label.padEnd(colW)}
+            </Text>
+          ))}
+        </Box>
+        <Box flexWrap="nowrap">
+          <Text bold>{best === undefined ? 'No jobs yet this week' : `Best day: ${best.isToday ? 'today' : best.label}, ${best.jobs} ${best.jobs === 1 ? 'job' : 'jobs'}`}</Text>
+          {days_ > 0 && <Text dimColor>{`  ·  ${days_} day streak`}</Text>}
+        </Box>
 
-        {learned.length > 0 && section('learned', 'LEARNED', 'claude', state.learned.length)}
-        {learned.map(m => (
-          <Box key={`l-${m.text}`}>
-            <Text dimColor>{clip(`✎ [${verdictLabel(m.verdict)}] ${m.text.replace(/\s+/g, ' ')}`, width - 10)}</Text>
-            <Text>{'  '}</Text>
-            <Button key={`forget-${m.text}`} label="forget" plain onPress={() => void forget($, m.text)} />
-          </Box>
-        ))}
-        {state.learned.length > learned.length && (
-          <Text dimColor>{`    +${state.learned.length - learned.length} older, stored but not used · /sidekick learned`}</Text>
-        )}
+        {recent.length > 0 && rule('h-recent', 'RECENT', 'open one for its details')}
+        <Box flexWrap="wrap">
+          {recent.map(entry => {
+            const mark = entry.outcome?.status === 'partial' ? '◐' : STATUS_MARK[entry.status]
+            const color = entry.status === 'done' ? (mark === '◐' ? COLORS.orange : COLORS.green) : entry.status === 'passed' || entry.status === 'shadow' ? COLORS.purple : COLORS.pink
+            const seconds = entry.endedAt > 0 ? `${Math.max(1, Math.round((entry.endedAt - (entry.startedAt || entry.createdAt)) / 1000))}s` : ''
+            return (
+              <Box key={`rc-${entry.id}`} flexWrap="nowrap">
+                <Button key={`job-${entry.id}`} plain onPress={() => void change($, s => ({ ...s, view: 'job', jobId: entry.id }))}>
+                  <Text color={color}>{`${mark} `}</Text>
+                  <Text>{clip(`${kindTag(entry)}${entry.prompt}`, Math.max(20, Math.floor(width / 2) - 8))}</Text>
+                </Button>
+                <Text dimColor>{` ${seconds}   `}</Text>
+              </Box>
+            )
+          })}
+        </Box>
+        <Box marginTop={1}>
+          <Text dimColor wrap="wrap">{`context  ${contextLine(state.instructions)}`}</Text>
+        </Box>
       </Box>
     )
   })

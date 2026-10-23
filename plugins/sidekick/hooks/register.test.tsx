@@ -328,6 +328,7 @@ test("the pane tags an investigation, and its record button copies the record's 
     props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
   } as never)
   expect(await ui.find({ type: 'Text', text: /investigate · check the acme-bot logs/ })).toBeDefined()
+  await openJob(ui, s.entries[0]?.id)
   await ui.press({ key: `dump-${s.entries[0]?.id}` })
   await ui.unmount()
   expect(copied).toEqual([s.entries[0]?.dump ?? ''])
@@ -364,6 +365,8 @@ test('with no instruction files yet, an investigation goes to main instead', asy
     requestId: 'sidekick',
     props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
   } as never)
+  await openJob(ui, (await state($)).entries[0]?.id)
+  expect(await ui.find({ type: 'Text', text: /no instruction files yet/ })).toBeDefined()
   expect(await ui.find({ key: `missed-${(await state($)).entries[0]?.id}` })).toBeUndefined()
   await ui.unmount()
 })
@@ -436,11 +439,22 @@ test('the pane draws the assist with its buttons on every surface', async ($, on
       requestId: 'sidekick',
       props: { title: 'Sidekick', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
     } as never)
-    expect(await ui.find({ type: 'Text', text: /✓ commit and push/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /▌ DONE/ })).toBeDefined()
+    if ((await ui.find({ key: 'back' })) !== undefined) await ui.press({ key: 'back' })
+    // The dashboard: hero tiles in segment digits, the live strip, the recent job.
+    expect(await ui.find({ key: 'tile-done' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}╷ $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^DONE$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^SAVED$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /est\. vs Opus 5\.5/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /WHERE IT WENT/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /LAST 7 DAYS/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Best day: today, 1 job/ })).toBeDefined()
     // The loaded version, read from the manifest, sits quietly in the header.
     expect((await ui.find({ type: 'Text', text: /^v9\.9\.9$/ }))?.text).toBe('v9.9.9')
     expect(await ui.find({ type: 'Text', text: /caching saved/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /commit and push/ })).toBeDefined()
+    // Its words are one press away.
+    await openJob(ui, (await state($)).entries[0]?.id)
     expect(await ui.find({ type: 'Text', text: /Committed 3f2a91c/ })).toBeDefined()
     // The handed-off prompt is not in the up-arrow history, so the pane recalls it.
     filled.length = 0
@@ -467,6 +481,14 @@ test('a draft judged while typing answers the submit without a second judge call
   expect(seen.judgments.length).toBe(1)
   expect((await state($)).entries[0]?.status).not.toBe('passed')
 })
+
+type Mounted = { press: (q: { key: string }) => Promise<unknown>; find: (q: object) => Promise<unknown> }
+
+/** Opens one job's details in the pane, from wherever it is: its buttons live there. */
+async function openJob(ui: Mounted, id: string | undefined): Promise<void> {
+  if ((await ui.find({ key: 'back' })) !== undefined) await ui.press({ key: 'back' })
+  await ui.press({ key: `job-${id}` })
+}
 
 /** The engine's own band, beneath the mod's: empty. */
 function underBand(on: On): void {
@@ -605,6 +627,7 @@ test("should've been sidekick teaches the judge: the next judgment carries the m
     requestId: 'sidekick',
     props: { title: 'Sidekick', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
   } as never)
+  await openJob(ui, (await state($)).entries[0]?.id)
   await ui.press({ key: `missed-${(await state($)).entries[0]?.id}` })
   await ui.unmount()
   expect(seen.toasts.some(t => t.includes('tidy up merged branches'))).toBe(true)
@@ -627,7 +650,9 @@ test('learned corrections can be listed and forgotten, from the pane and the com
   for (const text of ['tidy up merged branches', 'sync with origin']) {
     await $.prompt.submit({ text, ...TYPED })
     const ui = await pane()
-    await ui.press({ key: `missed-${(await state($)).entries.find(x => x.prompt === text)?.id}` })
+    const id = (await state($)).entries.find(x => x.prompt === text)?.id
+    await openJob(ui, id)
+    await ui.press({ key: `missed-${id}` })
     await ui.unmount()
   }
   const run = (args: string) => $.command.run({ command: 'sidekick', args, origin: { kind: 'composer' }, presentation: 'inline' } as never) as Promise<{ text: string }>
@@ -636,6 +661,8 @@ test('learned corrections can be listed and forgotten, from the pane and the com
   expect(listed).toContain('2. [chore] tidy up merged branches')
 
   const ui = await pane()
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'view-learned' })
   expect(await ui.find({ type: 'Text', text: /LEARNED/ })).toBeDefined()
   await ui.press({ key: 'forget-tidy up merged branches' })
   await ui.unmount()
@@ -676,8 +703,12 @@ test("should've been sidekick on a message about a running service teaches inves
     requestId: 'sidekick',
     props: { title: 'Sidekick', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
   } as never)
+  await openJob(ui, (await state($)).entries[0]?.id)
   await ui.press({ key: `missed-${(await state($)).entries[0]?.id}` })
-  expect(await ui.find({ type: 'Text', text: /\[investigate\] acme-bot logs look wrong/ })).toBeDefined()
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'view-learned' })
+  expect(await ui.find({ type: 'Text', text: /\[investigate\] / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /acme-bot logs look wrong/ })).toBeDefined()
   await ui.unmount()
   expect((await state($)).learned).toEqual([{ text: 'acme-bot logs look wrong', verdict: 'investigate' }])
   await $.prompt.submit({ text: 'acme-bot health', ...TYPED })
@@ -781,6 +812,7 @@ test('history: finished work and passes are kept across sessions, and give to ma
     requestId: 'sidekick',
     props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
   } as never)
+  await openJob(ui, s.entries[0]?.id)
   await ui.press({ key: `main-${s.entries[0]?.id}` })
   await ui.unmount()
   const after = await until($, x => x.today.savedUsd === 0)
@@ -794,4 +826,39 @@ test('a pass to Claude is kept in the history too', async ($, on) => {
   await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
   await $.prompt.submit({ text: 'rename the judge function', ...TYPED })
   expect((seen.store.get('history') as { kind: string }[]).map(r => r.kind)).toEqual(['to-claude'])
+})
+
+test('the dashboard tabs pick the span, and a narrow pane stacks the tiles', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'done' && x.today.done === 1)
+  const pane = (columns: number) =>
+    $.ui.mount({
+      plugin: 'sidekick',
+      surface: 'terminal',
+      component: 'Pane',
+      requestId: 'sidekick',
+      props: { title: 'Sidekick', isFocused: false, bodyColumns: columns, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
+    } as never)
+  const ui = await pane(100)
+  for (const tab of ['week', 'session', 'today'] as const) {
+    await ui.press({ key: `tab-${tab}` })
+    expect((await state($)).tab).toBe(tab)
+    // One chore in every span: the DONE tile draws a 1.
+    expect(await ui.find({ type: 'Text', text: /^ {2}╷ $/ })).toBeDefined()
+  }
+  expect(await ui.find({ type: 'Text', text: /1 chores · 0 looks/ })).toBeDefined()
+  await ui.unmount()
+  const narrow = await pane(50)
+  const drawn = JSON.stringify(await (narrow as unknown as { drawn: () => Promise<unknown> }).drawn())
+  // Stacked: the tiles sit in a column, DONE above SAVED.
+  expect(drawn.indexOf('"DONE"')).toBeLessThan(drawn.indexOf('"SAVED"'))
+  expect(drawn).toContain('"flexDirection":"column"')
+  await narrow.unmount()
+  const tiny = await pane(30)
+  // Too narrow for segment digits: plain numbers.
+  expect(await tiny.find({ type: 'Text', text: /^1$/ })).toBeDefined()
+  await tiny.unmount()
 })
