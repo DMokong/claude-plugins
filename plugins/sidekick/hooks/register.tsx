@@ -7,7 +7,8 @@ import { NO_SPEND, addTally, tallyLine, tallyOf, tokens, usd } from './lib/cost'
 import { migrate, toTaught } from './lib/state'
 import { HISTORY_KEY, NO_TOTALS, appendRow, markGiven, savedFor, startOfDay, toRows, totals } from './lib/history'
 import type { HistoryRow } from './lib/history'
-import { SETTINGS_KEY, defaultsFrom, effective, withChange } from './lib/settings'
+import { JUDGE_CHIPS, SETTINGS_KEY, WORKER_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
+import { COLORS, spaced, tileMoney } from './lib/draw'
 import { DUMP_KEEP, configRoot, dumpDir, dumpName, dumpText } from './lib/dump'
 import type { Call } from './lib/dump'
 import {
@@ -786,7 +787,11 @@ export const register: Register = (on, options) => {
   // Typing is the cue a prompt is coming: judge the draft while the person types, not after.
   on('prompt.edit', async ($, e, next) => {
     const box = await next(e)
-    if (isOff || (await load($)).mode !== 'auto') return box
+    if (isOff) return box
+    const { mode, panelOpen } = await load($)
+    // Typing folds the panel: it must never stand between the person and the prompt.
+    if (panelOpen && box.text !== e.text) await change($, st => ({ ...st, panelOpen: false }))
+    if (mode !== 'auto') return box
     if (e.text === '') void warm($)
     judgeDraftSoon($, box.text)
     return box
@@ -1089,55 +1094,239 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (isOff || e.props.hasSurvey) return next(e)
     const state = await load($)
-    if (state.mode === 'off') return next(e)
     const below = await next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
-    const width = e.props.bodyColumns ?? 80
-    const spin = SPINNER[state.tick % SPINNER.length] ?? '⟳'
+    const width = Math.max(24, e.props.bodyColumns ?? 80)
+    const maxRows = e.props.maxRows ?? 40
     const running = state.entries.filter(x => x.status === 'running')
-    const queued = state.entries.filter(x => x.status === 'queued').length
+    const queued = state.entries.filter(x => x.status === 'queued')
+    const isOn = state.mode !== 'off'
     const lead = running[0]
-    const activity =
-      lead !== undefined
-        ? `${spin} ${lead.prompt}${lead.steps.length > 0 ? ` · ${lead.steps.at(-1)}` : ''}${running.length > 1 ? ` +${running.length - 1}` : ''}`
-        : state.isWarming
-          ? 'warming up the judge…'
-          : 'idle'
-    // One line at any width: the least useful parts give way first, then the activity is cut.
-    const parts: { text: string; color: string; keep: number }[] = [
-      { text: queued > 0 ? `◷ ${queued} queued` : '', color: 'suggestion', keep: 2 },
-      { text: state.waiting.length > 0 ? `⏸ ${state.waiting.length} waiting` : '', color: 'warning', keep: 3 },
-      { text: `≈${usd(state.spend.usd)}`, color: 'subtle', keep: 1 },
-      { text: `${state.totals.assists} ${state.totals.assists === 1 ? 'assist' : 'assists'}`, color: 'subtle', keep: 0 },
-    ].filter(part => part.text !== '')
-    const fixed = 'sidekick '.length + state.mode.length + 2 + ' │ '.length + ' Open '.length + 8
-    const minActivity = 14
-    const length = (list: typeof parts) => list.reduce((n, part) => n + part.text.length + 3, 0)
-    let shown = [...parts]
-    while (shown.length > 0 && fixed + minActivity + length(shown) > width) {
-      const lowest = Math.min(...shown.map(part => part.keep))
-      shown = shown.filter(part => part.keep !== lowest)
+    const now = await $.clock.now()
+
+    // ── the folded line: what's happening, at a glance; parts give way from the right as it narrows
+    const toggleText = state.panelOpen ? ' ◆ Sidekick ▴ ' : ' ◆ Sidekick ▾ '
+    const counts = [
+      { glyph: '●', n: running.length, color: COLORS.pink },
+      { glyph: '◷', n: queued.length, color: COLORS.blue },
+      { glyph: '⏸', n: state.waiting.length, color: COLORS.yellow },
+    ]
+    const savedText = tileMoney(state.today.savedUsd)
+    const costText = tileMoney(state.today.costUsd)
+    const head = isOn ? 13 + state.mode.length : 18
+    const partWidths = { counts: 14, saved: 9 + savedText.length, cost: 8 + costText.length }
+    const fits = (parts: (keyof typeof partWidths)[]) => head + parts.reduce((n, k) => n + partWidths[k], 0) + toggleText.length <= width
+    const order: (keyof typeof partWidths)[] = ['counts', 'saved', 'cost']
+    let shown = isOn ? order : []
+    while (shown.length > 0 && !fits(shown)) shown = shown.slice(0, -1)
+    const modeChip =
+      state.mode === 'auto' ? (
+        <Text key="pill" bold backgroundColor={COLORS.green} color={COLORS.ink}>{' ● AUTO '}</Text>
+      ) : state.mode === 'shadow' ? (
+        <Text key="pill" bold backgroundColor={COLORS.purple} color={COLORS.ink}>{' ◌ SHADOW '}</Text>
+      ) : (
+        <Text key="pill" dimColor>{'○ OFF'}</Text>
+      )
+    const folded = (
+      <Box key="sk-folded" flexWrap="nowrap">
+        <Text bold={isOn} dimColor={!isOn} color={isOn ? COLORS.claude : undefined}>{'◆ sidekick '}</Text>
+        {modeChip}
+        {shown.includes('counts') && <Text color={COLORS.line}>{' │ '}</Text>}
+        {shown.includes('counts') &&
+          counts.map(c => (
+            <Text key={`c-${c.glyph}`} color={c.n > 0 ? c.color : COLORS.dim}>{`${c.glyph} ${c.n} `}</Text>
+          ))}
+        {shown.includes('saved') && <Text color={COLORS.line}>{'│ '}</Text>}
+        {shown.includes('saved') && <Text dimColor>{'saved '}</Text>}
+        {shown.includes('saved') && <Text bold color={COLORS.green}>{`${savedText} `}</Text>}
+        {shown.includes('cost') && <Text color={COLORS.line}>{'│ '}</Text>}
+        {shown.includes('cost') && <Text dimColor>{'cost '}</Text>}
+        {shown.includes('cost') && <Text color={COLORS.blue}>{costText}</Text>}
+        <Box flexGrow={1} />
+        <Button key="band-toggle" plain onPress={() => void change($, s => ({ ...s, panelOpen: !s.panelOpen }))}>
+          <Text bold backgroundColor={COLORS.claude} color={COLORS.ink}>{toggleText}</Text>
+        </Button>
+      </Box>
+    )
+
+    // ── the live job card (image 1): the running job, its latest command, what comes next
+    const ageOf = (entry: Entry) => Math.max(0, Math.round((now - (entry.startedAt || entry.createdAt)) / 1000))
+    const block = (entry: Entry) => {
+      const lit = entry.steps.length % 4
+      return [0, 1].map(i => <Text key={`blk-${i}`} backgroundColor={i === 0 || lit >= 2 ? COLORS.orange : '#3a2a2a'}>{'  '}</Text>)
     }
-    const room = Math.max(8, width - fixed - length(shown))
+    const card =
+      lead !== undefined && !state.panelOpen ? (
+        <Box key="sk-card" flexDirection="column" borderStyle="round" borderColor={COLORS.pink} paddingX={1}>
+          <Box flexWrap="nowrap">
+            <Text color={COLORS.pink}>{'✦ '}</Text>
+            <Text bold color={COLORS.orange}>{lead.kind === 'investigate' ? 'investigate ' : 'chore '}</Text>
+            <Text bold>{clip(lead.prompt, width - 20)}</Text>
+            {running.length > 1 && <Text dimColor>{`  +${running.length - 1}`}</Text>}
+          </Box>
+          <Box flexWrap="nowrap">
+            <Text color={COLORS.pink}>{'● '}</Text>
+            <Text bold>{clip((lead.steps.at(-1) ?? 'starting the worker…').replace(/^\$ /, ''), width - 30)}</Text>
+            <Box flexGrow={1} />
+            {block(lead)}
+            <Text bold color={COLORS.pink}>{'  Working'}</Text>
+            <Text dimColor>{` ${ageOf(lead)}s`}</Text>
+          </Box>
+          <Box flexWrap="nowrap">
+            <Text dimColor>{'○ Report back to Claude'}</Text>
+            <Box flexGrow={1} />
+            <Text dimColor>{'Next'}</Text>
+          </Box>
+        </Box>
+      ) : null
+
+    // ── the control panel (image 3)
+    const inner = Math.max(20, width - 4)
+    const chip = (key: string, label: string, isOn_: boolean, color: string, act: () => void) => (
+      <Button key={key} plain onPress={act}>
+        {isOn_ ? (
+          <Text bold backgroundColor={color} color={COLORS.ink}>{` ${label} `}</Text>
+        ) : (
+          <Text>{` ${label} `}</Text>
+        )}
+      </Button>
+    )
+    const rule = (key: string, title: string) => {
+      const label = title === '' ? '' : `── ${spaced(title)} `
+      return (
+        <Box key={key} flexWrap="nowrap">
+          <Text color={COLORS.line}>{label === '' ? '' : '── '}</Text>
+          <Text dimColor>{label === '' ? '' : `${spaced(title)} `}</Text>
+          <Text color={COLORS.line}>{'─'.repeat(Math.max(0, inner - label.length))}</Text>
+        </Box>
+      )
+    }
+    const pill = (key: string, on_: boolean, act: () => void) => (
+      <Button key={key} plain onPress={act}>
+        {on_ ? (
+          <Text bold backgroundColor={COLORS.green} color={COLORS.ink}>{' ● On '}</Text>
+        ) : (
+          <Text backgroundColor="#2a2f3a">{' ○ Off '}</Text>
+        )}
+      </Button>
+    )
+    const settingRow = (key: keyof Settings, name: string, desc: string, control: unknown) => (
+      <Box key={`row-${key}`} flexWrap="nowrap">
+        <Text color={state.settings[key] === false ? COLORS.line : COLORS.green}>{state.settings[key] === false ? '○ ' : '● '}</Text>
+        <Text bold>{name.padEnd(15)}</Text>
+        <Text dimColor>{clip(desc, Math.max(4, inner - 30))}</Text>
+        <Box flexGrow={1} />
+        {control as never}
+      </Box>
+    )
+    const toggle = (key: 'investigations' | 'draftJudging' | 'notifications') => pill(`set-${key}`, state.settings[key], () => void setSetting($, key, !state.settings[key]))
+    const nextJob = queued.at(-1)
+    const lastDump = state.entries.find(x => x.dump !== '')
+    const lastDone = state.entries.find(x => x.status === 'done' || x.status === 'stopped' || x.status === 'failed')
+    const openPane = (view: SidekickState['view']) => {
+      void change($, s => ({ ...s, view, panelOpen: false }))
+      void $.ui.open({ id: PANE, title: 'Sidekick', rows: PANE_ROWS })
+    }
+    const launch = [
+      { key: 'launch-dashboard', glyph: '▣', color: COLORS.yellow, label: 'Dashboard', act: () => openPane('dashboard') },
+      { key: 'launch-learned', glyph: '✎', color: COLORS.purple, label: `What it learned (${state.learned.length})`, act: () => openPane('learned') },
+      { key: 'launch-record', glyph: '▤', color: COLORS.blue, label: 'Last record', act: () => void (lastDump !== undefined ? copyDump($, lastDump.dump) : $.ui.toast('No investigation record yet')) },
+      { key: 'launch-main', glyph: '↩', color: COLORS.green, label: 'Give last to main', act: () => void (lastDone !== undefined ? giveToMain($, lastDone.id) : $.ui.toast('Nothing finished yet')) },
+      { key: 'launch-reset', glyph: '↺', color: COLORS.dim, label: 'Reset to defaults', act: () => void resetSettings($) },
+    ]
+    const perRow = width >= 60 ? 2 : 1
+    const launchRows = Array.from({ length: Math.ceil(launch.length / perRow) }, (_, r) => launch.slice(r * perRow, r * perRow + perRow))
+    const showNow = maxRows >= 26
+    const panel = !state.panelOpen ? null : (
+      <Box key="sk-panel" flexDirection="column" borderStyle="round" borderColor={COLORS.claude} paddingX={1}>
+        <Box flexWrap="nowrap">
+          <Text color={COLORS.claude}>{'◆  '}</Text>
+          <Text bold color={COLORS.orange}>{spaced('SIDEKICK')}</Text>
+          <Box flexGrow={1} />
+          {counts.map(c => (
+            <Text key={`pc-${c.glyph}`} color={c.n > 0 ? c.color : COLORS.dim}>{`${c.glyph} ${c.n}  `}</Text>
+          ))}
+          <Text color={COLORS.green}>{`saved ${savedText}`}</Text>
+          <Text dimColor>{' · '}</Text>
+          <Text color={COLORS.blue}>{costText}</Text>
+        </Box>
+        {rule('r0', '')}
+        <Box flexWrap="wrap">
+          <Text dimColor>{'MODE      '}</Text>
+          {chip('mode-off', 'Off', state.mode === 'off', COLORS.dim, () => void setMode($, 'off'))}
+          {chip('mode-shadow', 'Shadow', state.mode === 'shadow', COLORS.purple, () => void setMode($, 'shadow'))}
+          {chip('mode-auto', 'Auto', state.mode === 'auto', COLORS.green, () => void setMode($, 'auto'))}
+        </Box>
+        <Box flexWrap="wrap">
+          <Text dimColor>{'JUDGE     '}</Text>
+          {chipsFor(JUDGE_CHIPS, state.settings.judgeModel).map(([label, alias]) =>
+            chip(`judge-${alias}`, label, state.settings.judgeModel === alias, COLORS.purple, () => void setSetting($, 'judgeModel', alias)),
+          )}
+        </Box>
+        <Box flexWrap="wrap">
+          <Text dimColor>{'WORKER    '}</Text>
+          {chipsFor(WORKER_CHIPS, state.settings.workerModel).map(([label, alias]) =>
+            chip(`worker-${alias}`, label, state.settings.workerModel === alias, COLORS.purple, () => void setSetting($, 'workerModel', alias)),
+          )}
+        </Box>
+        {rule('r1', 'SETTINGS')}
+        {settingRow('investigations', 'Investigations', 'look into services, restart in place', toggle('investigations'))}
+        {settingRow('draftJudging', 'Draft judging', 'judge while you type · ≈$0.0001 a pause', toggle('draftJudging'))}
+        {settingRow('notifications', 'Notifications', 'a ping when a job finishes', toggle('notifications'))}
+        {settingRow(
+          'maxConcurrent',
+          'Side by side',
+          'chores in different repos at once',
+          <Button key="set-maxConcurrent" plain onPress={() => void setSetting($, 'maxConcurrent', (state.settings.maxConcurrent % 3) + 1)}>
+            <Text backgroundColor="#2a2f3a">{` ${state.settings.maxConcurrent} at a time `}</Text>
+          </Button>,
+        )}
+        {showNow && rule('r2', 'NOW')}
+        {showNow && lead === undefined && nextJob === undefined && <Text dimColor>{'nothing running'}</Text>}
+        {showNow && lead !== undefined && (
+          <Box flexWrap="nowrap">
+            <Text color={COLORS.pink}>{'● '}</Text>
+            <Text bold color={COLORS.orange}>{lead.kind === 'investigate' ? 'investigate ' : ''}</Text>
+            <Text>{clip(lead.prompt, inner - 30)}</Text>
+            <Box flexGrow={1} />
+            {block(lead)}
+            <Text bold color={COLORS.pink}>{'  Working'}</Text>
+            <Text dimColor>{` ${ageOf(lead)}s`}</Text>
+          </Box>
+        )}
+        {showNow &&
+          queued
+            .slice(-2)
+            .reverse()
+            .map((q, i) => (
+              <Box key={`q-${q.id}`} flexWrap="nowrap">
+                <Text color={COLORS.blue}>{'◷ '}</Text>
+                <Text>{clip(q.prompt, inner - 12)}</Text>
+                <Box flexGrow={1} />
+                <Text dimColor>{i === 0 ? 'Next' : 'Then'}</Text>
+              </Box>
+            ))}
+        {rule('r3', 'LAUNCH')}
+        {launchRows.map((row, r) => (
+          <Box key={`lr-${r}`} flexWrap="nowrap">
+            {row.map(item => (
+              <Box key={`li-${item.key}`} width={perRow === 2 ? Math.floor(inner / 2) : inner} flexWrap="nowrap">
+                <Text color={item.color}>{`${item.glyph}  `}</Text>
+                <Button key={item.key} plain onPress={item.act}>
+                  <Text>{item.label}</Text>
+                </Button>
+              </Box>
+            ))}
+          </Box>
+        ))}
+      </Box>
+    )
+
     return (
       <Box flexDirection="column">
-        <Box key="sidekick-band" flexWrap="nowrap">
-          <Text bold color="claude">
-            ◆ sidekick{' '}
-          </Text>
-          <Text bold inverse color={state.mode === 'auto' ? 'success' : 'suggestion'}>
-            {` ${state.mode.toUpperCase()} `}
-          </Text>
-          <Text dimColor> │ </Text>
-          <Text color={lead !== undefined ? 'warning' : state.isWarming ? 'suggestion' : 'subtle'}>{clip(activity, room)}</Text>
-          {shown.map(part => (
-            <Text key={`band-${part.keep}`} color={part.color}>
-              {` · ${part.text}`}
-            </Text>
-          ))}
-          <Text> </Text>
-          <Button key="open" label="Open" onPress={() => void $.ui.open({ id: PANE, title: 'Sidekick', rows: PANE_ROWS })} />
-        </Box>
+        {card}
+        {panel}
+        {folded}
         {below}
       </Box>
     )

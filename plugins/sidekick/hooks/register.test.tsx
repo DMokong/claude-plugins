@@ -468,7 +468,18 @@ test('a draft judged while typing answers the submit without a second judge call
   expect((await state($)).entries[0]?.status).not.toBe('passed')
 })
 
-test('the band shows while on and stacks above the band beneath it', async ($, on) => {
+/** The engine's own band, beneath the mod's: empty. */
+function underBand(on: On): void {
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{''}</Text>
+  })
+}
+
+const BAND = (columns = 100, maxRows = 40) =>
+  ({ plugin: 'sidekick', component: 'AbovePrompt', surface: 'terminal', props: { bodyColumns: columns, maxRows, hasSurvey: false, isWorking: false, view: {} } }) as never
+
+test('the folded line shows even while off, and stacks above the band beneath it', async ($, on) => {
   world(on, { judge: MECHANICAL, worker: DONE })
   // Another plugin's band, beneath this one.
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
@@ -476,21 +487,109 @@ test('the band shows while on and stacks above the band beneath it', async ($, o
     return <Text>other band</Text>
   })
   await $.session.start(START)
-  const BAND = { plugin: 'sidekick', component: 'AbovePrompt', props: { bodyColumns: 100, hasSurvey: false, view: {} } } as never
   for (const surface of ['terminal', 'desktop'] as const) {
-    const off = await $.ui.mount({ ...(BAND as object), surface } as never)
-    expect(await off.find({ type: 'Text', text: /◆ sidekick/ })).toBeUndefined()
+    const off = await $.ui.mount({ ...(BAND() as object), surface } as never)
+    expect(await off.find({ type: 'Text', text: /◆ sidekick/ })).toBeDefined()
+    expect(await off.find({ type: 'Text', text: /○ OFF/ })).toBeDefined()
+    expect(await off.find({ key: 'band-toggle' })).toBeDefined()
     expect(await off.find({ type: 'Text', text: /other band/ })).toBeDefined()
     await off.unmount()
   }
   await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
-  for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ ...(BAND as object), surface } as never)
-    expect(await ui.find({ type: 'Text', text: /◆ sidekick/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: / AUTO / })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /other band/ })).toBeDefined()
-    await ui.unmount()
+  const ui = await $.ui.mount(BAND())
+  expect(await ui.find({ type: 'Text', text: / ● AUTO / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /saved/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the toggle opens the control panel; its chips and pills change the session and the settings', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  const ui = await $.ui.mount(BAND())
+  await ui.press({ key: 'band-toggle' })
+  expect((await state($)).panelOpen).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /S I D E K I C K/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /S E T T I N G S/ })).toBeDefined()
+  // One click from off to on.
+  await ui.press({ key: 'mode-auto' })
+  expect((await state($)).mode).toBe('auto')
+  await ui.press({ key: 'set-draftJudging' })
+  expect((await state($)).settings.draftJudging).toBe(false)
+  expect(seen.store.get('settings')).toEqual({ draftJudging: false })
+  await ui.press({ key: 'worker-sonnet' })
+  expect((await state($)).settings.workerModel).toBe('sonnet')
+  for (const n of [2, 3, 1]) {
+    await ui.press({ key: 'set-maxConcurrent' })
+    expect((await state($)).settings.maxConcurrent).toBe(n)
   }
+  await ui.press({ key: 'launch-reset' })
+  expect((await state($)).settings).toEqual({ judgeModel: 'haiku', workerModel: 'haiku', investigations: true, draftJudging: true, notifications: true, maxConcurrent: 1 })
+  expect(seen.store.get('settings')).toEqual({})
+  await ui.press({ key: 'band-toggle' })
+  expect((await state($)).panelOpen).toBe(false)
+  await ui.unmount()
+})
+
+test('typing folds the panel', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  on('prompt.edit', async (_$, e) => ({ text: e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end), cursor: e.start + e.inputText.length }))
+  underBand(on)
+  await $.session.start(START)
+  const ui = await $.ui.mount(BAND())
+  await ui.press({ key: 'band-toggle' })
+  await ui.unmount()
+  const typing = $.prompt as unknown as { edit: (e: unknown) => Promise<unknown> }
+  await typing.edit({ origin: { kind: 'composer' }, text: '', cursor: 0, start: 0, end: 0, inputText: 'c' })
+  expect((await state($)).panelOpen).toBe(false)
+})
+
+test('while a job runs, the band shows its card: the latest command and Working', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  world(on, { judge: MECHANICAL, worker: DONE, workerGate: gate })
+  underBand(on)
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'running' && x.entries[0].steps.length > 0)
+  const ui = await $.ui.mount(BAND())
+  expect(await ui.find({ type: 'Text', text: /Working/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /git commit -m x/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Report back to Claude/ })).toBeDefined()
+  await ui.unmount()
+  open()
+  await until($, x => x.entries[0]?.status === 'done')
+})
+
+test('a narrow band keeps the toggle and drops cost, then saved, then the counts', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const wide = await $.ui.mount(BAND(120))
+  expect(await wide.find({ type: 'Text', text: /^cost/ })).toBeDefined()
+  await wide.unmount()
+  const mid = await $.ui.mount(BAND(60))
+  expect(await mid.find({ type: 'Text', text: /^cost/ })).toBeUndefined()
+  expect(await mid.find({ type: 'Text', text: /^saved/ })).toBeDefined()
+  await mid.unmount()
+  const narrow = await $.ui.mount(BAND(40))
+  expect(await narrow.find({ key: 'band-toggle' })).toBeDefined()
+  expect(await narrow.find({ type: 'Text', text: /^saved/ })).toBeUndefined()
+  await narrow.unmount()
+})
+
+test('state a 0.3.0 session wrote draws the band', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  on('state.get', async (_$, e, next) => (e.key === 'sidekick' ? { value: { value: { mode: 'auto', entries: [] }, version: 1 } } : next(e)))
+  underBand(on)
+  await $.session.start(START)
+  const ui = await $.ui.mount(BAND())
+  expect(await ui.find({ key: 'band-toggle' })).toBeDefined()
+  await ui.unmount()
 })
 
 test("should've been sidekick teaches the judge: the next judgment carries the miss", async ($, on) => {
@@ -606,24 +705,6 @@ test("the worker gets the instruction files the main session loaded, and the pan
   } as never)
   expect(await ui.find({ type: 'Text', text: /1 instruction file/ })).toBeDefined()
   await ui.unmount()
-})
-
-test('the band stays on one line when narrow: the least useful parts give way first', async ($, on) => {
-  world(on, { judge: MECHANICAL, worker: DONE })
-  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
-    const { Text } = $.ui.resolve(e)
-    return <Text>beneath</Text>
-  })
-  await $.session.start(START)
-  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
-  const band = (columns: number) => ({ plugin: 'sidekick', component: 'AbovePrompt', surface: 'terminal', props: { bodyColumns: columns, hasSurvey: false, view: {} } }) as never
-  const wide = await $.ui.mount(band(120))
-  expect(await wide.find({ type: 'Text', text: /assists/ })).toBeDefined()
-  await wide.unmount()
-  const narrow = await $.ui.mount(band(46))
-  expect(await narrow.find({ type: 'Text', text: /◆ sidekick/ })).toBeDefined()
-  expect(await narrow.find({ type: 'Text', text: /assists/ })).toBeUndefined()
-  await narrow.unmount()
 })
 
 test('settings changed in an earlier session are in force, and only changed ones are kept', async ($, on) => {
