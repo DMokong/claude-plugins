@@ -20,12 +20,16 @@ type World = {
   worker: string
   /** When set, the worker waits for this promise before it reports. */
   workerGate?: Promise<void>
+  /** What the record folder holds, as `$.fs.list` answers. */
+  listed?: { name: string; kind: 'file'; size: number; mtimeMs: number; isLink: boolean }[]
+  /** What the store holds before the session starts. */
+  stored?: Record<string, unknown>
 }
 
 /** The engine beneath the mod: answers every call it makes and records what it did. */
 function world(on: On, w: World) {
   clock = mock.clock(on)
-  mock.store(on)
+  mock.store(on, w.stored)
   latest = undefined
   on('state.set', async (_$, e, next) => {
     if (e.plugin === 'sidekick' && e.key === 'sidekick') latest = e.value as SidekickState
@@ -42,6 +46,8 @@ function world(on: On, w: World) {
     appended: [] as string[],
     resubmitted: [] as string[],
     spawned: [] as string[][],
+    written: [] as { path: string; text: string }[],
+    ran: [] as string[][],
     judged: 0,
     judgments: [] as string[],
     systems: [] as string[],
@@ -50,8 +56,15 @@ function world(on: On, w: World) {
     release: () => release(),
   }
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  // The engine's own answer to a context build: the blocks it was given.
+  on('prompt.context', async (_$, e) => ({ blocks: e.blocks }))
   on('command.register', async (_$, e) => ({ value: { command: e.name } }))
-  on('env.get', async () => ({ value: undefined }))
+  on('env.get', async (_$, e) => ({ value: e.name === 'HOME' ? '/home/u' : undefined }))
+  on('fs.write', async (_$, e) => {
+    seen.written.push({ path: e.path, text: e.text })
+    return { value: undefined }
+  })
+  on('fs.list', async () => ({ value: w.listed ?? [] }))
   on('ui.open', async () => ({ value: { isPlaced: true } }))
   on('fs.read', async (_$, e) => {
     if (e.path.endsWith('/.claude-plugin/plugin.json')) return { value: JSON.stringify({ name: 'sidekick', version: '9.9.9' }) }
@@ -79,6 +92,7 @@ function world(on: On, w: World) {
     return next(e)
   })
   on('process.run', async (_$, e) => {
+    seen.ran.push([...e.argv])
     const out = e.argv.includes('rev-parse') ? '/repo\n' : '## main...origin/main\n M a.txt\n'
     return { value: { exitCode: 0, stdout: out, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -93,6 +107,7 @@ function world(on: On, w: World) {
   })
   on('process.spawn', async function* (_$, e) {
     seen.spawned.push([...e.argv])
+    yield { stream: 'stdout' as const, text: `${JSON.stringify({ type: 'system', subtype: 'init', session_id: WORKER_SESSION })}\n` }
     yield { stream: 'stdout' as const, text: `${JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', input: { command: 'git commit -m x' } }] } })}\n` }
     if (w.workerGate !== undefined) await w.workerGate
     yield {
@@ -111,6 +126,7 @@ function world(on: On, w: World) {
 }
 
 const MECHANICAL = 'mechanical'
+const WORKER_SESSION = '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'
 const WORKER_USAGE = {
   input_tokens: 4,
   cache_creation_input_tokens: 1642,
@@ -227,6 +243,139 @@ test('a prompt for main waits while an assist runs, then is sent in order', asyn
   open()
   await until($, x => x.entries[0]?.status === 'done' && x.waiting.length === 0)
   expect(seen.resubmitted).toEqual(['why does the stage-2 doc mention codex twice?'])
+})
+
+const INVESTIGATE = 'investigate'
+const LOOKED = '{"status":"done","summary":"acme-bot was hung; restarted it and it came back (pid 901)","commands":["launchctl print gui/501/com.example.acme"],"shas":[],"changed":["restarted: acme-bot"],"uncertain":[],"needsMain":""}'
+
+/** The main session's context build, carrying one instruction file the worker should get. */
+async function withInstructions($: { prompt: { context: (e: never) => Promise<unknown> } }): Promise<void> {
+  await $.prompt.context({ blocks: [], instructionFiles: [{ path: '/repo/CLAUDE.md', kind: 'project', content: 'acme-bot runs as com.example.acme.' }] } as never)
+}
+
+test('an investigation goes to the worker with the investigate profile and the ops lock', async ($, on) => {
+  const seen = world(on, { judge: INVESTIGATE, worker: LOOKED })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await withInstructions($ as never)
+  const result = await $.prompt.submit({ text: 'acme-bot stopped replying, look into it', ...TYPED })
+  expect(result.drop).toContain('→ sidekick (haiku) · investigating')
+  expect(seen.toMain).toEqual([])
+  const s = await until($, x => x.entries[0]?.status === 'done')
+  expect(s.entries[0]?.kind).toBe('investigate')
+  expect(s.entries[0]?.locks).toEqual(['ops'])
+  const argv = seen.spawned[0] ?? []
+  expect(argv[argv.indexOf('--settings') + 1]).toContain('sidekick-guard investigate')
+  expect(argv[argv.indexOf('--append-system-prompt') + 1]).toContain('acme-bot runs as com.example.acme.')
+})
+
+test("a finished investigation writes its record outside the repo and the note points to it; chores don't", async ($, on) => {
+  const listed = Array.from({ length: 52 }, (_, i) => ({ name: `2026-10-${String(i).padStart(2, '0')}-x.md`, kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false }))
+  const seen = world(on, { judge: INVESTIGATE, worker: LOOKED, listed })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await withInstructions($ as never)
+  await $.prompt.submit({ text: 'acme-bot stopped replying, look into it', ...TYPED })
+  const s = await until($, x => x.entries[0]?.status === 'done')
+  const dump = s.entries[0]?.dump ?? ''
+  expect(dump).toMatch(/^\/home\/u\/\.claude\/sidekick\/investigations\/\d{4}-\d{2}-\d{2}-.+\.md$/)
+  expect(seen.written.map(w => w.path)).toEqual([dump])
+  expect(seen.written[0]?.text).toContain('### $ git commit -m x')
+  expect(seen.written[0]?.text).toContain('restarted: acme-bot')
+  expect(seen.appended.at(-1)).toContain(`Full record (every command and its output): ${dump}.`)
+  // The two oldest of 52 go; the newest 50 stay.
+  expect(seen.ran.filter(argv => argv[0] === 'rm')).toEqual([
+    ['rm', '-f', '/home/u/.claude/sidekick/investigations/2026-10-00-x.md'],
+    ['rm', '-f', '/home/u/.claude/sidekick/investigations/2026-10-01-x.md'],
+  ])
+})
+
+test("the pane tags an investigation, and its record button copies the record's path", async ($, on) => {
+  const seen = world(on, { judge: INVESTIGATE, worker: LOOKED })
+  const copied: string[] = []
+  on('ui.copy', async (_$, e) => {
+    copied.push(e.text)
+    return { value: { isCopied: true as const } }
+  })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await withInstructions($ as never)
+  await $.prompt.submit({ text: 'check the acme-bot logs', ...TYPED })
+  const s = await until($, x => x.entries[0]?.status === 'done')
+  const ui = await $.ui.mount({
+    plugin: 'sidekick',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'sidekick',
+    props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  } as never)
+  expect(await ui.find({ type: 'Text', text: /investigate · check the acme-bot logs/ })).toBeDefined()
+  await ui.press({ key: `dump-${s.entries[0]?.id}` })
+  await ui.unmount()
+  expect(copied).toEqual([s.entries[0]?.dump ?? ''])
+  expect(seen.toasts.some(t => t.startsWith('Copied: /home/u/.claude/sidekick/investigations/'))).toBe(true)
+})
+
+test('a chore writes no record', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'done')
+  expect(seen.written).toEqual([])
+  expect(seen.appended.at(-1)).not.toContain('Full record')
+  // What the worker session left on disk goes once it ends.
+  expect(seen.ran.some(argv => argv[0] === 'find' && argv.includes(WORKER_SESSION) && argv[1] === '/home/u/.claude/projects')).toBe(true)
+})
+
+test('with no instruction files yet, an investigation goes to main instead', async ($, on) => {
+  const seen = world(on, { judge: INVESTIGATE, worker: LOOKED })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const result = await $.prompt.submit({ text: 'acme-bot stopped replying, look into it', ...TYPED })
+  expect(result.drop).toBeUndefined()
+  expect(seen.toMain.map(p => p.text)).toEqual(['acme-bot stopped replying, look into it'])
+  expect(seen.logs.some(line => line.includes('no instruction files yet'))).toBe(true)
+  expect(seen.spawned).toEqual([])
+  expect((await state($)).entries[0]?.status).toBe('passed')
+  // The judge was right; there's nothing for "should've been sidekick" to teach.
+  const ui = await $.ui.mount({
+    plugin: 'sidekick',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'sidekick',
+    props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  } as never)
+  expect(await ui.find({ key: `missed-${(await state($)).entries[0]?.id}` })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a running investigation does not hold prompts for the main session', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  const seen = world(on, { judge: INVESTIGATE, worker: LOOKED, workerGate: gate })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await withInstructions($ as never)
+  await $.prompt.submit({ text: 'acme-bot stopped replying, look into it', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'running')
+  const through = await $.prompt.submit({ text: 'why does the stage-2 doc mention codex twice?', ...TYPED })
+  expect(through.drop).toBeUndefined()
+  expect(seen.toMain.map(p => p.text)).toEqual(['why does the stage-2 doc mention codex twice?'])
+  open()
+  await until($, x => x.entries.some(e => e.status === 'done'))
+})
+
+test('shadow says what it would investigate', async ($, on) => {
+  const seen = world(on, { judge: INVESTIGATE, worker: LOOKED })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'shadow', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'check the acme-bot logs', ...TYPED })
+  const s = await until($, x => x.entries[0]?.status === 'shadow')
+  expect(s.entries[0]?.reason).toContain('would investigate: check the acme-bot logs')
+  expect(seen.spawned).toEqual([])
 })
 
 test('shadow judges and logs, but everything still goes to main', async ($, on) => {
@@ -366,14 +515,14 @@ test('learned corrections can be listed and forgotten, from the pane and the com
   }
   const run = (args: string) => $.command.run({ command: 'sidekick', args, origin: { kind: 'composer' }, presentation: 'inline' } as never) as Promise<{ text: string }>
   const listed = (await run('learned')).text
-  expect(listed).toContain('1. sync with origin')
-  expect(listed).toContain('2. tidy up merged branches')
+  expect(listed).toContain('1. [chore] sync with origin')
+  expect(listed).toContain('2. [chore] tidy up merged branches')
 
   const ui = await pane()
   expect(await ui.find({ type: 'Text', text: /LEARNED/ })).toBeDefined()
   await ui.press({ key: 'forget-tidy up merged branches' })
   await ui.unmount()
-  expect((await state($)).learned).toEqual(['sync with origin'])
+  expect((await state($)).learned).toEqual([{ text: 'sync with origin', verdict: 'mechanical' }])
   await $.prompt.submit({ text: 'prune branches', ...TYPED })
   expect(seen.systems.at(-1)).not.toContain('- tidy up merged branches')
   expect(seen.systems.at(-1)).toContain('- sync with origin')
@@ -385,10 +534,42 @@ test('learned corrections can be listed and forgotten, from the pane and the com
   expect((await run('forget 3')).text).toContain('Usage')
 })
 
+test('corrections a 0.2.x store kept as plain strings still list, steer and forget', async ($, on) => {
+  // The store as 0.2.x left it.
+  const seen = world(on, { judge: NEEDS_MAIN, worker: DONE, stored: { missed: ['prune merged branches'] } })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const run = (args: string) => $.command.run({ command: 'sidekick', args, origin: { kind: 'composer' }, presentation: 'inline' } as never) as Promise<{ text: string }>
+  expect((await run('learned')).text).toContain('1. [chore] prune merged branches')
+  await $.prompt.submit({ text: 'sync with origin', ...TYPED })
+  expect(seen.systems.at(-1)).toContain('- prune merged branches')
+  expect((await run('forget 1')).text).toContain('prune merged branches')
+  expect((await state($)).learned).toEqual([])
+})
+
+test("should've been sidekick on a message about a running service teaches investigate", async ($, on) => {
+  const seen = world(on, { judge: NEEDS_MAIN, worker: DONE })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'acme-bot logs look wrong', ...TYPED })
+  const ui = await $.ui.mount({
+    plugin: 'sidekick',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'sidekick',
+    props: { title: 'Sidekick', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  } as never)
+  await ui.press({ key: `missed-${(await state($)).entries[0]?.id}` })
+  expect(await ui.find({ type: 'Text', text: /\[investigate\] acme-bot logs look wrong/ })).toBeDefined()
+  await ui.unmount()
+  expect((await state($)).learned).toEqual([{ text: 'acme-bot logs look wrong', verdict: 'investigate' }])
+  await $.prompt.submit({ text: 'acme-bot health', ...TYPED })
+  const system = seen.systems.at(-1) ?? ''
+  expect(system.slice(system.indexOf('investigation:'))).toContain('- acme-bot logs look wrong')
+})
+
 test("the worker gets the instruction files the main session loaded, and the pane says so", async ($, on) => {
   const seen = world(on, { judge: MECHANICAL, worker: DONE })
-  // The engine's own answer: the blocks it was given.
-  on('prompt.context', async (_$, e) => ({ blocks: e.blocks }))
   await $.session.start(START)
   await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
   expect((await state($)).instructions).toBeNull()

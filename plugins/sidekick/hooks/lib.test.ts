@@ -1,9 +1,10 @@
 import { test, expect } from 'claude-code/testing'
 
-import { canStart, judgeSystem, lockKeys, parseJudgment, precheck, resourcesOf } from './lib/judge'
-import { migrate } from './lib/state'
+import { JUDGE_SYSTEM, canStart, holdsMain, judgeSystem, lockKeys, parseJudgment, precheck, resourcesOf } from './lib/judge'
+import { migrate, toTaught } from './lib/state'
 import { EMPTY } from './register'
-import { WORKER_SYSTEM, chatLine, handoffNote, instructionsPrompt, parseOutcome, parseStreamLine, splitLines, workerArgv } from './lib/worker'
+import { INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPrompt, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
+import { DUMP_KEEP, dumpDir, dumpName, dumpText, redact } from './lib/dump'
 
 test('precheck lets short imperative chores through to the judge', async () => {
   expect(precheck('commit and push', false)).toEqual({ isJudged: true })
@@ -18,6 +19,55 @@ test('precheck sends reasoning, long, pasted and conversational prompts straight
   expect(precheck('commit this', true).isJudged).toBe(false)
   expect(precheck('commit what we just discussed', false).isJudged).toBe(false)
   expect(precheck('   ', false).isJudged).toBe(false)
+})
+
+test('precheck lets operational why-questions through to the judge, but not code ones', async () => {
+  expect(precheck('why did nightly-report fail?', false).isJudged).toBe(true)
+  expect(precheck('why is acme-bot not replying', false).isJudged).toBe(true)
+  expect(precheck('how come acme-bot stopped', false).isJudged).toBe(true)
+  expect(precheck('why does parseOutcome return partial?', false).isJudged).toBe(false)
+  expect(precheck('why did the rebase fail?', false).isJudged).toBe(false)
+  expect(precheck('why did the tests fail?', false).isJudged).toBe(false)
+})
+
+test('investigate is a fourth verdict, holding the ops lock', async () => {
+  expect(parseJudgment('investigate', 'acme-bot stopped replying, look into it ')).toEqual({
+    verdict: 'investigate',
+    task: 'acme-bot stopped replying, look into it',
+    resources: ['ops'],
+    reason: 'investigation',
+  })
+  expect(lockKeys(['ops'], '/r/a')).toEqual(['ops'])
+  expect(canStart(['git:/r/a'], [['ops']], 2)).toBe(true)
+  expect(canStart(['ops'], [['ops']], 2)).toBe(false)
+})
+
+test('only assists that touch git or bd hold the main session', async () => {
+  expect(holdsMain(['git:/r/a'])).toBe(true)
+  expect(holdsMain(['bd'])).toBe(true)
+  expect(holdsMain(['*'])).toBe(true)
+  expect(holdsMain(['ops'])).toBe(false)
+  expect(holdsMain([])).toBe(false)
+})
+
+test('the judge rule names investigations and restarts, and four reply words', async () => {
+  expect(JUDGE_SYSTEM).toContain('"investigate"')
+  expect(JUDGE_SYSTEM).toMatch(/restart/i)
+  expect(JUDGE_SYSTEM).toContain('mechanical, investigate, needs-main or unclear')
+})
+
+test('precedents are split by the verdict they teach, capped in total', async () => {
+  const system = judgeSystem([
+    { text: 'tidy branches', verdict: 'mechanical' },
+    { text: 'check acme-bot logs', verdict: 'investigate' },
+  ])
+  const chores = system.indexOf('mechanical chore:')
+  const looks = system.indexOf('investigation:')
+  expect(chores).toBeGreaterThan(0)
+  expect(looks).toBeGreaterThan(0)
+  expect(system.indexOf('- tidy branches')).toBeGreaterThan(chores)
+  expect(system.slice(looks)).toContain('- check acme-bot logs')
+  expect(system.slice(looks)).not.toContain('- tidy branches')
 })
 
 test('a judgment is one word, read strictly; anything else routes to main', async () => {
@@ -68,6 +118,31 @@ test('the worker runs lean, locked down and guarded', async () => {
   expect(settings.autoMemoryEnabled).toBe(false)
   for (const rule of ['Read(**/.env)', 'Read(**/.mcp.json)']) expect(argv).toContain(rule)
   expect(argv[argv.indexOf('--append-system-prompt') + 1]).toBe(WORKER_SYSTEM)
+  expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe('/p/bin/sidekick-guard chore')
+})
+
+test('the investigation worker may run any command, but stays guarded and read-only', async () => {
+  const files = [{ path: '/repo/CLAUDE.md', kind: 'project', content: 'acme-bot logs to logs/acme.log.' }]
+  const argv = workerArgv('haiku', '/p/bin/sidekick-guard', files, 'investigate')
+  const allowed = argv.slice(argv.indexOf('--allowedTools') + 1, argv.indexOf('--disallowedTools'))
+  expect(allowed).toContain('Bash')
+  expect(allowed).not.toContain('Bash(git:*)')
+  const denied = argv.slice(argv.indexOf('--disallowedTools') + 1)
+  for (const rule of ['Edit', 'Write', 'NotebookEdit', 'Read(**/.env)', 'Read(**/.mcp.json)', 'Bash(git reset --hard:*)']) expect(denied).toContain(rule)
+  const settings = JSON.parse(argv[argv.indexOf('--settings') + 1] ?? '{}')
+  expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe('/p/bin/sidekick-guard investigate')
+  const system = argv[argv.indexOf('--append-system-prompt') + 1] ?? ''
+  expect(system.startsWith(INVESTIGATE_SYSTEM)).toBe(true)
+  expect(system.endsWith('acme-bot logs to logs/acme.log.')).toBe(true)
+  expect(argv[argv.indexOf('--permission-mode') + 1]).toBe('dontAsk')
+})
+
+test('the investigation prompt carries the restart, evidence and no-side-effect rules, and the same report', async () => {
+  for (const words of ['If the task asks for a restart, do it', 'verify', 'job manager', 'Never unload', 'Post or send anything', 'credential files', 'git reads only', 'An absence only counts']) {
+    expect(INVESTIGATE_SYSTEM).toContain(words)
+  }
+  const report = (prompt: string) => prompt.slice(prompt.indexOf('Finish with ONLY a JSON object'))
+  expect(report(INVESTIGATE_SYSTEM)).toBe(report(WORKER_SYSTEM))
 })
 
 test("the worker gets the main session's instruction files in its system prompt, within a size limit", async () => {
@@ -95,7 +170,7 @@ test('streamed output splits on lines across chunks', async () => {
 
 test('stream lines become steps and a result', async () => {
   const step = parseStreamLine(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', input: { command: 'git push' } }] } }))
-  expect(step).toEqual({ kind: 'step', text: '$ git push', id: '' })
+  expect(step).toEqual({ kind: 'step', text: '$ git push', id: '', full: '$ git push' })
   const refused = parseStreamLine(
     JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', is_error: true, content: 'Permission to use Bash has been denied.' }] } }),
   )
@@ -103,6 +178,110 @@ test('stream lines become steps and a result', async () => {
   const result = parseStreamLine(JSON.stringify({ type: 'result', result: '{"status":"done"}', is_error: false, total_cost_usd: 0.01 }))
   expect(result).toEqual({ kind: 'result', text: '{"status":"done"}', isError: false, costUsd: 0.01 })
   expect(parseStreamLine('not json')).toEqual({ kind: 'other' })
+})
+
+test('a message with several tool calls or results yields an event for each', async () => {
+  const calls = parseStreamEvents(
+    JSON.stringify({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'tool_use', id: 'a', name: 'Bash', input: { command: 'launchctl list' } },
+          { type: 'tool_use', id: 'b', name: 'Grep', input: { pattern: 'ERROR', path: 'logs' } },
+        ],
+      },
+    }),
+  )
+  expect(calls).toEqual([
+    { kind: 'step', text: '$ launchctl list', id: 'a', full: '$ launchctl list' },
+    { kind: 'step', text: '$ grep "ERROR" logs', id: 'b', full: '$ grep "ERROR" logs' },
+  ])
+  const multi = parseStreamEvents(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'm', input: { command: 'for j in a b; do\n  echo $j\ndone' } }] } }))
+  expect(multi).toEqual([{ kind: 'step', text: '$ for j in a b; do', id: 'm', full: '$ for j in a b; do\n  echo $j\ndone' }])
+  const results = parseStreamEvents(
+    JSON.stringify({
+      type: 'user',
+      message: {
+        content: [
+          { type: 'tool_result', tool_use_id: 'a', content: '- 0 com.example.acme' },
+          { type: 'tool_result', tool_use_id: 'b', content: [{ type: 'text', text: 'logs/a.log:3' }], is_error: false },
+          { type: 'tool_result', tool_use_id: 'c', is_error: true, content: 'sidekick guard: refused (rm deletes files).' },
+        ],
+      },
+    }),
+  )
+  expect(results).toEqual([
+    { kind: 'output', id: 'a', text: '- 0 com.example.acme', isError: false },
+    { kind: 'output', id: 'b', text: 'logs/a.log:3', isError: false },
+    { kind: 'refused', id: 'c' },
+  ])
+  expect(parseStreamEvents(JSON.stringify({ type: 'system', subtype: 'init', session_id: 's-1' }))).toEqual([{ kind: 'init', sessionId: 's-1' }])
+})
+
+test("a finished worker's session folder is deleted by id, and only a real session id is accepted", async () => {
+  const id = '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'
+  expect(cleanupArgv('/home/u/.claude/', id)).toEqual(['find', '/home/u/.claude/projects', '-mindepth', '2', '-maxdepth', '2', '-type', 'd', '-name', id, '-exec', 'rm', '-rf', '{}', '+'])
+  expect(cleanupArgv('/home/u/.claude', '*')).toBeNull()
+  expect(cleanupArgv('/home/u/.claude', '')).toBeNull()
+  expect(cleanupArgv('/home/u/.claude', '../x')).toBeNull()
+})
+
+test('credentials are redacted from what the record keeps', async () => {
+  // Built from parts, so this file never holds a whole token-shaped string.
+  const slack = ['xoxb', '1234567890', 'abcdefghij'].join('-')
+  const anthropic = `sk-ant-${'a'.repeat(20)}`
+  const github = `ghp_${'b'.repeat(30)}`
+  expect(redact(`token=${slack} ok`)).toBe('token=[redacted] ok')
+  expect(redact(anthropic)).toBe('[redacted]')
+  expect(redact(`x ${github} y`)).toBe('x [redacted] y')
+  expect(redact('postgres://app:hunter2@db.example.com:5432/app')).toBe('postgres://app:[redacted]@db.example.com:5432/app')
+  expect(redact('nothing secret here')).toBe('nothing secret here')
+  expect(redact(`key ${'AKIA'}${'ABCDEFGHIJKLMNOP'}`)).toBe('key [redacted]')
+  expect(redact(`jwt ${['eyJhbGciOi', 'eyJzdWIiOiIx', 'c2lnbmF0dXJl'].join('.')}`)).toBe('jwt [redacted]')
+  expect(redact(`OPENAI=sk-${'c'.repeat(24)}`)).toBe('OPENAI=[redacted]')
+  expect(redact('DB_PASSWORD=hunter22 port=5432')).toBe('DB_PASSWORD=[redacted] port=5432')
+  expect(redact('slack_token: "abcd1234efgh"')).toBe('slack_token: "[redacted]"')
+  expect(redact('Authorization: Bearer abc.def.ghi123')).toBe('Authorization: Bearer [redacted]')
+  expect(redact('tokens used: 42')).toBe('tokens used: 42')
+})
+
+test('the record has the prompt, each command and its output, cut to size, and the report', async () => {
+  const outcome = parseOutcome('{"status":"partial","summary":"acme-bot logs DNS failures","uncertain":["when they began"],"needsMain":"check DNS"}', false)
+  const slack = ['xoxb', '1234567890', 'abcdefghij'].join('-')
+  const text = dumpText(
+    { prompt: 'acme-bot stopped replying', createdAt: Date.UTC(2026, 9, 23, 6, 0) },
+    [
+      { command: '$ tail -n 5 logs/acme.log', output: `ENOTFOUND example.com\nSLACK_BOT_TOKEN=${slack}`, isError: false },
+      { command: '$ cat big.log', output: 'z'.repeat(5_000), isError: false },
+      { command: '$ rm x', output: 'sidekick guard: refused', isError: true },
+      { command: '$ for j in a b; do\n  echo $j\ndone', output: 'a\nb', isError: false },
+    ],
+    outcome,
+    '≈$0.0050',
+  )
+  expect(text).toContain('# sidekick investigation: acme-bot stopped replying')
+  expect(text).toContain('2026-10-23T06:00:00.000Z · partial · ≈$0.0050')
+  expect(text).toContain('### $ tail -n 5 logs/acme.log')
+  expect(text).toContain('ENOTFOUND example.com')
+  expect(text).toContain('[cut: 1000 more chars]')
+  expect(text).toContain('### $ rm x (error)')
+  expect(text).toContain('### $ for j in a b; do …\n\n```sh\nfor j in a b; do\n  echo $j\ndone\n```')
+  expect(text).toContain('## For the main session\n\ncheck DNS')
+  expect(text).toContain('"summary": "acme-bot logs DNS failures"')
+  expect(text).not.toContain(slack)
+  expect(DUMP_KEEP).toBe(50)
+  expect(dumpDir('/home/u', undefined)).toBe('/home/u/.claude/sidekick/investigations')
+  expect(dumpDir('/home/u', '/cfg/')).toBe('/cfg/sidekick/investigations')
+  expect(dumpName(Date.UTC(2026, 9, 23), 'mh1x-3')).toBe('2026-10-23-mh1x-3.md')
+})
+
+test('the handoff note points at the record, and a long summary never cuts the pointer', async () => {
+  const outcome = parseOutcome(JSON.stringify({ status: 'done', summary: 'y'.repeat(900) }), false)
+  const note = handoffNote('look into acme-bot', outcome, 'haiku', '/home/u/.claude/sidekick/investigations/2026-10-23-a.md')
+  expect(note.length).toBeLessThanOrEqual(700)
+  expect(note).toContain('Full record (every command and its output): /home/u/.claude/sidekick/investigations/2026-10-23-a.md.')
+  expect(note.endsWith('Treat this as already done; take over only if the user asks or it needs you.')).toBe(true)
+  expect(handoffNote('push', outcome, 'haiku')).not.toContain('Full record')
 })
 
 test('an outcome is validated; prose still reports something', async () => {
@@ -113,6 +292,8 @@ test('an outcome is validated; prose still reports something', async () => {
   expect(prose.status).toBe('partial')
   expect(prose.summary).toBe('I committed it.')
   expect(parseOutcome('{"status":"done","summary":"x"}', true).status).toBe('failed')
+  // An investigation's next steps run long; 600 characters keep them whole.
+  expect(parseOutcome(JSON.stringify({ status: 'partial', summary: 'x', needsMain: 'n'.repeat(700) }), false).needsMain.length).toBe(600)
 })
 
 test('the chat line and the handoff note say what happened', async () => {
@@ -123,6 +304,31 @@ test('the chat line and the handoff note say what happened', async () => {
   expect(note).toContain('"commit and push"')
   expect(note).toContain('SHAs: 3f2a91c')
   expect(note.length).toBeLessThanOrEqual(700)
+})
+
+test('give to main hands a finished assist over for context, and an unfinished one as work', async () => {
+  const done = parseOutcome('{"status":"done","summary":"Pulled; already up to date","shas":["3f2a91c"],"changed":["main"],"uncertain":["whether a.txt is meant to stay dirty"]}', false)
+  const text = giveToMainPrompt('git pull', done, ['$ git pull'], '/home/u/.claude/sidekick/investigations/x.md')
+  expect(text).toContain('for your context')
+  expect(text).not.toContain('Please take over')
+  for (const part of ['SHAs: 3f2a91c', 'Changed: main', 'Unsure about: whether a.txt is meant to stay dirty', 'Commands it ran: $ git pull', 'Full record (every command and its output): /home/u/.claude/sidekick/investigations/x.md']) {
+    expect(text).toContain(part)
+  }
+  const failed = parseOutcome('{"status":"failed","summary":"Push rejected","needsMain":"origin moved"}', false)
+  const back = giveToMainPrompt('push', failed, [])
+  expect(back).toContain('Please take over')
+  expect(back).toContain('Why it stopped: origin moved')
+  expect(back).not.toContain('Full record')
+  expect(giveToMainPrompt('push', null, [])).toContain('Please take over')
+})
+
+test('the chat line hands what is left to main in a few words', async () => {
+  const partial = parseOutcome('{"status":"partial","summary":"acme-bot logs DNS failures","needsMain":"check DNS"}', false)
+  expect(chatLine(partial, 'haiku', 40)).toBe('◐ acme-bot logs DNS failures · haiku · 40s → main: check DNS (pane → give to main)')
+  const done = parseOutcome('{"status":"done","summary":"Restarted acme-bot","needsMain":"watch it overnight"}', false)
+  expect(chatLine(done, 'haiku', 40)).toBe('✓ Restarted acme-bot · haiku · 40s → main: watch it overnight')
+  const quiet = parseOutcome('{"status":"stopped","summary":"Stopped"}', false)
+  expect(chatLine(quiet, 'haiku', 1)).toBe('■ Stopped · haiku · 1s · see the sidekick pane')
 })
 
 test("state an older version wrote is upgraded, so new fields are never undefined", async () => {
@@ -145,9 +351,18 @@ test("state an older version wrote is upgraded, so new fields are never undefine
   expect(migrate(undefined, EMPTY)).toEqual(EMPTY)
 })
 
+test('stored corrections upgrade from bare strings; junk is dropped', async () => {
+  expect(toTaught(['a', { text: 'b', verdict: 'investigate' }, 3, { verdict: 'mechanical' }])).toEqual([
+    { text: 'a', verdict: 'mechanical' },
+    { text: 'b', verdict: 'investigate' },
+  ])
+  expect(migrate({ learned: ['a'] } as never, EMPTY).learned).toEqual([{ text: 'a', verdict: 'mechanical' }])
+  expect(toTaught(undefined)).toEqual([])
+})
+
 test("the person's misses steer the judge: recent ones become precedents, capped", async () => {
   expect(judgeSystem([])).not.toContain('corrected you')
-  const many = Array.from({ length: 15 }, (_, i) => `tidy branch ${i}`)
+  const many = Array.from({ length: 15 }, (_, i) => ({ text: `tidy branch ${i}`, verdict: 'mechanical' as const }))
   const system = judgeSystem(many)
   expect(system).toContain('corrected you')
   expect(system).toContain('- tidy branch 14')
@@ -155,9 +370,12 @@ test("the person's misses steer the judge: recent ones become precedents, capped
   expect(system.match(/^- tidy branch/gm)?.length).toBe(10)
 })
 
-test('the worker is told to keep braces out of git commands, which the permission layer refuses', async () => {
-  expect(WORKER_SYSTEM).not.toMatch(/git rev-list @\{u\}/)
-  expect(WORKER_SYSTEM).toContain('Never write @{u}')
+test('the worker is told to name the upstream in ranges, where braces are refused', async () => {
+  // Measured on Claude Code 2.1.309 under dontAsk: `git rev-parse --abbrev-ref @{u}` and
+  // `git log -1 @{u}` run, `git log origin/main..HEAD` runs, but `git log @{u}..HEAD` and
+  // `git rev-list --left-right --count @{u}...HEAD` are refused.
+  expect(WORKER_SYSTEM).toContain('git log origin/main..HEAD, not @{u}..HEAD')
+  expect(WORKER_SYSTEM).not.toContain('braces are refused')
   // Claude Code's own prompt says to branch first on the default branch; the worker must not.
   expect(WORKER_SYSTEM).toContain('Work on the branch that is checked out')
 })

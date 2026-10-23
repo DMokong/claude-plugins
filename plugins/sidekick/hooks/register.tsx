@@ -1,21 +1,24 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PromptSubmitInput, PromptSubmitResult, Register } from 'claude-code'
 
-import { MAX_MISSES, canStart, judgePrompt, judgeSystem, lockKeys, parseJudgment, precheck } from './lib/judge'
+import { MAX_MISSES, canStart, holdsMain, judgePrompt, judgeSystem, lockKeys, parseJudgment, precheck, taughtVerdict } from './lib/judge'
 import type { Judgment } from './lib/judge'
 import { NO_SPEND, addTally, tallyLine, tallyOf, tokens, usd } from './lib/cost'
-import { migrate } from './lib/state'
+import { migrate, toTaught } from './lib/state'
+import { DUMP_KEEP, configRoot, dumpDir, dumpName, dumpText } from './lib/dump'
+import type { Call } from './lib/dump'
 import {
   chatLine,
+  cleanupArgv,
   giveToMainPrompt,
   handoffNote,
   parseOutcome,
-  parseStreamLine,
+  parseStreamEvents,
   splitLines,
   workerArgv,
   workerInput,
 } from './lib/worker'
-import type { Entry, EntryStatus, Mode, Outcome, SidekickState, Tally } from '../types'
+import type { Entry, EntryStatus, Mode, Outcome, Profile, SidekickState, Taught, Tally } from '../types'
 
 export const EMPTY: SidekickState = {
   mode: 'off',
@@ -66,7 +69,7 @@ let guardPath = ''
 /** The loaded version, from the plugin's own manifest; shown in the pane so a stale load is visible. */
 let version = ''
 /** The person's "should've been sidekick" corrections, across sessions; the judge learns from them. */
-let misses: string[] = []
+let misses: Taught[] = []
 const MISSES_KEY = 'missed'
 let sequence = 0
 /** When the judge's connection was last used; a cold one blows the budget (measured: 1.8 s+ against ~1.2 s warm). */
@@ -90,6 +93,7 @@ function newId(now: number): string {
 function blankEntry(id: string, prompt: string, now: number): Entry {
   return {
     id,
+    kind: 'chore',
     prompt,
     status: 'judging',
     verdict: '',
@@ -106,6 +110,7 @@ function blankEntry(id: string, prompt: string, now: number): Entry {
     isMissed: false,
     judgeSpend: NO_SPEND,
     workerSpend: NO_SPEND,
+    dump: '',
   }
 }
 
@@ -252,8 +257,12 @@ async function pump($: EngineInterface): Promise<void> {
     await patchEntry($, entry.id, () => ({ status: 'running' }))
     void runAssist($, entry.id)
   }
-  const after = await load($)
-  if (!after.entries.some(x => x.status === 'running' || x.status === 'queued')) await releaseWaiting($)
+  if (!holdingMain(await load($))) await releaseWaiting($)
+}
+
+/** Whether a running or queued assist holds prompts for the main session (chores do; investigations don't). */
+function holdingMain(state: SidekickState): boolean {
+  return state.entries.some(x => (x.status === 'running' || x.status === 'queued') && holdsMain(x.locks))
 }
 
 /** Sends the prompts held for the main session, in the order they were typed. */
@@ -285,11 +294,49 @@ async function tell($: EngineInterface, text: string): Promise<void> {
   $.ui.toast(text)
 }
 
-async function finish($: EngineInterface, id: string, outcome: Outcome): Promise<void> {
+/**
+ * Writes an investigation's full record outside any repository and keeps the newest few. Returns
+ * its path, or '' when there is nowhere to write it; a record is a help, never a reason to fail.
+ */
+async function writeDump($: EngineInterface, entry: Entry, calls: readonly Call[], outcome: Outcome, now: number): Promise<string> {
+  try {
+    const home = await $.env.get('HOME')
+    const configDir = await $.env.get('CLAUDE_CONFIG_DIR')
+    if (typeof home !== 'string' || home === '') return ''
+    const dir = dumpDir(home, typeof configDir === 'string' ? configDir : undefined)
+    const path = `${dir}/${dumpName(now, entry.id)}`
+    const cost = usd(entry.judgeSpend.usd + entry.workerSpend.usd)
+    await $.fs.write(path, dumpText(entry, calls, outcome, cost === '$0' ? 'cost unknown' : `≈${cost}`))
+    const kept = (await $.fs.list(dir)).filter(f => f.kind === 'file' && f.name.endsWith('.md')).map(f => f.name).sort()
+    // $.fs has no delete; these are the mod's own files.
+    for (const name of kept.slice(0, Math.max(0, kept.length - DUMP_KEEP))) await $.process.run(['rm', '-f', `${dir}/${name}`], { timeoutMs: 2_000 })
+    return path
+  } catch {
+    return ''
+  }
+}
+
+/** Deletes the folder a finished worker session left under Claude's config folder. */
+async function cleanupSession($: EngineInterface, sessionId: string): Promise<void> {
+  try {
+    const home = await $.env.get('HOME')
+    const configDir = await $.env.get('CLAUDE_CONFIG_DIR')
+    if (typeof home !== 'string' || home === '') return
+    const argv = cleanupArgv(configRoot(home, typeof configDir === 'string' ? configDir : undefined), sessionId)
+    if (argv !== null) await $.process.run(argv, { timeoutMs: 5_000 })
+  } catch {
+    // Left behind is only disk space.
+  }
+}
+
+async function finish($: EngineInterface, id: string, outcome: Outcome, calls: readonly Call[] = []): Promise<void> {
   workers.delete(id)
   const now = await $.clock.now()
-  const entry = (await load($)).entries.find(x => x.id === id)
-  if (entry === undefined) return
+  const found = (await load($)).entries.find(x => x.id === id)
+  if (found === undefined) return
+  const dump = found.kind === 'investigate' ? await writeDump($, found, calls, outcome, now) : ''
+  if (dump !== '') await patchEntry($, id, () => ({ dump }))
+  const entry = { ...found, dump }
   const status: EntryStatus = outcome.status === 'done' || outcome.status === 'partial' ? 'done' : outcome.status
   await patchEntry($, id, () => ({ status, outcome, endedAt: now }))
   await change($, s => ({
@@ -303,7 +350,7 @@ async function finish($: EngineInterface, id: string, outcome: Outcome): Promise
   const seconds = Math.max(1, Math.round((now - (entry.startedAt || entry.createdAt)) / 1000))
   const after = (await load($)).entries.find(x => x.id === id)
   $.ui.log(chatLine(outcome, workerModel, seconds, (after?.judgeSpend.usd ?? 0) + (after?.workerSpend.usd ?? 0)))
-  await deliverNote($, handoffNote(entry.prompt, outcome, workerModel))
+  await deliverNote($, handoffNote(entry.prompt, outcome, workerModel, entry.dump))
   await tell($, status === 'done' ? `✓ ${outcome.summary}` : `⚠ ${outcome.summary} — open /sidekick to hand it to main`)
   await pump($)
 }
@@ -319,7 +366,7 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
   const ticker = $.clock.every(1_000, () => void change($, s => ({ ...s, tick: s.tick + 1 })).catch(() => {}))
   const { instructions } = await load($)
   const stream = $.process.spawn({
-    argv: workerArgv(workerModel, guardPath, instructions ?? []),
+    argv: workerArgv(workerModel, guardPath, instructions ?? [], entry.kind),
     cwd,
     env: { DMOKONG_MODS: '0', SIDEKICK_WORKER: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1' },
     input: workerInput(entry.task, entry.prompt),
@@ -330,31 +377,41 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
   }
   workers.set(id, { stop })
   const timer = $.clock.after(WORKER_TIMEOUT_MS, stop)
+  // Every tool call and what came back, in order, for an investigation's record.
+  const calls = new Map<string, Call>()
+  let sessionId = ''
   try {
     let buffer = ''
-    const commands = new Map<string, string>()
     for await (const chunk of stream) {
       if (isStopped) break
       if (chunk.stream !== 'stdout') continue
       const split = splitLines(buffer, chunk.text)
       buffer = split.rest
       for (const line of split.lines) {
-        const event = parseStreamLine(line)
-        if (event.kind === 'step') {
-          const step = event.text
-          commands.set(event.id, step)
-          await patchEntry($, id, x => ({ steps: [...x.steps, step].slice(-MAX_STEPS) }))
-        } else if (event.kind === 'refused') {
-          // Say which command was turned down, so a stopped assist can be explained and fixed.
-          const step = `✗ refused: ${(commands.get(event.id) ?? '(a tool call)').replace(/^\$ /, '')}`
-          await patchEntry($, id, x => ({ steps: [...x.steps, step].slice(-MAX_STEPS) }))
-        } else if (event.kind === 'result') {
-          result = { text: event.text, isError: event.isError }
-          const priced = tallyOf(workerModel, event.usage)
-          // An unpriced model still has Claude Code's own figure for the run.
-          const workerSpend = priced.usd === 0 && event.costUsd > 0 ? { ...priced, usd: event.costUsd } : priced
-          await patchEntry($, id, () => ({ workerSpend }))
-          await addSpend($, workerSpend)
+        for (const event of parseStreamEvents(line)) {
+          if (event.kind === 'init') {
+            sessionId = event.sessionId
+          } else if (event.kind === 'step') {
+            const step = event.text
+            calls.set(event.id, { command: event.full, output: '', isError: false })
+            await patchEntry($, id, x => ({ steps: [...x.steps, step].slice(-MAX_STEPS) }))
+          } else if (event.kind === 'output') {
+            const call = calls.get(event.id)
+            if (call !== undefined) calls.set(event.id, { ...call, output: event.text, isError: event.isError })
+          } else if (event.kind === 'refused') {
+            // Say which command was turned down, so a stopped assist can be explained and fixed.
+            const command = calls.get(event.id)?.command ?? '(a tool call)'
+            calls.set(event.id, { command, output: 'refused by the permission layer or the guard', isError: true })
+            const step = `✗ refused: ${(command.split('\n')[0] ?? '').replace(/^\$ /, '')}`
+            await patchEntry($, id, x => ({ steps: [...x.steps, step].slice(-MAX_STEPS) }))
+          } else if (event.kind === 'result') {
+            result = { text: event.text, isError: event.isError }
+            const priced = tallyOf(workerModel, event.usage)
+            // An unpriced model still has Claude Code's own figure for the run.
+            const workerSpend = priced.usd === 0 && event.costUsd > 0 ? { ...priced, usd: event.costUsd } : priced
+            await patchEntry($, id, () => ({ workerSpend }))
+            await addSpend($, workerSpend)
+          }
         }
       }
     }
@@ -363,6 +420,8 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
   }
   timer.cancel()
   ticker.cancel()
+  // After the stream ends, so the worker is done with its own saved output.
+  if (sessionId !== '') await cleanupSession($, sessionId)
   if (isStopped) {
     await finish($, id, {
       status: 'stopped',
@@ -372,7 +431,7 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
       changed: [],
       uncertain: ['It may have run some commands before it stopped; check git status.'],
       needsMain: 'Stopped by you or by the time limit.',
-    })
+    }, [...calls.values()])
     return
   }
   if (result === null) {
@@ -384,15 +443,17 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
       changed: [],
       uncertain: ['Check git status and git log.'],
       needsMain: 'The worker session did not finish.',
-    })
+    }, [...calls.values()])
     return
   }
-  await finish($, id, parseOutcome(result.text, result.isError))
+  await finish($, id, parseOutcome(result.text, result.isError), [...calls.values()])
 }
 
 /** Queues an assist for a task and starts it if its locks are free. */
 async function enqueue($: EngineInterface, id: string, judgment: Judgment, repo: string): Promise<void> {
+  const kind: Profile = judgment.verdict === 'investigate' ? 'investigate' : 'chore'
   await patchEntry($, id, () => ({
+    kind,
     status: 'queued',
     task: judgment.task,
     locks: lockKeys(judgment.resources, repo),
@@ -436,11 +497,12 @@ async function setMode($: EngineInterface, mode: Mode): Promise<void> {
 
 async function shadowJudge($: EngineInterface, id: string, text: string): Promise<void> {
   const { judgment, ms, stateMs, spend } = await judge($, text, null)
-  const would = judgment.verdict === 'mechanical'
+  const would = judgment.verdict === 'mechanical' || judgment.verdict === 'investigate'
+  const what = judgment.verdict === 'investigate' ? 'would investigate' : 'would hand off'
   await patchEntry($, id, () => ({
     status: would ? 'shadow' : 'passed',
     verdict: judgment.verdict,
-    reason: `${would ? `would hand off: ${judgment.task}` : judgment.reason}${ms > JUDGE_TIMEOUT_MS ? ' · over budget' : ''} (git ${stateMs}ms)`,
+    reason: `${would ? `${what}: ${judgment.task}` : judgment.reason}${ms > JUDGE_TIMEOUT_MS ? ' · over budget' : ''} (git ${stateMs}ms)`,
     task: judgment.task,
     judgeMs: ms,
     judgeSpend: spend,
@@ -465,7 +527,13 @@ async function giveToMain($: EngineInterface, id: string): Promise<void> {
   const entry = (await load($)).entries.find(x => x.id === id)
   if (entry === undefined) return
   if (isActive(entry)) await stopEntry($, id)
-  await $.prompt.submit({ text: giveToMainPrompt(entry.prompt, entry.outcome, entry.steps), asUser: true })
+  await $.prompt.submit({ text: giveToMainPrompt(entry.prompt, entry.outcome, entry.steps, entry.dump), asUser: true })
+}
+
+/** Puts an investigation's record path on the clipboard; says it in a toast where there is none. */
+async function copyDump($: EngineInterface, path: string): Promise<void> {
+  const copied = await $.ui.copy({ text: path }).catch(() => ({ isCopied: false as const, reason: 'no clipboard' }))
+  $.ui.toast(copied.isCopied ? `Copied: ${path}` : `Record: ${path}`)
 }
 
 async function revert($: EngineInterface, id: string): Promise<void> {
@@ -498,16 +566,16 @@ async function sendNow($: EngineInterface, waitingId: string): Promise<void> {
 }
 
 /** Replaces the corrections the judge learns from: in the store for later sessions, here for this one. */
-async function setLearned($: EngineInterface, list: string[]): Promise<void> {
+async function setLearned($: EngineInterface, list: Taught[]): Promise<void> {
   misses = list.slice(-200)
   // The judge follows this session even if the store refuses; the store carries it to the next.
   await $.store.set(MISSES_KEY, misses).catch(() => {})
   await change($, s => ({ ...s, learned: misses }))
 }
 
-async function storedMisses($: EngineInterface): Promise<string[]> {
+async function storedMisses($: EngineInterface): Promise<Taught[]> {
   const prior = await $.store.get(MISSES_KEY).catch(() => misses)
-  return Array.isArray(prior) ? prior.filter((m): m is string => typeof m === 'string') : misses
+  return Array.isArray(prior) ? toTaught(prior) : misses
 }
 
 async function markMissed($: EngineInterface, id: string): Promise<void> {
@@ -516,23 +584,26 @@ async function markMissed($: EngineInterface, id: string): Promise<void> {
   if (entry === undefined) return
   // Kept across sessions; the judge sees the latest few as precedents from its next call on.
   const known = await storedMisses($)
-  await setLearned($, [...known.filter(m => m !== entry.prompt), entry.prompt])
-  $.ui.toast(`Noted: messages like "${clip(entry.prompt, 40)}" go to the sidekick from now on`)
+  const verdict = taughtVerdict(entry.prompt)
+  await setLearned($, [...known.filter(m => m.text !== entry.prompt), { text: entry.prompt, verdict }])
+  $.ui.toast(`Noted: messages like "${clip(entry.prompt, 40)}" go to the sidekick (${verdictLabel(verdict)}) from now on`)
 }
 
 /** Drops one correction (or all of them) so the judge stops following it. */
 async function forget($: EngineInterface, which: string | 'all'): Promise<number> {
   const known = await storedMisses($)
-  const kept = which === 'all' ? [] : known.filter(m => m !== which)
+  const kept = which === 'all' ? [] : known.filter(m => m.text !== which)
   await setLearned($, kept)
   return known.length - kept.length
 }
 
 /** `/sidekick learned`: every stored correction, newest first, numbered for `/sidekick forget <n>`. */
-function learnedText(list: readonly string[]): string {
+const verdictLabel = (verdict: Taught['verdict']): string => (verdict === 'investigate' ? 'investigate' : 'chore')
+
+function learnedText(list: readonly Taught[]): string {
   if (list.length === 0) return "The judge has learned nothing yet. Press should've been sidekick on a TO CLAUDE entry to teach it."
   const newest = [...list].reverse()
-  const lines = newest.map((m, i) => `${String(i + 1).padStart(3)}. ${clip(m.replace(/\s+/g, ' '), 100)}${i < MAX_MISSES ? '' : '  (stored, not used)'}`)
+  const lines = newest.map((m, i) => `${String(i + 1).padStart(3)}. [${verdictLabel(m.verdict)}] ${clip(m.text.replace(/\s+/g, ' '), 100)}${i < MAX_MISSES ? '' : '  (stored, not used)'}`)
   return [`The judge follows the newest ${Math.min(MAX_MISSES, list.length)} of ${list.length} corrections:`, ...lines, '/sidekick forget <n> drops one; /sidekick forget all drops them all.'].join('\n')
 }
 
@@ -556,6 +627,9 @@ const STATUS_MARK: Record<EntryStatus, string> = {
   passed: '→',
   shadow: '◌',
 }
+
+/** `investigate · ` before an investigation's prompt in the pane; chores need no tag. */
+const kindTag = (entry: Entry): string => (entry.kind === 'investigate' ? 'investigate · ' : '')
 
 function clip(text: string, width: number): string {
   return text.length <= width ? text : `${text.slice(0, Math.max(1, width - 1))}…`
@@ -599,7 +673,7 @@ export const register: Register = (on, options) => {
     // A reload keeps the session's mode; the new module's connection starts cold.
     try {
       const stored = await $.store.get(MISSES_KEY)
-      misses = Array.isArray(stored) ? stored.filter((m): m is string => typeof m === 'string') : []
+      misses = toTaught(stored)
     } catch {
       misses = []
     }
@@ -652,8 +726,8 @@ export const register: Register = (on, options) => {
       if (what === 'all') return { text: `Forgot ${await forget($, 'all')} corrections; the judge is back to its defaults.` }
       const target = Number.isInteger(n) && n >= 1 ? newest[n - 1] : undefined
       if (target === undefined) return { text: 'Usage: /sidekick forget <n|all>. /sidekick learned shows the numbers.' }
-      await forget($, target)
-      return { text: `Forgot "${clip(target, 60)}"; the judge no longer follows it.` }
+      await forget($, target.text)
+      return { text: `Forgot "${clip(target.text, 60)}"; the judge no longer follows it.` }
     }
     const asked: Mode | null = arg === 'auto' ? 'auto' : arg === 'off' ? 'off' : arg === 'on' || arg === 'shadow' ? 'shadow' : null
     if (arg !== '' && asked === null) return { text: 'Usage: /sidekick [auto|shadow|off|learned|forget <n|all>]' }
@@ -688,7 +762,7 @@ export const register: Register = (on, options) => {
     }
 
     // auto
-    const isBusy = state.entries.some(x => x.status === 'running' || x.status === 'queued')
+    const isBusy = holdingMain(state)
     const holdForAssists = async (why: string): Promise<PromptSubmitResult> => {
       if (!isBusy || isMidTurn) return toMain($, e, next)
       const id = newId(now)
@@ -703,17 +777,23 @@ export const register: Register = (on, options) => {
     await addEntry($, blankEntry(id, e.text, now))
     draftTimer?.cancel()
     const { judgment, ms, repo, spend } = await verdictFor($, e.text)
-    await patchEntry($, id, () => ({ verdict: judgment.verdict, reason: judgment.reason, judgeMs: ms, judgeSpend: spend }))
-    if (judgment.verdict !== 'mechanical') {
+    // An investigation without the main session's instruction files would guess where things live.
+    const isBlind = judgment.verdict === 'investigate' && (await load($)).instructions === null
+    const routed: Judgment = isBlind
+      ? { ...judgment, verdict: 'needs-main', reason: "no instruction files yet: the sidekick wouldn't know where things live (they arrive with the next /clear or compaction)" }
+      : judgment
+    await patchEntry($, id, () => ({ verdict: judgment.verdict, reason: routed.reason, judgeMs: ms, judgeSpend: spend }))
+    if (routed.verdict !== 'mechanical' && routed.verdict !== 'investigate') {
       await patchEntry($, id, () => ({ status: 'passed' }))
       await change($, s => ({ ...s, totals: { ...s.totals, passed: s.totals.passed + 1 } }))
       // A pass is a decision too: say so, or a sidekick that passes looks like one that is gone.
-      $.ui.log(`→ to Claude: ${judgment.reason} · judged in ${(ms / 1000).toFixed(1)}s`)
-      return holdForAssists(judgment.reason)
+      $.ui.log(`→ to Claude: ${routed.reason} · judged in ${(ms / 1000).toFixed(1)}s`)
+      return holdForAssists(routed.reason)
     }
-    void enqueue($, id, judgment, repo).catch(() => {})
+    void enqueue($, id, routed, repo).catch(() => {})
     clearRestored($, e.text)
-    return { drop: `❯ ${e.text} → sidekick (${workerModel}) · judged in ${(ms / 1000).toFixed(1)}s` }
+    const doing = routed.verdict === 'investigate' ? ' · investigating' : ''
+    return { drop: `❯ ${e.text} → sidekick (${workerModel})${doing} · judged in ${(ms / 1000).toFixed(1)}s` }
   }).catch(($, e, next) => next(e)) // fail open: any error lets the prompt through as typed
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -743,8 +823,10 @@ export const register: Register = (on, options) => {
       } else if (entry.status === 'done' || entry.status === 'stopped' || entry.status === 'failed') {
         list.push(edit, watch)
         if (entry.status === 'done' && (entry.outcome?.shas.length ?? 0) > 0) list.push({ key: 'revert', label: 'revert', act: () => void revert($, entry.id) })
+        if (entry.dump !== '') list.push({ key: 'dump', label: 'record', act: () => void copyDump($, entry.dump) })
         list.push(toMainButton)
-      } else if (entry.status === 'passed' && entry.verdict !== '' && !entry.isMissed) {
+      } else if (entry.status === 'passed' && entry.verdict !== '' && entry.verdict !== 'investigate' && !entry.isMissed) {
+        // An investigation sent to main for want of instruction files was judged right; nothing to teach.
         list.push({ key: 'missed', label: "should've been sidekick", act: () => void markMissed($, entry.id) })
       }
       if (list.length === 0) return null
@@ -848,7 +930,7 @@ export const register: Register = (on, options) => {
           <Box key={`e-${entry.id}`} flexDirection="column">
             <Box>
               <Text color="warning" bold>
-                {clip(`${spin} ${entry.prompt}`, width - 12)}
+                {clip(`${spin} ${kindTag(entry)}${entry.prompt}`, width - 12)}
               </Text>
               <Text dimColor>{`  ${Math.max(0, Math.round((now - (entry.startedAt || entry.createdAt)) / 1000))}s`}</Text>
             </Box>
@@ -861,7 +943,7 @@ export const register: Register = (on, options) => {
         {queued.length > 0 && section('queue', 'QUEUED', 'suggestion', queued.length)}
         {queued.map(entry => (
           <Box key={`e-${entry.id}`} flexDirection="column">
-            <Text color="suggestion">{clip(`◷ ${entry.prompt}`, width)}</Text>
+            <Text color="suggestion">{clip(`◷ ${kindTag(entry)}${entry.prompt}`, width)}</Text>
             {buttonsFor(entry)}
           </Box>
         ))}
@@ -886,7 +968,7 @@ export const register: Register = (on, options) => {
           return (
             <Box key={`e-${entry.id}`} flexDirection="column">
               <Box>
-                <Text color={isOk ? 'success' : 'error'}>{clip(`${STATUS_MARK[entry.status]} ${entry.prompt}`, width - 22)}</Text>
+                <Text color={isOk ? 'success' : 'error'}>{clip(`${STATUS_MARK[entry.status]} ${kindTag(entry)}${entry.prompt}`, width - 22)}</Text>
                 <Text dimColor>{`  ${seconds}s · ≈${usd(cost(entry))}`}</Text>
               </Box>
               <Text dimColor>{clip(`    ${entry.outcome?.summary ?? ''}`, width)}</Text>
@@ -907,10 +989,10 @@ export const register: Register = (on, options) => {
 
         {learned.length > 0 && section('learned', 'LEARNED', 'claude', state.learned.length)}
         {learned.map(m => (
-          <Box key={`l-${m}`}>
-            <Text dimColor>{clip(`✎ ${m.replace(/\s+/g, ' ')}`, width - 10)}</Text>
+          <Box key={`l-${m.text}`}>
+            <Text dimColor>{clip(`✎ [${verdictLabel(m.verdict)}] ${m.text.replace(/\s+/g, ' ')}`, width - 10)}</Text>
             <Text>{'  '}</Text>
-            <Button key={`forget-${m}`} label="forget" plain onPress={() => void forget($, m)} />
+            <Button key={`forget-${m.text}`} label="forget" plain onPress={() => void forget($, m.text)} />
           </Box>
         ))}
         {state.learned.length > learned.length && (

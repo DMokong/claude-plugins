@@ -11,3 +11,4 @@ docs/fable-streams/
 plugins/*/.claude-plugin/types/
 # A mod type-checked before the engine has written its types/ emits .js beside the sources
 plugins/*/hooks/**/*.js
+__pycache__/

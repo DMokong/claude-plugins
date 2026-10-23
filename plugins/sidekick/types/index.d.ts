@@ -15,7 +15,13 @@ export type Tally = {
 /** One instruction file the main session loaded (a CLAUDE.md, a rules file), as it loaded it. */
 export type Instruction = { path: string; kind: string; content: string }
 
-export type Verdict = 'mechanical' | 'needs-main' | 'unclear'
+export type Verdict = 'mechanical' | 'investigate' | 'needs-main' | 'unclear'
+
+/** Which worker setup an assist runs with: a git/bd chore, or a look into something on this machine. */
+export type Profile = 'chore' | 'investigate'
+
+/** One "should've been sidekick" correction, and the verdict it teaches the judge. */
+export type Taught = { text: string; verdict: 'mechanical' | 'investigate' }
 
 export type EntryStatus =
   | 'judging'
@@ -40,6 +46,8 @@ export type Outcome = {
 
 export type Entry = {
   id: string
+  /** A git/bd chore or an investigation; chores before 0.3.0 read as chores. */
+  kind: Profile
   /** The prompt as the person typed it. */
   prompt: string
   status: EntryStatus
@@ -64,6 +72,8 @@ export type Entry = {
   /** The judge's call for this prompt and the worker's run. */
   judgeSpend: Tally
   workerSpend: Tally
+  /** Where an investigation's full record was written; empty for chores and older entries. */
+  dump: string
 }
 
 /** A prompt bound for the main session, held while assists run. */
@@ -85,7 +95,7 @@ export type SidekickState = {
   /** True while the judge's first call is opening its connection, which can take seconds. */
   isWarming: boolean
   /** The "should've been sidekick" corrections the judge learns from, oldest first; a copy of the stored list, so the pane redraws when one is added or forgotten. */
-  learned: string[]
+  learned: Taught[]
   /**
    * The main session's instruction files, captured when it built its context; the worker gets the
    * same. Null until that happens in a conversation this mod saw (it is redone after a compaction or /clear).
