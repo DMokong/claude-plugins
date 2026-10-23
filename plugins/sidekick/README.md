@@ -136,7 +136,7 @@ flowchart TD
    Claude. They never wait on a model.
 2. **Judge (Haiku, one word).** For everything else, a small model answers `mechanical`,
    `needs-main` or `unclear`. It starts judging your **draft** as soon as you pause typing, so the
-   verdict is usually ready when you press Enter. A submit never waits more than 1.8 s. A slow or
+   verdict is usually ready when you press Enter. A submit never waits more than 5 s. A slow or
    failed judge sends the message to Claude.
 3. **Worker (Haiku, separate session).** A headless `claude -p` session runs in your repo with a
    lean setup: no MCP servers, skills, hooks or CLAUDE.md, and only Bash/Read/Glob/Grep, limited to
@@ -280,6 +280,17 @@ Your last 10 corrections are shown to the judge as precedents from its next call
 kept across sessions (up to 200 stored). The safety rules still apply, so a correction can't
 teach it to force-push.
 
+**Seeing and undoing what it learned.** The pane's **LEARNED** section lists the corrections the
+judge follows now, newest first, each with a **`forget`** button. From the prompt:
+
+```text
+/sidekick learned        every stored correction, numbered, newest first
+/sidekick forget 2       drop number 2; the judge stops following it from its next call
+/sidekick forget all     back to the judge's defaults
+```
+
+Only the newest 10 steer the judge; older ones are stored and marked `(stored, not used)`.
+
 ---
 
 ## Cost and caching
@@ -366,7 +377,7 @@ All calls go through your own Claude Code login. The sidekick sends nothing anyw
   line, and `edit` in the pane puts them back in the prompt box.
 - **The first message after turning it on** may go to Claude while the judge warms up (the band
   says **warming up the judge…**). Give it a few seconds the first time.
-- **A busy moment can slow the judge.** If a verdict takes longer than 1.8 s, the message goes to
+- **A busy moment can slow the judge.** If a verdict takes longer than 5 s, the message goes to
   Claude, and the pane says `judge timed out`. Nothing is lost; press `should've been sidekick` if
   it should have been a chore.
 - **Chores only.** git and bd for now. Anything that needs the conversation, your judgment or a
@@ -405,7 +416,7 @@ Claude finish it with your normal permissions.
 <details>
 <summary><b>"judge timed out" keeps showing</b></summary>
 
-The judge has 1.8 s at submit. Pausing for half a second before Enter lets it judge your draft
+The judge has 5 s at submit. Pausing for half a second before Enter lets it judge your draft
 first, which makes this rare. If your setup is consistently slow, set **Judge model** to the
 fastest model you have.
 </details>
@@ -458,7 +469,8 @@ and rendered to SVG.
 
 | Version | |
 |---|---|
-| **0.2.3** | Worker cache reuse across repos (`--exclude-dynamic-system-prompt-sections`). The worker stays on your branch. Refused steps are shown. `should've been sidekick` now teaches the judge. Roomier header. The band stays on one line and shows warm-up. A taller pane when inline. This README. |
+| **0.2.4** | The judge gets 5 s at submit instead of 1.8 s, so a cold or busy judge still hands chores to the sidekick. Learned corrections are listed in the pane (**LEARNED**) and by `/sidekick learned`, and `forget` revokes them. |
+| 0.2.3 | Worker cache reuse across repos (`--exclude-dynamic-system-prompt-sections`). The worker stays on your branch. Refused steps are shown. `should've been sidekick` now teaches the judge. Roomier header. The band stays on one line and shows warm-up. A taller pane when inline. This README. |
 | 0.2.2 | The loaded version shows in the pane header. |
 | 0.2.1 | Upgrades session state left by older versions (fixes a blank pane after updating). |
 | 0.2.0 | A sectioned pane, a band instead of a status-line entry, and cost estimates that price caching. |

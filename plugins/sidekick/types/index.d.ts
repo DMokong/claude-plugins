@@ -81,6 +81,8 @@ export type SidekickState = {
   tick: number
   /** True while the judge's first call is opening its connection, which can take seconds. */
   isWarming: boolean
+  /** The "should've been sidekick" corrections the judge learns from, oldest first; a copy of the stored list, so the pane redraws when one is added or forgotten. */
+  learned: string[]
 }
 
 declare module 'claude-code' {
