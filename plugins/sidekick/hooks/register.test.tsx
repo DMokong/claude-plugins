@@ -22,6 +22,8 @@ type World = {
   workerGate?: Promise<void>
   /** What the record folder holds, as `$.fs.list` answers. */
   listed?: { name: string; kind: 'file'; size: number; mtimeMs: number; isLink: boolean }[]
+  /** The main session's model, as `$.session.model()` answers. */
+  mainModel?: string
   /** What the store holds before the session starts. */
   stored?: Record<string, unknown>
 }
@@ -29,7 +31,20 @@ type World = {
 /** The engine beneath the mod: answers every call it makes and records what it did. */
 function world(on: On, w: World) {
   clock = mock.clock(on)
-  mock.store(on, w.stored)
+  // The mod's store, as a map the test can read and change (another session's write, say).
+  const store = new Map<string, unknown>(Object.entries(w.stored ?? {}).map(([k, v]) => [k, JSON.parse(JSON.stringify(v))]))
+  on('store.get', async (_$, e) => ({ value: store.has(e.key) ? JSON.parse(JSON.stringify(store.get(e.key))) : undefined }))
+  on('store.set', async (_$, e) => {
+    store.set(e.key, JSON.parse(JSON.stringify(e.value)))
+    return { value: undefined }
+  })
+  on('store.delete', async (_$, e) => {
+    store.delete(e.key)
+    return { value: undefined }
+  })
+  on('store.keys', async () => ({ value: [...store.keys()] }))
+  on('session.model', async () => ({ value: w.mainModel ?? 'Opus 5.5' }))
+  on('session.usage', async () => ({ value: { startedAt: 0, context: { tokens: 40_000, window: 200_000 }, rateLimits: [] } }))
   latest = undefined
   on('state.set', async (_$, e, next) => {
     if (e.plugin === 'sidekick' && e.key === 'sidekick') latest = e.value as SidekickState
@@ -51,8 +66,10 @@ function world(on: On, w: World) {
     judged: 0,
     judgments: [] as string[],
     systems: [] as string[],
+    judgedWith: [] as string[],
     toasts: [] as string[],
     status: [] as (string | undefined)[],
+    store,
     release: () => release(),
   }
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
@@ -101,6 +118,7 @@ function world(on: On, w: World) {
     if (e.prompt.includes('<message>')) {
       seen.judgments.push(e.prompt)
       seen.systems.push(typeof e.system === 'string' ? e.system : '')
+      seen.judgedWith.push(e.model ?? '')
     }
     if (w.judgeDelayMs !== undefined) await slow
     return { value: { isAnswered: true, text: w.judge, usage: { input_tokens: 1000, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }
@@ -606,4 +624,93 @@ test('the band stays on one line when narrow: the least useful parts give way fi
   expect(await narrow.find({ type: 'Text', text: /◆ sidekick/ })).toBeDefined()
   expect(await narrow.find({ type: 'Text', text: /assists/ })).toBeUndefined()
   await narrow.unmount()
+})
+
+test('settings changed in an earlier session are in force, and only changed ones are kept', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, stored: { settings: { workerModel: 'sonnet', notifications: false } } })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const s0 = await state($)
+  expect(s0.settings.workerModel).toBe('sonnet')
+  expect(s0.settings.notifications).toBe(false)
+  expect(s0.settings.draftJudging).toBe(true)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'done')
+  const argv = seen.spawned[0] ?? []
+  expect(argv[argv.indexOf('--model') + 1]).toBe('sonnet')
+  // Notifications off: no ping, but the chat line still says it.
+  expect(seen.notified).toEqual([])
+  expect(seen.logs.some(line => line.startsWith('✓ Committed 3f2a91c'))).toBe(true)
+})
+
+test("another session's change is in force from the next message", async ($, on) => {
+  const seen = world(on, { judge: NEEDS_MAIN, worker: DONE })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'tidy up', ...TYPED })
+  seen.store.set('settings', { judgeModel: 'sonnet' })
+  await $.prompt.submit({ text: 'tidy up again', ...TYPED })
+  expect(seen.judgedWith.at(-2)).toBe('haiku')
+  expect(seen.judgedWith.at(-1)).toBe('sonnet')
+})
+
+test('draft judging off: pauses in typing cost nothing, and a sent message is still judged', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, stored: { settings: { draftJudging: false } } })
+  on('prompt.edit', async (_$, e) => ({ text: e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end), cursor: e.start + e.inputText.length }))
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const before = seen.judgments.length
+  const typing = $.prompt as unknown as { edit: (e: unknown) => Promise<unknown> }
+  await typing.edit({ origin: { kind: 'composer' }, text: '', cursor: 0, start: 0, end: 0, inputText: 'commit and push' })
+  await clock.advance(2_000)
+  expect(seen.judgments.length).toBe(before)
+  const result = await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  expect(result.drop).toContain('→ sidekick')
+  expect(seen.judgments.length).toBe(before + 1)
+})
+
+test('investigations off: an investigate verdict goes to main, saying why', async ($, on) => {
+  const seen = world(on, { judge: INVESTIGATE, worker: LOOKED, stored: { settings: { investigations: false } } })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await withInstructions($ as never)
+  const result = await $.prompt.submit({ text: 'acme-bot stopped replying, look into it', ...TYPED })
+  expect(result.drop).toBeUndefined()
+  expect(seen.logs.some(line => line.includes('investigations are off'))).toBe(true)
+  expect(seen.spawned).toEqual([])
+})
+
+test('history: finished work and passes are kept across sessions, and give to main takes the saving back', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  const s = await until($, x => x.entries[0]?.status === 'done' && x.today.done === 1)
+  const rows = seen.store.get('history') as { kind: string; status: string; savedUsd: number; id: string }[]
+  expect(rows.length).toBe(1)
+  expect(rows[0]?.kind).toBe('chore')
+  expect(rows[0]?.status).toBe('done')
+  // One Opus turn on a 40k context is worth more than a Haiku chore costs.
+  expect(rows[0]!.savedUsd).toBeGreaterThan(0.02)
+  expect(s.today.savedUsd).toBe(rows[0]!.savedUsd)
+  const ui = await $.ui.mount({
+    plugin: 'sidekick',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'sidekick',
+    props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
+  } as never)
+  await ui.press({ key: `main-${s.entries[0]?.id}` })
+  await ui.unmount()
+  const after = await until($, x => x.today.savedUsd === 0)
+  expect(after.today.done).toBe(0)
+  expect((seen.store.get('history') as { status: string }[])[0]?.status).toBe('given')
+})
+
+test('a pass to Claude is kept in the history too', async ($, on) => {
+  const seen = world(on, { judge: NEEDS_MAIN, worker: DONE })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'rename the judge function', ...TYPED })
+  expect((seen.store.get('history') as { kind: string }[]).map(r => r.kind)).toEqual(['to-claude'])
 })

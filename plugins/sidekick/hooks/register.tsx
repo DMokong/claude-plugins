@@ -5,8 +5,9 @@ import { MAX_MISSES, canStart, holdsMain, judgePrompt, judgeSystem, lockKeys, pa
 import type { Judgment } from './lib/judge'
 import { NO_SPEND, addTally, tallyLine, tallyOf, tokens, usd } from './lib/cost'
 import { migrate, toTaught } from './lib/state'
-import { NO_TOTALS } from './lib/history'
-import { defaultsFrom } from './lib/settings'
+import { HISTORY_KEY, NO_TOTALS, appendRow, markGiven, savedFor, startOfDay, toRows, totals } from './lib/history'
+import type { HistoryRow } from './lib/history'
+import { SETTINGS_KEY, defaultsFrom, effective, withChange } from './lib/settings'
 import { DUMP_KEEP, configRoot, dumpDir, dumpName, dumpText } from './lib/dump'
 import type { Call } from './lib/dump'
 import {
@@ -20,7 +21,7 @@ import {
   workerArgv,
   workerInput,
 } from './lib/worker'
-import type { Entry, EntryStatus, Mode, Outcome, Profile, SidekickState, Taught, Tally } from '../types'
+import type { Entry, EntryStatus, Mode, Outcome, Profile, Settings, SidekickState, Taught, Tally } from '../types'
 
 export const EMPTY: SidekickState = {
   mode: 'off',
@@ -69,9 +70,10 @@ const ACTIVE: readonly EntryStatus[] = ['judging', 'queued', 'running']
 // The engine follows `$` only into functions declared at the top of this file, so what the
 // hooks share lives here. `register` sets the options; `session.start` the rest.
 let isOff = false
-let judgeModel = 'haiku'
-let workerModel = 'haiku'
-let maxConcurrent = 1
+/** The plugin's options, as settings: what the panel's Reset to defaults goes back to. */
+let defaults: Settings = defaultsFrom({})
+/** The settings in force; re-read from the store before each judgment and worker run, so another session's change reaches this one. */
+let live: Settings = defaults
 let cwd = ''
 let guardPath = ''
 /** The loaded version, from the plugin's own manifest; shown in the pane so a stale load is visible. */
@@ -109,7 +111,7 @@ function blankEntry(id: string, prompt: string, now: number): Entry {
     judgeMs: 0,
     task: '',
     locks: [],
-    backend: judgeModel,
+    backend: live.judgeModel,
     createdAt: now,
     startedAt: 0,
     endedAt: 0,
@@ -176,7 +178,7 @@ async function judge($: EngineInterface, text: string, budgetMs: number | null =
     })
     const reply = await $.model.complete(
       {
-        model: judgeModel,
+        model: live.judgeModel,
         system: judgeSystem(misses),
         prompt: judgePrompt(text, `cwd: ${cwd}`),
         maxTokens: 8,
@@ -185,7 +187,7 @@ async function judge($: EngineInterface, text: string, budgetMs: number | null =
       { signal: stop.signal },
     )
     await state
-    spent = tallyOf(judgeModel, reply.usage)
+    spent = tallyOf(live.judgeModel, reply.usage)
     await addSpend($, spent)
     if (!reply.isAnswered) return { verdict: 'unclear', task: '', resources: [], reason: `judge: ${reply.reason}` }
     return parseJudgment(reply.text, text)
@@ -232,10 +234,14 @@ async function verdictFor($: EngineInterface, text: string): Promise<Judged> {
 /** Judges the draft in the background once typing pauses, if it is one the judge would see. */
 function judgeDraftSoon($: EngineInterface, draft: string): void {
   draftTimer?.cancel()
+  // Off in the panel: a message is judged only when it is sent.
+  if (!live.draftJudging) return
   const text = draft.trim()
   if (!precheck(text, false).isJudged || speculation?.text === text) return
   draftTimer = $.clock.after(DRAFT_PAUSE_MS, () => {
-    speculation = { text, judged: judge($, text, null) }
+    const judged = judge($, text, null)
+    speculation = { text, judged }
+    void judged.then(j => record($, { at: Date.now(), kind: 'draft', status: 'passed', ms: j.ms, judgeUsd: j.spend.usd, workerUsd: 0, savedUsd: 0, id: `draft-${text.length}` })).catch(() => {})
   })
 }
 
@@ -249,9 +255,9 @@ async function warm($: EngineInterface): Promise<void> {
   // A cold first call can outlast the judge's budget; say so in the band rather than leave a
   // message that times out to the main session unexplained.
   await change($, s => ({ ...s, isWarming: true }))
-  const reply = await $.model.complete({ model: judgeModel, prompt: 'Reply with: ok', maxTokens: 1 }).catch(() => undefined)
+  const reply = await $.model.complete({ model: live.judgeModel, prompt: 'Reply with: ok', maxTokens: 1 }).catch(() => undefined)
   await change($, s => ({ ...s, isWarming: false }))
-  if (reply !== undefined) await addSpend($, tallyOf(judgeModel, reply.usage))
+  if (reply !== undefined) await addSpend($, tallyOf(live.judgeModel, reply.usage))
 }
 
 /** Starts every queued assist whose locks are free, oldest first; when nothing is left, releases held prompts. */
@@ -260,7 +266,7 @@ async function pump($: EngineInterface): Promise<void> {
   const held = state.entries.filter(x => x.status === 'running').map(x => x.locks)
   const queued = state.entries.filter(x => x.status === 'queued').reverse()
   for (const entry of queued) {
-    if (!canStart(entry.locks, held, maxConcurrent)) continue
+    if (!canStart(entry.locks, held, live.maxConcurrent)) continue
     held.push(entry.locks)
     await patchEntry($, entry.id, () => ({ status: 'running' }))
     void runAssist($, entry.id)
@@ -293,6 +299,8 @@ async function deliverNote($: EngineInterface, note: string): Promise<void> {
 }
 
 async function tell($: EngineInterface, text: string): Promise<void> {
+  // Off in the panel: the chat line and the band still say it.
+  if (!live.notifications) return
   try {
     const sent = await $.ui.notify(text, { title: 'Sidekick' })
     if (sent.isSent) return
@@ -322,6 +330,50 @@ async function writeDump($: EngineInterface, entry: Entry, calls: readonly Call[
   } catch {
     return ''
   }
+}
+
+/** Re-reads the panel's settings from the store, so a change made in another session counts here too. */
+async function refreshSettings($: EngineInterface): Promise<void> {
+  const stored = await $.store.get(SETTINGS_KEY).catch(() => undefined)
+  live = effective(defaults, stored)
+  const settings = live
+  await change($, s => ({ ...s, settings })).catch(() => {})
+}
+
+/** One change from the panel: kept across sessions (only what was changed), in force at once. */
+async function setSetting<K extends keyof Settings>($: EngineInterface, key: K, value: Settings[K]): Promise<void> {
+  const stored = await $.store.get(SETTINGS_KEY).catch(() => undefined)
+  await $.store.set(SETTINGS_KEY, withChange(stored, key, value)).catch(() => {})
+  await refreshSettings($)
+}
+
+/** Forgets every change made in the panel: the plugin's options are in force again. */
+async function resetSettings($: EngineInterface): Promise<void> {
+  await $.store.set(SETTINGS_KEY, {}).catch(() => {})
+  await refreshSettings($)
+}
+
+/** Mirrors today's totals into the session's state, where the band can draw them. */
+async function refreshToday($: EngineInterface, rows?: readonly HistoryRow[]): Promise<void> {
+  const all = rows ?? toRows(await $.store.get(HISTORY_KEY).catch(() => []))
+  const today = totals(all, startOfDay(await $.clock.now()))
+  await change($, s => ({ ...s, today })).catch(() => {})
+}
+
+/** Adds one row to the history kept across sessions. */
+async function record($: EngineInterface, row: HistoryRow): Promise<void> {
+  const now = await $.clock.now()
+  const rows = appendRow(toRows(await $.store.get(HISTORY_KEY).catch(() => [])), { ...row, at: now }, now)
+  await $.store.set(HISTORY_KEY, rows).catch(() => {})
+  await refreshToday($, rows)
+}
+
+/** What the main session would have spent on this job, less what the sidekick did; 0 unless it finished. */
+async function savedOn($: EngineInterface, status: Outcome['status'], spentUsd: number): Promise<number> {
+  if (status !== 'done' && status !== 'partial') return 0
+  const model = await $.session.model().catch(() => 'opus')
+  const usage = await $.session.usage().catch(() => undefined)
+  return savedFor(model, usage?.context.tokens, spentUsd)
 }
 
 /** Deletes the folder a finished worker session left under Claude's config folder. */
@@ -357,8 +409,20 @@ async function finish($: EngineInterface, id: string, outcome: Outcome, calls: r
   }))
   const seconds = Math.max(1, Math.round((now - (entry.startedAt || entry.createdAt)) / 1000))
   const after = (await load($)).entries.find(x => x.id === id)
-  $.ui.log(chatLine(outcome, workerModel, seconds, (after?.judgeSpend.usd ?? 0) + (after?.workerSpend.usd ?? 0)))
-  await deliverNote($, handoffNote(entry.prompt, outcome, workerModel, entry.dump))
+  $.ui.log(chatLine(outcome, entry.backend, seconds, (after?.judgeSpend.usd ?? 0) + (after?.workerSpend.usd ?? 0)))
+  await deliverNote($, handoffNote(entry.prompt, outcome, entry.backend, entry.dump))
+  const judgeUsd = after?.judgeSpend.usd ?? 0
+  const workerUsd = after?.workerSpend.usd ?? 0
+  await record($, {
+    at: now,
+    kind: entry.kind,
+    status: outcome.status,
+    ms: now - (entry.startedAt || entry.createdAt),
+    judgeUsd,
+    workerUsd,
+    savedUsd: await savedOn($, outcome.status, judgeUsd + workerUsd),
+    id,
+  })
   await tell($, status === 'done' ? `✓ ${outcome.summary}` : `⚠ ${outcome.summary} — open /sidekick to hand it to main`)
   await pump($)
 }
@@ -374,7 +438,7 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
   const ticker = $.clock.every(1_000, () => void change($, s => ({ ...s, tick: s.tick + 1 })).catch(() => {}))
   const { instructions } = await load($)
   const stream = $.process.spawn({
-    argv: workerArgv(workerModel, guardPath, instructions ?? [], entry.kind),
+    argv: workerArgv(entry.backend, guardPath, instructions ?? [], entry.kind),
     cwd,
     env: { DMOKONG_MODS: '0', SIDEKICK_WORKER: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1' },
     input: workerInput(entry.task, entry.prompt),
@@ -414,7 +478,7 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
             await patchEntry($, id, x => ({ steps: [...x.steps, step].slice(-MAX_STEPS) }))
           } else if (event.kind === 'result') {
             result = { text: event.text, isError: event.isError }
-            const priced = tallyOf(workerModel, event.usage)
+            const priced = tallyOf(entry.backend, event.usage)
             // An unpriced model still has Claude Code's own figure for the run.
             const workerSpend = priced.usd === 0 && event.costUsd > 0 ? { ...priced, usd: event.costUsd } : priced
             await patchEntry($, id, () => ({ workerSpend }))
@@ -465,7 +529,7 @@ async function enqueue($: EngineInterface, id: string, judgment: Judgment, repo:
     status: 'queued',
     task: judgment.task,
     locks: lockKeys(judgment.resources, repo),
-    backend: workerModel,
+    backend: live.workerModel,
   }))
   await pump($)
 }
@@ -535,6 +599,10 @@ async function giveToMain($: EngineInterface, id: string): Promise<void> {
   const entry = (await load($)).entries.find(x => x.id === id)
   if (entry === undefined) return
   if (isActive(entry)) await stopEntry($, id)
+  // The main session spends the turn after all, so the job saved nothing.
+  const rows = markGiven(toRows(await $.store.get(HISTORY_KEY).catch(() => [])), id)
+  await $.store.set(HISTORY_KEY, rows).catch(() => {})
+  await refreshToday($, rows)
   await $.prompt.submit({ text: giveToMainPrompt(entry.prompt, entry.outcome, entry.steps, entry.dump), asUser: true })
 }
 
@@ -663,9 +731,8 @@ function entryDetail(entry: Entry, now: number): string {
 
 export const register: Register = (on, options) => {
   isOff = options.enabled === 'off'
-  judgeModel = typeof options.judgeModel === 'string' && options.judgeModel !== '' ? options.judgeModel : 'haiku'
-  workerModel = typeof options.workerModel === 'string' && options.workerModel !== '' ? options.workerModel : 'haiku'
-  maxConcurrent = Math.max(1, Number(options.maxConcurrent) || 1)
+  defaults = defaultsFrom(options)
+  live = defaults
 
   on('session.start', async ($, e, next) => {
     if ((await $.env.get('DMOKONG_MODS')) === '0' || (await $.env.get('SIDEKICK_WORKER')) === '1') isOff = true
@@ -686,6 +753,8 @@ export const register: Register = (on, options) => {
       misses = []
     }
     await change($, state => ({ ...state, learned: misses }))
+    await refreshSettings($)
+    await refreshToday($)
     // Store the upgraded shape, so state written by an older version is current from here on.
     await change($, state => state)
     // 0.1.2 kept the mode in the status line; the band carries it now, so clear what it left.
@@ -745,7 +814,7 @@ export const register: Register = (on, options) => {
     const what: Record<Mode, string> = {
       off: 'Sidekick is off for this session.',
       shadow: 'Sidekick is in shadow for this session: it judges each message and logs what it would hand off, but everything still goes to Claude. /sidekick auto to let it act.',
-      auto: `Sidekick is on for this session: mechanical chores go to ${workerModel}, everything else to Claude.`,
+      auto: `Sidekick is on for this session: mechanical chores go to ${live.workerModel}, everything else to Claude.`,
     }
     return { text: what[mode] }
   })
@@ -784,16 +853,22 @@ export const register: Register = (on, options) => {
     const id = newId(now)
     await addEntry($, blankEntry(id, e.text, now))
     draftTimer?.cancel()
+    // A change made in the panel of another session counts from this message on.
+    await refreshSettings($)
     const { judgment, ms, repo, spend } = await verdictFor($, e.text)
     // An investigation without the main session's instruction files would guess where things live.
     const isBlind = judgment.verdict === 'investigate' && (await load($)).instructions === null
-    const routed: Judgment = isBlind
-      ? { ...judgment, verdict: 'needs-main', reason: "no instruction files yet: the sidekick wouldn't know where things live (they arrive with the next /clear or compaction)" }
-      : judgment
+    const isLooksOff = judgment.verdict === 'investigate' && !live.investigations
+    const routed: Judgment = isLooksOff
+      ? { ...judgment, verdict: 'needs-main', reason: 'investigations are off (the sidekick panel turns them on)' }
+      : isBlind
+        ? { ...judgment, verdict: 'needs-main', reason: "no instruction files yet: the sidekick wouldn't know where things live (they arrive with the next /clear or compaction)" }
+        : judgment
     await patchEntry($, id, () => ({ verdict: judgment.verdict, reason: routed.reason, judgeMs: ms, judgeSpend: spend }))
     if (routed.verdict !== 'mechanical' && routed.verdict !== 'investigate') {
       await patchEntry($, id, () => ({ status: 'passed' }))
       await change($, s => ({ ...s, totals: { ...s.totals, passed: s.totals.passed + 1 } }))
+      await record($, { at: 0, kind: 'to-claude', status: 'passed', ms, judgeUsd: spend.usd, workerUsd: 0, savedUsd: 0, id })
       // A pass is a decision too: say so, or a sidekick that passes looks like one that is gone.
       $.ui.log(`→ to Claude: ${routed.reason} · judged in ${(ms / 1000).toFixed(1)}s`)
       return holdForAssists(routed.reason)
@@ -801,7 +876,7 @@ export const register: Register = (on, options) => {
     void enqueue($, id, routed, repo).catch(() => {})
     clearRestored($, e.text)
     const doing = routed.verdict === 'investigate' ? ' · investigating' : ''
-    return { drop: `❯ ${e.text} → sidekick (${workerModel})${doing} · judged in ${(ms / 1000).toFixed(1)}s` }
+    return { drop: `❯ ${e.text} → sidekick (${live.workerModel})${doing} · judged in ${(ms / 1000).toFixed(1)}s` }
   }).catch(($, e, next) => next(e)) // fail open: any error lets the prompt through as typed
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -924,7 +999,7 @@ export const register: Register = (on, options) => {
               {`caching ${state.spend.savedUsd >= 0 ? 'saved' : 'cost'} ≈${usd(Math.abs(state.spend.savedUsd))}`}
             </Text>
           </Box>
-          <Text dimColor wrap="wrap">{`models judge ${judgeModel} · worker ${workerModel} · costs are API-equivalent estimates`}</Text>
+          <Text dimColor wrap="wrap">{`models judge ${live.judgeModel} · worker ${live.workerModel} · costs are API-equivalent estimates`}</Text>
           <Text dimColor wrap="wrap">{`context ${contextLine(state.instructions)}`}</Text>
         </Box>
 
