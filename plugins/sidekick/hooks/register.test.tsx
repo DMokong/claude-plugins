@@ -525,6 +525,21 @@ test('the folded line shows even while off, and stacks above the band beneath it
   await ui.unmount()
 })
 
+test('on the desktop, the chosen mode and models are marked without relying on colour', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const ui = await $.ui.mount({ ...(BAND() as object), surface: 'desktop' } as never)
+  await ui.press({ key: 'band-toggle' })
+  expect(await ui.find({ type: 'Text', text: /✓ Auto/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /✓ Off/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /✓ Haiku/ })).toBeDefined()
+  expect((await ui.find({ key: 'mode-auto' }) as { props?: { variant?: string } })?.props?.variant).toBe('primary')
+  expect((await ui.find({ key: 'mode-off' }) as { props?: { variant?: string } })?.props?.variant).toBe('secondary')
+  await ui.unmount()
+})
+
 test('while the judge warms up, the folded line says so', async ($, on) => {
   // The judge's first call hangs until released: the warm-up is under way.
   const seen = world(on, { judge: MECHANICAL, worker: DONE, judgeDelayMs: 1 })

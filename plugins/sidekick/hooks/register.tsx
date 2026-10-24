@@ -1396,10 +1396,13 @@ export const register: Register = (on, options) => {
     // chip's colour stretched to the row's end.
     const rowLabel = (word: string) => word.padEnd(size === 'wide' ? 10 : 7)
     const chipLabel = (label: string) => (isMini ? (label.split(' ')[0] ?? label) : label)
+    // A desktop draws every Button as its own native button, so the colour that marks the chosen
+    // chip is lost there: it gets the primary button and a check mark instead.
+    const isTerminal = e.surface === 'terminal'
     const chip = (key: string, label: string, isOn_: boolean, color: string, act: () => void) => [
-      <Button key={key} plain onPress={act}>
+      <Button key={key} plain onPress={act} variant={isOn_ ? 'primary' : 'secondary'}>
         {isOn_ ? (
-          <Text bold backgroundColor={color} color={COLORS.ink}>{` ${label} `}</Text>
+          <Text bold backgroundColor={color} color={COLORS.ink}>{isTerminal ? ` ${label} ` : ` ✓ ${label} `}</Text>
         ) : (
           <Text>{` ${label} `}</Text>
         )}
