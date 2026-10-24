@@ -14,11 +14,10 @@ manager, the logs and the project's own health scripts, restarts in place if tha
 asked for), and checks that the service came back. Then it hands back what it found, with a full
 record Claude can read if the answer isn't enough.
 
-![sidekick handing a chore to the worker while a question waits its turn](docs/hero.svg)
+![the sidekick control panel, opened from the line above the prompt](docs/panel.svg)
 
-<sub>A real session. On the left, `commit and push` goes to the sidekick, and a question typed
-while it runs is held, then sent to Claude. On the right, the pane shows what's running, what's
-waiting, what's done and what went to Claude, with the cost.</sub>
+<sub>A real session. The one line above the prompt says what the sidekick is doing, and **◆ Sidekick ▾**
+opens this control panel in place: mode, models, settings and shortcuts, all one click away.</sub>
 
 ---
 
@@ -30,8 +29,8 @@ waiting, what's done and what went to Claude, with the cost.</sub>
 - [How it works](#how-it-works)
 - [What it will and won't do](#what-it-will-and-wont-do)
 - [Looking into things](#looking-into-things)
-- [The pane](#the-pane)
-- [The band](#the-band)
+- [The band and the control panel](#the-band-and-the-control-panel)
+- [The dashboard](#the-dashboard)
 - [Modes](#modes)
 - [Typing while it works](#typing-while-it-works)
 - [Teaching the judge](#teaching-the-judge)
@@ -87,16 +86,15 @@ Check that it loaded: run `/sidekick`. The pane opens with the version (`v0.2.3`
 
 ## Quick start (60 seconds)
 
-**1. Turn it on for this session.**
+**1. Turn it on for this session.** Click **◆ Sidekick ▾** on the line above the prompt and press
+**Auto**, or type:
 
 ```text
 /sidekick auto
 ```
 
-The band above the prompt shows it's on. For the first few seconds it says **warming up the
-judge…** while the judge opens its connection.
-
-![the band right after turning the sidekick on](docs/band-warming.svg)
+The line above the prompt turns green: `◆ sidekick ● AUTO`. For the first few seconds it also says
+**warming up…** while the judge opens its connection.
 
 **2. Make a change, then type a chore.**
 
@@ -118,7 +116,8 @@ the sidekick took it.)
 **3. Keep working.** Questions, design work and code changes go to Claude as usual. When you
 next talk to Claude, it already has a short note about the commit.
 
-**4. Open the pane** with `/sidekick` or the band's **Open** button to see everything it's done.
+**4. Open the dashboard** with `/sidekick`, or the panel's **Dashboard**, to see what it's done today
+and this week, what it saved, and what it cost.
 
 To turn it off: `/sidekick off`.
 
@@ -179,7 +178,7 @@ is allowed. A bad commit can be reverted, so pushing is fine.
 The blocks are enforced in two layers: Claude Code's own permission rules (`dontAsk` mode with an
 allowlist), and a PreToolUse guard (`bin/sidekick-guard`) that also catches a flag placed after
 other arguments or chained after `&&`, and refuses credential reads whichever tool asks. If a step is refused, the worker **stops**, aborts any
-half-done rebase or merge so your tree is clean, and says why. The step shows in the pane as
+half-done rebase or merge so your tree is clean, and says why. The step shows in the job's details as
 `✗ refused: …`.
 
 It also **stays on your branch**. "commit and push" commits here and pushes this branch. It
@@ -266,53 +265,86 @@ one runs**. Two investigations never run at once.
 
 ---
 
-## The pane
+## The band and the control panel
 
-Open it with `/sidekick` or the band's **Open** button. On a wide terminal it docks beside the
-chat, and on a narrow one it opens above the prompt (drag its edge to resize).
+Whenever the sidekick is installed and enabled, one line sits above the prompt, **even while it's
+off**, so turning it on is one click:
 
-![the sidekick pane with finished chores and the messages that went to Claude](docs/done.svg)
+```text
+◆ sidekick ○ OFF                                                          ◆ Sidekick ▾
+◆ sidekick  ● AUTO  │ ● 1 ◷ 2 ⏸ 0 │ saved $0.08 │ cost $.004            ◆ Sidekick ▾
+```
 
-**Header.** The mode (click a mode to switch), what's happening **now**, session **totals**, the
-session **cost** with what caching saved, the models in use, and the loaded version at the top right.
+That's running, queued and held-for-Claude counts, then today's estimated saving and cost. On a
+narrow terminal the cost goes first, then the saving, then the counts. The button always stays.
 
-**Sections**, newest first:
+**While a job runs**, a card shows above the line with the job, the command the worker is on,
+and what comes next:
 
-| Section | Shows |
+```text
+╭──────────────────────────────────────────────────────────────────╮
+│ ✦ investigate acme-bot stopped replying                          │
+│ ● tail -n 50 logs/acme.log                    ▮▮  Working 14s     │
+│ ○ Report back to Claude                                  Next    │
+╰──────────────────────────────────────────────────────────────────╯
+```
+
+**◆ Sidekick ▾ opens the control panel** in place (picture at the top). `▴` folds it, and so does
+starting to type: it never stands between you and the prompt.
+
+| Row | Does |
 |---|---|
-| ▌ **RUNNING** | A live spinner, elapsed seconds, and `↳` the command the worker is running now |
-| ▌ **QUEUED** | Chores waiting for a running one to finish (see [Typing while it works](#typing-while-it-works)) |
-| ▌ **WAITING FOR CLAUDE** | Your messages held until the sidekick is idle |
-| ▌ **DONE** | ✓ done, ■ stopped, ✗ failed, each with time, ≈cost and the worker's summary |
-| ▌ **TO CLAUDE** | Messages the judge passed on, with its reason and how long it took |
+| **MODE** | Off / Shadow / Auto for this session (see [Modes](#modes)) |
+| **JUDGE**, **WORKER** | Which model judges and which does the work |
+| **Investigations** | Whether "look into it" messages go to the sidekick (see [Looking into things](#looking-into-things)) |
+| **Draft judging** | Judge while you type, so Enter is instant. Each pause costs about $0.0001, which is the small cost that ticks up while you type. Off: messages are judged when sent, within 5 s |
+| **Notifications** | A system notification when a job finishes; the chat line and band say it either way |
+| **Side by side** | How many chores in different repos may run at once (1–3) |
+| **LAUNCH** | Dashboard · What it learned · the last investigation record · give the last job to Claude · Reset to defaults |
 
-**Buttons** (where they apply):
+**Settings stick.** What you change in the panel is kept for every future session. Only what you
+change is kept: a setting you never touched follows the plugin's options (see
+[Configuration](#configuration)). **Reset to defaults** forgets your changes. **MODE is per
+session**: every session starts off, so a forgotten `auto` never takes chores in another project. A
+change made in one session reaches your other open sessions with their next message.
 
-| Button | Does |
-|---|---|
-| `edit` | Puts your message back in the prompt box (handed-off messages aren't in ↑ history, see [Limits](#limits)) |
-| `watch` | Expands the entry: the task, every command the worker ran, any `✗ refused` step, and the judge and worker token and cost breakdown |
-| `stop` | Stops a running or queued chore |
-| `revert` | Queues a `git revert` of the chore's commits (and pushes it if they were pushed) |
-| `give to main` | Hands the chore and the worker's report to Claude to finish |
-| `send now` | Sends a held message to Claude without waiting |
-| `should've been sidekick` | Tells the judge it got one wrong (see [Teaching the judge](#teaching-the-judge)) |
+On a short terminal (the band gets at most half the rows), the panel drops its section rules and NOW,
+and puts LAUNCH on one row.
 
 ---
 
-## The band
+## The dashboard
 
-While the sidekick is on, a one-line band sits above the prompt and stacks with any other mod's
-band. It adapts to width: on a narrow terminal the least useful parts drop off first.
+Open it with `/sidekick` or the panel's **Dashboard**. In the fullscreen renderer it docks beside
+the chat at full height; otherwise it opens above the prompt and scrolls.
 
-```text
-◆ sidekick  AUTO  │ warming up the judge… · ≈$0 · 0 assists [ Open ]
-◆ sidekick  AUTO  │ ⠸ commit and push · $ git push · ⏸ 1 waiting · ≈$0.0017 · 1 assist [ Open ]
-◆ sidekick  AUTO  │ idle · ≈$0.0049 · 3 assists [ Open ]
-```
+![the sidekick dashboard: done, saved and cost tiles, where the work went, the last seven days](docs/dashboard.svg)
 
-That's the first few seconds after turning it on, a chore running with a question waiting, and
-nothing running.
+- **DONE · SAVED · COST**, in big digits, for the tab you pick: **Session**, **Today** or **Week**.
+  - **SAVED** is an estimate: each finished job counted as one main-session turn it didn't take,
+    priced at your main model's rates and context size, minus what the sidekick spent. Stopped or
+    failed jobs save nothing, and giving a job to main takes its saving back.
+  - **COST** is everything the judge and worker spent, draft judging included.
+- **The live strip**: running, queued, waiting, and what prompt caching saved this session.
+- **NOW**: the running job and the queue.
+- **WHERE IT WENT**: chores, investigations, messages passed to Claude and draft judging, as bars
+  on one scale, with counts and cost.
+- **LAST 7 DAYS**: jobs a day, the best day, and your streak. The history is kept 35 days, across
+  sessions.
+- **RECENT**: the last few jobs. Press one to open it: the worker's summary and every command it
+  ran, with the job's buttons.
+
+| Button (in a job) | Does |
+|---|---|
+| `edit` | Puts your message back in the prompt box (handed-off messages aren't in ↑ history, see [Limits](#limits)) |
+| `watch` | The task, the judge and worker token and cost breakdown, what it was unsure of |
+| `stop` | Stops a running or queued job |
+| `revert` | Queues a `git revert` of the chore's commits (and pushes it if they were pushed) |
+| `record` | Copies the path of an investigation's full record |
+| `give to main` | Hands the job to Claude: to take over if it stopped, for context if it finished |
+| `should've been sidekick` | Tells the judge it got one wrong (see [Teaching the judge](#teaching-the-judge)) |
+
+**✎** in the dashboard's header opens what the judge has learned, with `forget` on each.
 
 ---
 
@@ -324,8 +356,8 @@ nothing running.
 | `shadow` | The judge runs on each message and logs what it *would* hand off, but everything still goes to Claude | Watch its judgment before trusting it |
 | `auto` | Chores go to the worker, everything else to Claude | Everyday use |
 
-Switch with `/sidekick auto | shadow | off` (`/sidekick on` means shadow), or click the mode in
-the pane. The mode belongs to the session: turning it on in one session never affects another.
+Switch with `/sidekick auto | shadow | off` (`/sidekick on` means shadow), or click a MODE chip in
+the control panel. The mode belongs to the session: turning it on in one session never affects another.
 
 ---
 
@@ -353,7 +385,8 @@ You don't have to wait for a chore to finish.
 ## Teaching the judge
 
 If the judge sends a chore to Claude that the sidekick should have taken, press
-**`should've been sidekick`** on that entry in **TO CLAUDE**. A toast confirms it:
+**`should've been sidekick`** on that job (open it from **RECENT** in the dashboard, where messages
+passed to Claude show with a purple mark). A toast confirms it:
 
 ```text
 Noted: messages like "tidy up merged branches" go to the sidekick (chore) from now on
@@ -367,8 +400,9 @@ Your last 10 corrections are shown to the judge as precedents from its next call
 kept across sessions (up to 200 stored). The safety rules still apply, so a correction can't
 teach it to force-push.
 
-**Seeing and undoing what it learned.** The pane's **LEARNED** section lists the corrections the
-judge follows now, newest first, each with a **`forget`** button. From the prompt:
+**Seeing and undoing what it learned.** The panel's **What it learned**, or **✎** in the
+dashboard's header, lists the corrections the judge follows now, newest first, each with a
+**`forget`** button. From the prompt:
 
 ```text
 /sidekick learned        every stored correction, numbered, newest first
@@ -453,6 +487,9 @@ different agent entirely) without touching the rest.
 
 `DMOKONG_MODS=0` in the environment silences every mod from this marketplace for that process.
 
+
+These options are the **defaults**. A change in the [control panel](#the-band-and-the-control-panel) wins over them until **Reset to defaults**.
+
 ---
 
 ## What gets sent where
@@ -473,10 +510,10 @@ All calls go through your own Claude Code login. The sidekick sends nothing anyw
 - **↑ history.** A handed-off message is dropped before it reaches the main session, so it isn't
   in the up-arrow history; the mod API can't add to it. Your words always stay visible in the chat
   line, and `edit` in the pane puts them back in the prompt box.
-- **The first message after turning it on** may go to Claude while the judge warms up (the band
-  says **warming up the judge…**). Give it a few seconds the first time.
+- **The first message after turning it on** may go to Claude while the judge warms up (the line above the prompt
+  says **warming up…**). Give it a few seconds the first time.
 - **A busy moment can slow the judge.** If a verdict takes longer than 5 s, the message goes to
-  Claude, and the pane says `judge timed out`. Nothing is lost; press `should've been sidekick` if
+  Claude, and the job's details say `judge timed out`. Nothing is lost; press `should've been sidekick` if
   it should have been a chore.
 - **Chores and first-pass investigations only.** git and bd chores, and looking into things on this
   machine. Anything that needs the conversation, your judgment or a code change goes to Claude by
@@ -492,7 +529,7 @@ All calls go through your own Claude Code login. The sidekick sends nothing anyw
 <details>
 <summary><b>The pane is blank, or shows an old version</b></summary>
 
-Run `/reload-plugins`, then `/sidekick`. The version at the top right of the pane is the version
+Run `/reload-plugins`, then `/sidekick`. The version in the dashboard's header is the version
 that's actually loaded. If it isn't the latest, update (see [Install](#install)) and reload again.
 From 0.2.1, state written by an older version is upgraded automatically.
 </details>
@@ -501,7 +538,7 @@ From 0.2.1, state written by an older version is upgraded automatically.
 <summary><b>Nothing goes to the sidekick</b></summary>
 
 - Is it on? The band shows `◆ sidekick AUTO`. Every new session starts **off**, so run `/sidekick auto`.
-- Open the pane and look in **TO CLAUDE**. Each entry says why it went to Claude: `needs the main
+- Open the dashboard, then the message under **RECENT** (purple mark). Its details say why it went to Claude: `needs the main
   session`, `judge timed out`, or a precheck reason.
 - In `shadow` mode nothing is handed off. Shadow only records what *would* happen.
 </details>
@@ -523,10 +560,11 @@ fastest model you have.
 </details>
 
 <details>
-<summary><b>The pane is too small or too big</b></summary>
+<summary><b>The dashboard is too small or too big</b></summary>
 
-Drag its edge, or use your terminal's pane keys. Claude Code remembers the size you set. On a wide
-terminal the pane docks beside the chat.
+Drag its edge, or use your terminal's pane keys. Claude Code remembers the size you set. In the
+fullscreen renderer (`CLAUDE_CODE_NO_FLICKER=1`) on a terminal of 110 columns or more, it docks
+beside the chat at full height; otherwise it sits above the prompt and scrolls.
 </details>
 
 ---
@@ -537,7 +575,7 @@ terminal the pane docks beside the chat.
 It gets the same **instruction files**: whatever CLAUDE.md, rules and `@` imports your main
 session loaded, captured as the session builds its context (`prompt.context`), so it knows where
 things live without the sidekick hardcoding anything. Your excludes and path-scoped rules apply
-exactly as they do for Claude. The pane's header shows what it has (`context`). If the sidekick
+exactly as they do for Claude. The dashboard's last line shows what it has (`context`). If the sidekick
 was installed mid-conversation, the worker runs without them until your next `/clear` or
 compaction.
 
@@ -579,7 +617,8 @@ and rendered to SVG.
 
 | Version | |
 |---|---|
-| **0.3.0** | **Investigations**: a fourth verdict, `investigate`, for "look into it", "why did X fail" and "restart X". The worker may run any command but the guard's (which now holds the data-loss line outside git too), restarts in place and verifies, and leaves a full redacted record Claude can read. Investigations don't hold your messages to Claude. Corrections teach chore or investigate. `give to main` on a finished entry hands it over for context, with SHAs, changes and doubts. The braces rule now says what's actually refused (`@{u}` in a range). Worker sessions no longer leave saved output on disk. |
+| **0.4.0** | **A control panel and a dashboard.** The band folds to one line (shown even while off) and opens into a control panel: mode, judge and worker models, investigations, draft judging, notifications and side-by-side as live switches that stick across sessions, plus shortcuts. A live card shows the running job. The pane is now a dashboard: DONE / SAVED / COST tiles in big digits for the session, today or the week, where the work went, the last 7 days, and recent jobs that open into their details. A history of finished jobs is kept 35 days. |
+| 0.3.0 | **Investigations**: a fourth verdict, `investigate`, for "look into it", "why did X fail" and "restart X". The worker may run any command but the guard's (which now holds the data-loss line outside git too), restarts in place and verifies, and leaves a full redacted record Claude can read. Investigations don't hold your messages to Claude. Corrections teach chore or investigate. `give to main` on a finished entry hands it over for context, with SHAs, changes and doubts. The braces rule now says what's actually refused (`@{u}` in a range). Worker sessions no longer leave saved output on disk. |
 | 0.2.5 | The worker gets the instruction files your main session loaded (CLAUDE.md, rules), in its cached system prompt; the pane shows them as `context`. Credential files (`.env`, `.mcp.json`, keys) can't be read by any worker tool. The worker no longer loads auto-memory of its own. |
 | 0.2.4 | The judge gets 5 s at submit instead of 1.8 s, so a cold or busy judge still hands chores to the sidekick. Learned corrections are listed in the pane (**LEARNED**) and by `/sidekick learned`, and `forget` revokes them. |
 | 0.2.3 | Worker cache reuse across repos (`--exclude-dynamic-system-prompt-sections`). The worker stays on your branch. Refused steps are shown. `should've been sidekick` now teaches the judge. Roomier header. The band stays on one line and shows warm-up. A taller pane when inline. This README. |

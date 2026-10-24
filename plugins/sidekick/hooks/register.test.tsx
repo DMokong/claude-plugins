@@ -524,6 +524,22 @@ test('the folded line shows even while off, and stacks above the band beneath it
   await ui.unmount()
 })
 
+test('while the judge warms up, the folded line says so', async ($, on) => {
+  // The judge's first call hangs until released: the warm-up is under way.
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, judgeDelayMs: 1 })
+  underBand(on)
+  await $.session.start(START)
+  // A judge idle for more than 45 s is cold: turning the sidekick on warms it.
+  await clock.advance(50_000)
+  void $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await until($, x => x.isWarming)
+  const ui = await $.ui.mount(BAND())
+  expect(await ui.find({ type: 'Text', text: /warming up/ })).toBeDefined()
+  await ui.unmount()
+  seen.release()
+  await until($, x => !x.isWarming)
+})
+
 test('the toggle opens the control panel; its chips and pills change the session and the settings', async ($, on) => {
   const seen = world(on, { judge: MECHANICAL, worker: DONE })
   underBand(on)

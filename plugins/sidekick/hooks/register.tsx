@@ -1249,6 +1249,8 @@ export const register: Register = (on, options) => {
       <Box key="sk-folded" flexWrap="nowrap">
         <Text bold={isOn} dimColor={!isOn} color={isOn ? COLORS.claude : undefined}>{'◆ sidekick '}</Text>
         {modeChip}
+        {/* A cold judge can take seconds on its first call; say so, or the first message looks ignored. */}
+        {state.isWarming && <Text color={COLORS.purple}>{' warming up…'}</Text>}
         {shown.includes('counts') && <Text color={COLORS.line}>{' │ '}</Text>}
         {shown.includes('counts') &&
           counts.map(c => (
@@ -1300,18 +1302,18 @@ export const register: Register = (on, options) => {
 
     // ── the control panel (image 3)
     const inner = Math.max(20, width - 4)
-    const chip = (key: string, label: string, isOn_: boolean, color: string, act: () => void) => (
-      <Box key={`chip-${key}`} flexWrap="nowrap">
-        <Button key={key} plain onPress={act}>
-          {isOn_ ? (
-            <Text bold backgroundColor={color} color={COLORS.ink}>{` ${label} `}</Text>
-          ) : (
-            <Text>{` ${label} `}</Text>
-          )}
-        </Button>
-        <Text>{' '}</Text>
-      </Box>
-    )
+    // A chip and the gap after it, as siblings in the row: wrapped in a Box of its own, the last
+    // chip's colour stretched to the row's end.
+    const chip = (key: string, label: string, isOn_: boolean, color: string, act: () => void) => [
+      <Button key={key} plain onPress={act}>
+        {isOn_ ? (
+          <Text bold backgroundColor={color} color={COLORS.ink}>{` ${label} `}</Text>
+        ) : (
+          <Text>{` ${label} `}</Text>
+        )}
+      </Button>,
+      <Text key={`gap-${key}`}>{' '}</Text>,
+    ]
     const rule = (key: string, title: string) => {
       const label = title === '' ? '' : `── ${spaced(title)} `
       return (
