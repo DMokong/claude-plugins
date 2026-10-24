@@ -1356,8 +1356,14 @@ export const register: Register = (on, options) => {
     // A popup, not a sheet: a fixed width, anchored above the toggle at the right end of the line.
     const panelW = Math.min(width, PANEL_WIDTH)
     const inner = Math.max(20, panelW - 4)
+    // The layout follows the room: wide keeps every note; compact drops the notes and packs LAUNCH
+    // into short labels; mini also shortens the model chips and the pills.
+    const size: 'wide' | 'compact' | 'mini' = inner >= 60 ? 'wide' : inner >= 40 ? 'compact' : 'mini'
+    const isMini = size === 'mini'
     // A chip and the gap after it, as siblings in the row: wrapped in a Box of its own, the last
     // chip's colour stretched to the row's end.
+    const rowLabel = (word: string) => word.padEnd(size === 'wide' ? 10 : 7)
+    const chipLabel = (label: string) => (isMini ? (label.split(' ')[0] ?? label) : label)
     const chip = (key: string, label: string, isOn_: boolean, color: string, act: () => void) => [
       <Button key={key} plain onPress={act}>
         {isOn_ ? (
@@ -1381,17 +1387,17 @@ export const register: Register = (on, options) => {
     const pill = (key: string, on_: boolean, act: () => void) => (
       <Button key={key} plain onPress={act}>
         {on_ ? (
-          <Text bold backgroundColor={COLORS.green} color={COLORS.ink}>{' ● On '}</Text>
+          <Text bold backgroundColor={COLORS.green} color={COLORS.ink}>{isMini ? ' On ' : ' ● On '}</Text>
         ) : (
-          <Text backgroundColor="#2a2f3a">{' ○ Off '}</Text>
+          <Text backgroundColor="#2a2f3a">{isMini ? ' Off ' : ' ○ Off '}</Text>
         )}
       </Button>
     )
     const settingRow = (key: keyof Settings, name: string, desc: string, control: unknown) => (
       <Box key={`row-${key}`} flexWrap="nowrap">
         <Text color={state.settings[key] === false ? COLORS.line : COLORS.green}>{state.settings[key] === false ? '○ ' : '● '}</Text>
-        <Text bold>{name.padEnd(15)}</Text>
-        <Text dimColor>{clip(desc, Math.max(4, inner - 30))}</Text>
+        <Text bold>{isMini ? name : name.padEnd(15)}</Text>
+        {size === 'wide' && <Text dimColor>{clip(desc, Math.max(4, inner - 30))}</Text>}
         <Box flexGrow={1} />
         {control as never}
       </Box>
@@ -1416,7 +1422,9 @@ export const register: Register = (on, options) => {
     // LAUNCH on one row of short labels (12).
     const fit = maxRows >= 23 ? 'full' : maxRows >= 18 ? 'roomy' : 'tight'
     const isTight = fit === 'tight'
-    const perRow = isTight ? launch.length : panelW >= 60 ? 2 : 1
+    // Short labels on wrapping rows when the rows are few or the panel is narrow.
+    const isPacked = isTight || size !== 'wide'
+    const perRow = isPacked ? launch.length : 2
     const launchRows = Array.from({ length: Math.ceil(launch.length / perRow) }, (_, r) => launch.slice(r * perRow, r * perRow + perRow))
     const showNow = fit === 'full'
     const shortLabel: Record<string, string> = {
@@ -1442,21 +1450,21 @@ export const register: Register = (on, options) => {
         </Box>
         {!isTight && rule('r0', '')}
         <Box flexWrap="wrap">
-          <Text dimColor>{'MODE      '}</Text>
+          <Text dimColor>{rowLabel('MODE')}</Text>
           {chip('mode-off', 'Off', state.mode === 'off', '#c9ced8', () => void setMode($, 'off'))}
           {chip('mode-shadow', 'Shadow', state.mode === 'shadow', COLORS.purple, () => void setMode($, 'shadow'))}
           {chip('mode-auto', 'Auto', state.mode === 'auto', COLORS.green, () => void setMode($, 'auto'))}
         </Box>
         <Box flexWrap="wrap">
-          <Text dimColor>{'JUDGE     '}</Text>
+          <Text dimColor>{rowLabel('JUDGE')}</Text>
           {chipsFor(JUDGE_CHIPS, state.settings.judgeModel).map(([label, alias]) =>
-            chip(`judge-${alias}`, label, state.settings.judgeModel === alias, COLORS.purple, () => void setSetting($, 'judgeModel', alias)),
+            chip(`judge-${alias}`, chipLabel(label), state.settings.judgeModel === alias, COLORS.purple, () => void setSetting($, 'judgeModel', alias)),
           )}
         </Box>
         <Box flexWrap="wrap">
-          <Text dimColor>{'WORKER    '}</Text>
+          <Text dimColor>{rowLabel('WORKER')}</Text>
           {chipsFor(WORKER_CHIPS, state.settings.workerModel).map(([label, alias]) =>
-            chip(`worker-${alias}`, label, state.settings.workerModel === alias, COLORS.purple, () => void setSetting($, 'workerModel', alias)),
+            chip(`worker-${alias}`, chipLabel(label), state.settings.workerModel === alias, COLORS.purple, () => void setSetting($, 'workerModel', alias)),
           )}
         </Box>
         {!isTight && rule('r1', 'SETTINGS')}
@@ -1468,7 +1476,7 @@ export const register: Register = (on, options) => {
           'Side by side',
           'chores in different repos at once',
           <Button key="set-maxConcurrent" plain onPress={() => void setSetting($, 'maxConcurrent', (state.settings.maxConcurrent % 4) + 1)}>
-            <Text backgroundColor="#2a2f3a">{` ${state.settings.maxConcurrent} at a time `}</Text>
+            <Text backgroundColor="#2a2f3a">{isMini ? ` ${state.settings.maxConcurrent}× ` : ` ${state.settings.maxConcurrent} at a time `}</Text>
           </Button>,
         )}
         {showNow && rule('r2', 'NOW')}
@@ -1476,10 +1484,10 @@ export const register: Register = (on, options) => {
         {showNow && lead !== undefined && (
           <Box flexWrap="nowrap">
             <Text color={COLORS.pink}>{'● '}</Text>
-            <Text bold color={COLORS.orange}>{lead.kind === 'investigate' ? 'investigate ' : ''}</Text>
-            <Text>{clip(lead.prompt, inner - 30)}</Text>
+            {size === 'wide' && <Text bold color={COLORS.orange}>{lead.kind === 'investigate' ? 'investigate ' : ''}</Text>}
+            <Text>{clip(lead.prompt, Math.max(4, inner - (size === 'wide' ? 30 : 18)))}</Text>
             <Box flexGrow={1} />
-            {block(lead)}
+            {!isMini && block(lead)}
             <Text bold color={COLORS.pink}>{'  Working'}</Text>
             <Text dimColor>{` ${ageOf(lead)}s`}</Text>
           </Box>
@@ -1498,14 +1506,14 @@ export const register: Register = (on, options) => {
             ))}
         {!isTight && rule('r3', 'LAUNCH')}
         {launchRows.map((row, r) => (
-          <Box key={`lr-${r}`} flexWrap={isTight ? 'wrap' : 'nowrap'}>
+          <Box key={`lr-${r}`} flexWrap={isPacked ? 'wrap' : 'nowrap'}>
             {row.map(item => (
-              <Box key={`li-${item.key}`} width={isTight ? undefined : perRow === 2 ? Math.floor(inner / 2) : inner} flexWrap="nowrap">
-                <Text color={item.color}>{isTight ? `${item.glyph} ` : `${item.glyph}  `}</Text>
+              <Box key={`li-${item.key}`} width={isPacked ? undefined : Math.floor(inner / 2)} flexWrap="nowrap">
+                <Text color={item.color}>{isPacked ? `${item.glyph} ` : `${item.glyph}  `}</Text>
                 <Button key={item.key} plain onPress={item.act}>
-                  <Text>{isTight ? shortLabel[item.key] ?? item.label : item.label}</Text>
+                  <Text>{isPacked ? shortLabel[item.key] ?? item.label : item.label}</Text>
                 </Button>
-                {isTight && <Text>{'   '}</Text>}
+                {isPacked && <Text>{isMini ? '  ' : '   '}</Text>}
               </Box>
             ))}
           </Box>
