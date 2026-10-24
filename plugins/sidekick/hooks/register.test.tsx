@@ -1034,7 +1034,7 @@ test('the panel picks a layout that fits its width: no row runs over, every cont
       const ui = await $.ui.mount(BAND(width, maxRows))
       const { width: w, rows } = panelRows((await (ui as unknown as { drawn: () => Promise<unknown> }).drawn()) as Node)
       for (const row of rows) expect(row.length).toBeLessThanOrEqual(Math.max(20, w - 4))
-      for (const key of ['mode-auto', 'judge-haiku', 'worker-opus', 'set-draftJudging', 'set-maxConcurrent', 'launch-dashboard', 'launch-reset']) {
+      for (const key of ['mode-auto', 'judge-haiku', 'worker-sonnet', 'set-draftJudging', 'set-maxConcurrent', 'launch-dashboard', 'launch-reset']) {
         expect(await ui.find({ key })).toBeDefined()
       }
       await ui.unmount()
@@ -1122,4 +1122,16 @@ test('every one-line row of the dashboard fits its pane, at every width', async 
   open()
   await until($, x => x.entries[0]?.status === 'done')
   expect(over).toEqual([])
+})
+
+test('the worker is offered Haiku and Sonnet, not Opus: that work belongs in the main session', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  const ui = await $.ui.mount(BAND(100))
+  await ui.press({ key: 'band-toggle' })
+  expect(await ui.find({ key: 'worker-haiku' })).toBeDefined()
+  expect(await ui.find({ key: 'worker-sonnet' })).toBeDefined()
+  expect(await ui.find({ key: 'worker-opus' })).toBeUndefined()
+  await ui.unmount()
 })
