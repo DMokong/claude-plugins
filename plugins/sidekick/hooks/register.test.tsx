@@ -973,3 +973,21 @@ test('tiles sit side by side only where segment money fits in them', async ($, o
     await ui.unmount()
   }
 })
+
+test('the panel pops up at the right end, a fixed width, not across the band', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  const ui = await $.ui.mount(BAND(160))
+  await ui.press({ key: 'band-toggle' })
+  const drawn = JSON.stringify(await (ui as unknown as { drawn: () => Promise<unknown> }).drawn())
+  await ui.unmount()
+  // A spacer pushes it right, and the frame is 72 wide however wide the band.
+  const row = drawn.slice(drawn.indexOf('"sk-panel-row"'))
+  expect(row.indexOf('"flexGrow":1')).toBeLessThan(row.indexOf('"key":"sk-panel"'))
+  expect(row).toMatch(/"key":"sk-panel"[^}]*"width":72/)
+  const narrow = await $.ui.mount(BAND(50))
+  const small = JSON.stringify(await (narrow as unknown as { drawn: () => Promise<unknown> }).drawn())
+  await narrow.unmount()
+  expect(small).toContain('"width":50')
+})
