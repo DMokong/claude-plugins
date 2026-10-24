@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, PromptSubmitInput, PromptSubmitResult, Register } from 'claude-code'
+import type { ElementTable, EngineInterface, PromptSubmitInput, PromptSubmitResult, Register } from 'claude-code'
 
 import { MAX_MISSES, canStart, holdsMain, judgePrompt, judgeSystem, lockKeys, parseJudgment, precheck, taughtVerdict } from './lib/judge'
 import type { Judgment } from './lib/judge'
@@ -9,6 +9,7 @@ import { HISTORY_KEY, NO_TOTALS, appendRow, bestDay, markGiven, perDay, savedFor
 import type { HistoryRow } from './lib/history'
 import { JUDGE_CHIPS, SETTINGS_KEY, WORKER_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
 import { COLORS, barCells, bigText, dayLevels, spaced, tileMoney } from './lib/draw'
+import { daysSvg, progressSvg, stackSvg, tileSvg } from './lib/svg'
 import { DUMP_KEEP, configRoot, dumpDir, dumpName, dumpText } from './lib/dump'
 import type { Call } from './lib/dump'
 import {
@@ -61,6 +62,20 @@ const PANE = 'sidekick'
 const PANE_ROWS = 28
 /** The control panel's width: room for a setting's name, its note and its pill on one row. */
 const PANEL_WIDTH = 72
+
+/** The surfaces that draw graphics: the desktop app, the editor, the phone. */
+type RichSurface = 'desktop' | 'vscode' | 'mobile'
+
+/** The mode as a filled badge, where a graphical surface draws it. */
+function richBadge(Text: ElementTable<RichSurface>['Text'], mode: Mode) {
+  return mode === 'auto' ? (
+    <Text key="mp" bold backgroundColor={COLORS.green} color={COLORS.ink}>{' ● Auto '}</Text>
+  ) : mode === 'shadow' ? (
+    <Text key="mp" bold backgroundColor={COLORS.purple} color={COLORS.ink}>{' ◌ Shadow '}</Text>
+  ) : (
+    <Text key="mp" dimColor>{'○ Off'}</Text>
+  )
+}
 // Raised from 1.8 s: a cold or busy judge (2-4 s measured) sent chores to the main session.
 // Draft judging still makes the usual wait at Enter close to zero.
 const JUDGE_TIMEOUT_MS = 5_000
@@ -927,6 +942,9 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
+    // A desktop, an editor or a phone draws real graphics: they get SVG charts, rendered markdown and
+    // native controls, laid out to flow; the terminal gets the drawing in cells.
+    const rich = e.surface === 'terminal' ? null : ($.ui.resolve(e) as ElementTable<RichSurface>)
     // Read the state before any early return, so every draw subscribes and a later write redraws it.
     const state = await load($)
     const now = await $.clock.now()
@@ -989,7 +1007,14 @@ export const register: Register = (on, options) => {
         </Box>
       )
 
-    const rule = (key: string, title: string, right = '') => (
+    const rule = (key: string, title: string, right = '') =>
+      rich !== null ? (
+        <Box key={key} flexWrap="wrap" marginTop={1} columnGap="sm">
+          <Text bold dimColor>{title}</Text>
+          <Box flexGrow={1} />
+          <Text dimColor>{right}</Text>
+        </Box>
+      ) : (
       <Box key={key} flexDirection="column" marginTop={1}>
         <Box flexWrap="nowrap">
           <Text bold>{title}</Text>
@@ -1015,6 +1040,18 @@ export const register: Register = (on, options) => {
     // The header fits the pane: one row when it all fits, else the right-hand controls on a second
     // row; the models and the version give way first. `rightWidth` is what `right` draws, in cells.
     const header = (right: unknown, rightWidth: number) => {
+      if (rich !== null) {
+        return (
+          <Box key="hdr" flexWrap="wrap" alignItems="center" columnGap="sm" rowGap="xs">
+            <Text bold color={COLORS.claude}>{'◆ Sidekick'}</Text>
+            {richBadge(Text, state.mode)}
+            <Text dimColor>{`judge ${state.settings.judgeModel} · worker ${state.settings.workerModel}`}</Text>
+            {version !== '' && <Text dimColor>{`v${version}`}</Text>}
+            <Box flexGrow={1} />
+            {right as never}
+          </Box>
+        )
+      }
       const inner = width - 4
       const title = '✦ SIDEKICK  '
       const pillWidth = state.mode === 'auto' ? 8 : state.mode === 'shadow' ? 10 : 5
@@ -1059,7 +1096,11 @@ export const register: Register = (on, options) => {
             <Box flexGrow={1} />
             <Text dimColor>{`${seconds}s · ≈${usd(job.judgeSpend.usd + job.workerSpend.usd)}`}</Text>
           </Box>
-          <Text dimColor wrap="wrap">{job.outcome?.summary ?? entryDetail(job, now)}</Text>
+          {rich !== null ? (
+            <rich.Markdown key="job-summary" text={job.outcome?.summary ?? entryDetail(job, now)} />
+          ) : (
+            <Text dimColor wrap="wrap">{job.outcome?.summary ?? entryDetail(job, now)}</Text>
+          )}
           {buttonsFor(job)}
           {watched({ ...job, id: job.id }) ?? null}
           {state.watching !== job.id && (
@@ -1159,6 +1200,133 @@ export const register: Register = (on, options) => {
     const colW = Math.max(3, Math.min(9, Math.floor(width / 7)))
     const gapW = colW >= 5 ? 2 : 1
     const recent = state.entries.filter(x => !ACTIVE.includes(x.status)).slice(0, 6)
+    const markOf = (entry: Entry) => {
+      const mark = entry.outcome?.status === 'partial' ? '◐' : STATUS_MARK[entry.status]
+      const color = entry.status === 'done' ? (mark === '◐' ? COLORS.orange : COLORS.green) : entry.status === 'passed' || entry.status === 'shadow' ? COLORS.purple : COLORS.pink
+      return { mark, color }
+    }
+    const openJob = (id: string) => () => void change($, s => ({ ...s, view: 'job', jobId: id }))
+    if (rich !== null) {
+      const { Svg } = rich
+      // Room for a line's words, in cells: proportional type is narrower, so this never runs over.
+      const room = Math.max(16, width - 16)
+      const series = (pick: (d: (typeof days)[number]) => number) => days.map(pick)
+      return (
+        <Box flexDirection="column" rowGap="sm">
+          {header(
+            <Box key="hdr-r" flexWrap="wrap" columnGap="xs">
+              {(['session', 'today', 'week'] as const).map(tab => (
+                <Button key={`tab-${tab}`} variant={state.tab === tab ? 'primary' : 'secondary'} onPress={() => void change($, s => ({ ...s, tab }))}>
+                  {`${state.tab === tab ? '✓ ' : ''}${tab[0]!.toUpperCase()}${tab.slice(1)}`}
+                </Button>
+              ))}
+              <Button key="view-learned" variant="secondary" onPress={() => void change($, s => ({ ...s, view: 'learned' }))}>
+                {`✎ Learned ${state.learned.length}`}
+              </Button>
+            </Box>,
+            0,
+          )}
+          <Box key="tiles" flexWrap="wrap" gap="sm">
+            <Box key="tile-done">
+              <Svg alt={`Done: ${span.done}`} source={tileSvg({ title: 'DONE', value: String(span.done), caption: `${span.chores} chores · ${span.looks} looks`, color: COLORS.yellow, series: series(d => d.jobs) })} />
+            </Box>
+            <Box key="tile-saved">
+              <Svg alt={`Saved: ${tileMoney(span.savedUsd)}`} source={tileSvg({ title: 'SAVED', value: tileMoney(span.savedUsd), caption: `est. vs ${mainModel}`, color: COLORS.green, series: series(d => d.savedUsd) })} />
+            </Box>
+            <Box key="tile-cost">
+              <Svg alt={`Cost: ${tileMoney(span.costUsd)}`} source={tileSvg({ title: 'COST', value: tileMoney(span.costUsd), caption: 'judge + worker', color: COLORS.blue, series: series(d => d.costUsd) })} />
+            </Box>
+          </Box>
+          <Box key="live" flexWrap="wrap" columnGap="md">
+            {counts.map(c => (
+              <Text key={`lc-${c.label}`} color={c.n > 0 ? c.color : undefined} dimColor={c.n === 0}>{`${c.glyph} ${c.n} ${c.label}`}</Text>
+            ))}
+            <Text dimColor>{`caching saved ${usd(Math.max(0, state.spend.savedUsd))}`}</Text>
+          </Box>
+
+          {rule('h-now', 'NOW')}
+          {running.length === 0 && queued.length === 0 && state.waiting.length === 0 && <Text dimColor>{'Nothing running'}</Text>}
+          {running.map(entry => (
+            <Box key={`n-${entry.id}`} flexDirection="column" rowGap="xs">
+              <Box flexWrap="nowrap" alignItems="center" columnGap="sm">
+                <Text color={COLORS.pink}>{'●'}</Text>
+                <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                  <Button key={`job-${entry.id}`} variant="secondary" onPress={openJob(entry.id)}>
+                    {clip(`${kindTag(entry)}${entry.prompt}`, room)}
+                  </Button>
+                </Box>
+                <Text dimColor>{`${Math.round((now - (entry.startedAt || entry.createdAt)) / 1000)}s`}</Text>
+              </Box>
+              <Text dimColor wrap="truncate-end">{clip(entry.steps.at(-1) ?? 'starting the worker…', room)}</Text>
+              <Box key={`pg-${entry.id}`}>
+                <Svg alt="working" source={progressSvg(COLORS.orange)} isInteractive />
+              </Box>
+            </Box>
+          ))}
+          {[...queued].reverse().map((entry, i) => (
+            <Box key={`n-${entry.id}`} flexWrap="nowrap" columnGap="sm">
+              <Text color={COLORS.blue}>{'◷'}</Text>
+              <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                <Text wrap="truncate-end">{clip(`${kindTag(entry)}${entry.prompt}`, room)}</Text>
+              </Box>
+              <Text dimColor>{i === 0 ? 'Next' : 'Then'}</Text>
+            </Box>
+          ))}
+          {state.waiting.map(held => (
+            <Box key={`wt-${held.id}`} flexWrap="nowrap" alignItems="center" columnGap="sm">
+              <Text color={COLORS.yellow}>{'⏸'}</Text>
+              <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                <Text wrap="truncate-end">{clip(held.text, room)}</Text>
+              </Box>
+              <Button key={`send-${held.id}`} variant="secondary" onPress={() => void sendNow($, held.id)}>
+                {'Send now'}
+              </Button>
+            </Box>
+          ))}
+
+          {rule('h-where', 'WHERE IT WENT')}
+          <Box key="where">
+            <Svg alt={where.map(w => `${w.label} ${w.n}, ${tileMoney(w.cost)}`).join('; ')}
+              source={stackSvg(where.map(w => ({ label: w.label, n: w.n, usd: w.cost, color: w.color })))}
+              isInteractive />
+          </Box>
+          <Box key="where-legend" flexWrap="wrap" columnGap="md">
+            {where.map(w => (
+              <Text key={`wl-${w.key}`} color={w.color}>
+                {`■ ${w.label} ${w.n} · ${tileMoney(w.cost)}`}
+              </Text>
+            ))}
+          </Box>
+
+          {rule('h-days', 'LAST 7 DAYS', best === undefined ? 'no jobs yet' : `best ${best.isToday ? 'today' : best.label}${days_ > 0 ? ` · ${days_}-day streak` : ''}`)}
+          <Box key="days">
+            <Svg alt={days.map(d => `${d.label} ${d.jobs}`).join(', ')} source={daysSvg(days, { today: COLORS.yellow, bar: COLORS.blue })} isInteractive />
+          </Box>
+
+          {recent.length > 0 && rule('h-recent', 'RECENT')}
+          {recent.map(entry => {
+            const { mark, color } = markOf(entry)
+            const seconds = entry.endedAt > 0 ? `${Math.max(1, Math.round((entry.endedAt - (entry.startedAt || entry.createdAt)) / 1000))}s` : ''
+            const cost = entry.judgeSpend.usd + entry.workerSpend.usd
+            return (
+              <Box key={`rc-${entry.id}`} flexDirection="column" borderStyle="round" borderColor={COLORS.line} paddingX={1}>
+                <Box flexWrap="nowrap" alignItems="center" columnGap="sm">
+                  <Text color={color}>{mark}</Text>
+                  <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                    <Button key={`job-${entry.id}`} variant="secondary" onPress={openJob(entry.id)}>
+                      {clip(`${kindTag(entry)}${entry.prompt}`, room)}
+                    </Button>
+                  </Box>
+                  <Text dimColor>{cost > 0 ? usd(cost) : ''}</Text>
+                </Box>
+                <Text dimColor wrap="truncate-end">{[entry.status, seconds, entry.outcome?.summary.split('\n')[0] ?? entry.reason].filter(x => x !== '').join(' · ')}</Text>
+              </Box>
+            )
+          })}
+          <Text dimColor wrap="wrap">{`Context: ${contextLine(state.instructions)}`}</Text>
+        </Box>
+      )
+    }
     return (
       <Box flexDirection="column">
         {header(
@@ -1262,12 +1430,11 @@ export const register: Register = (on, options) => {
         {recent.length > 0 && rule('h-recent', 'RECENT', 'open one for its details')}
         <Box flexWrap="wrap">
           {recent.map(entry => {
-            const mark = entry.outcome?.status === 'partial' ? '◐' : STATUS_MARK[entry.status]
-            const color = entry.status === 'done' ? (mark === '◐' ? COLORS.orange : COLORS.green) : entry.status === 'passed' || entry.status === 'shadow' ? COLORS.purple : COLORS.pink
+            const { mark, color } = markOf(entry)
             const seconds = entry.endedAt > 0 ? `${Math.max(1, Math.round((entry.endedAt - (entry.startedAt || entry.createdAt)) / 1000))}s` : ''
             return (
               <Box key={`rc-${entry.id}`} flexWrap="nowrap">
-                <Button key={`job-${entry.id}`} plain onPress={() => void change($, s => ({ ...s, view: 'job', jobId: entry.id }))}>
+                <Button key={`job-${entry.id}`} plain onPress={openJob(entry.id)}>
                   <Text color={color}>{`${mark} `}</Text>
                   <Text>{clip(`${kindTag(entry)}${entry.prompt}`, Math.max(20, Math.floor(width / 2) - 8))}</Text>
                 </Button>
@@ -1555,6 +1722,147 @@ export const register: Register = (on, options) => {
         ))}
       </Box>
     )
+
+    if (e.surface !== 'terminal') {
+      const rich = $.ui.resolve(e) as ElementTable<RichSurface>
+      const { Svg } = rich
+      // The phone draws no Select: its models stay buttons.
+      const Select = 'Select' in rich ? rich.Select : undefined
+      const room = Math.max(16, width - 24)
+      const labels = ['running', 'queued', 'waiting']
+      const pick = (key: string, label: string, isOn_: boolean, act: () => void) => (
+        <Button key={key} variant={isOn_ ? 'primary' : 'secondary'} onPress={act}>
+          {isOn_ ? `✓ ${label}` : label}
+        </Button>
+      )
+      const models = (field: 'judgeModel' | 'workerModel', chips: typeof JUDGE_CHIPS, title: string) => {
+        const options = chipsFor(chips, state.settings[field])
+        return (
+          <Box key={`row-${field}`} flexWrap="wrap" alignItems="center" columnGap="sm" rowGap="xs">
+            <Text dimColor>{title}</Text>
+            {Select !== undefined ? (
+              <Select
+                key={field === 'judgeModel' ? 'judge-model' : 'worker-model'}
+                options={options.map(([label, alias]) => ({ value: alias, label }))}
+                value={state.settings[field]}
+                onSelect={value => void setSetting($, field, value)}
+              />
+            ) : (
+              options.map(([label, alias]) =>
+                pick(`${field === 'judgeModel' ? 'judge' : 'worker'}-${alias}`, label, state.settings[field] === alias, () => void setSetting($, field, alias)),
+              )
+            )}
+          </Box>
+        )
+      }
+      const setting = (key: 'investigations' | 'draftJudging' | 'notifications', name: string, desc: string) => (
+        <Box key={`row-${key}`} flexWrap="nowrap" alignItems="center" columnGap="sm">
+          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+            <Text>{name}</Text>
+            <Text dimColor wrap="truncate-end">{desc}</Text>
+          </Box>
+          <Button key={`set-${key}`} variant={state.settings[key] ? 'primary' : 'secondary'} onPress={() => void toggleSetting($, key)}>
+            {state.settings[key] ? '● On' : '○ Off'}
+          </Button>
+        </Box>
+      )
+      const many = state.settings.maxConcurrent
+      const richPanel = !state.panelOpen ? null : (
+        <Box key="sk-panel" flexDirection="column" borderStyle="round" borderColor={COLORS.claude} paddingX={1} rowGap="sm" minWidth={0} flexShrink={1}>
+          <Box flexWrap="wrap" alignItems="center" columnGap="sm">
+            <Text bold color={COLORS.claude}>{'◆ Sidekick'}</Text>
+            <Box flexGrow={1} />
+            {version !== '' && <Text dimColor>{`v${version}`}</Text>}
+          </Box>
+          <Box key="row-mode" flexWrap="wrap" alignItems="center" columnGap="sm" rowGap="xs">
+            <Text dimColor>{'Mode'}</Text>
+            {pick('mode-off', 'Off', state.mode === 'off', () => void setMode($, 'off'))}
+            {pick('mode-shadow', 'Shadow', state.mode === 'shadow', () => void setMode($, 'shadow'))}
+            {pick('mode-auto', 'Auto', state.mode === 'auto', () => void setMode($, 'auto'))}
+          </Box>
+          {models('judgeModel', JUDGE_CHIPS, 'Judge')}
+          {models('workerModel', WORKER_CHIPS, 'Worker')}
+          {setting('investigations', 'Investigations', 'look into services, restart in place')}
+          {setting('draftJudging', 'Draft judging', 'judge as you type · ≈$0.0001 a pause')}
+          {setting('notifications', 'Notifications', 'a ping when a job finishes')}
+          <Box key="row-maxConcurrent" flexWrap="nowrap" alignItems="center" columnGap="sm">
+            <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+              <Text>{'Side by side'}</Text>
+              <Text dimColor wrap="truncate-end">{'chores in different repos at once'}</Text>
+            </Box>
+            <Button key="set-maxConcurrent-down" variant="secondary" onPress={() => void setSetting($, 'maxConcurrent', Math.max(1, many - 1))}>
+              {'−'}
+            </Button>
+            <Text>{`${many} at a time`}</Text>
+            <Button key="set-maxConcurrent-up" variant="secondary" onPress={() => void setSetting($, 'maxConcurrent', Math.min(4, many + 1))}>
+              {'+'}
+            </Button>
+          </Box>
+          <Box key="launch" flexWrap="wrap" gap="xs">
+            {launch
+              .filter(item => item.key !== 'launch-reset')
+              .map(item => (
+                <Button key={item.key} variant="secondary" onPress={item.act}>
+                  {`${item.glyph} ${item.label}`}
+                </Button>
+              ))}
+          </Box>
+          <Box flexWrap="wrap" justifyContent="flex-end">
+            <Button key="launch-reset" variant="secondary" onPress={() => void resetSettings($)}>
+              {'Reset to defaults'}
+            </Button>
+          </Box>
+        </Box>
+      )
+      const richCard =
+        lead === undefined || state.panelOpen ? null : (
+          <Box key="sk-card" flexDirection="column" borderStyle="round" borderColor={COLORS.line} paddingX={1} rowGap="xs">
+            <Box flexWrap="nowrap" alignItems="center" columnGap="sm">
+              <Text bold color={COLORS.orange}>{lead.kind === 'investigate' ? 'Investigating' : 'Chore'}</Text>
+              <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                <Text bold wrap="truncate-end">{clip(lead.prompt, room)}</Text>
+              </Box>
+              {running.length > 1 && <Text dimColor>{`+${running.length - 1}`}</Text>}
+              <Text dimColor>{`${ageOf(lead)}s · step ${lead.steps.length}`}</Text>
+            </Box>
+            <Text dimColor wrap="truncate-end">{clip(lead.steps.at(-1) ?? 'starting the worker…', room)}</Text>
+            <Box key="sk-progress">
+              <Svg alt="working" source={progressSvg(COLORS.orange)} isInteractive />
+            </Box>
+            <Text dimColor>{'Next: report back to Claude'}</Text>
+          </Box>
+        )
+      const richFolded = (
+        <Box key="sk-folded" flexWrap="wrap" alignItems="center" columnGap="sm" rowGap="xs">
+          <Text bold={isOn} dimColor={!isOn} color={isOn ? COLORS.claude : undefined}>{'◆ Sidekick'}</Text>
+          {richBadge(Text, state.mode)}
+          {state.isWarming && <Text color={COLORS.purple}>{'warming up…'}</Text>}
+          {isOn &&
+            counts.map((c, i) => (
+              <Text key={`c-${c.glyph}`} color={c.n > 0 ? c.color : undefined} dimColor={c.n === 0}>{`${c.glyph} ${c.n} ${labels[i]}`}</Text>
+            ))}
+          {isOn && <Text color={COLORS.green}>{`saved ${savedText}`}</Text>}
+          {isOn && <Text color={COLORS.blue}>{`cost ${costText}`}</Text>}
+          <Box flexGrow={1} />
+          <Button key="band-toggle" variant={state.panelOpen ? 'primary' : 'secondary'} onPress={() => void change($, s => ({ ...s, panelOpen: !s.panelOpen }))}>
+            {state.panelOpen ? 'Sidekick ▴' : 'Sidekick ▾'}
+          </Button>
+        </Box>
+      )
+      return (
+        <Box flexDirection="column" rowGap="xs">
+          {richCard}
+          {richPanel !== null && (
+            <Box key="sk-panel-row" flexWrap="nowrap">
+              <Box flexGrow={1} />
+              {richPanel}
+            </Box>
+          )}
+          {richFolded}
+          {below}
+        </Box>
+      )
+    }
 
     return (
       <Box flexDirection="column">

@@ -113,9 +113,9 @@ export function totals(rows: readonly HistoryRow[], from: number): Totals {
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
-export type Day = { label: string; jobs: number; isToday: boolean }
+export type Day = { label: string; jobs: number; isToday: boolean; savedUsd: number; costUsd: number }
 
-/** Finished jobs per day for the last `days` days, oldest first, today last. */
+/** Finished jobs, saving and spend per day for the last `days` days, oldest first, today last. */
 export function perDay(rows: readonly HistoryRow[], now: number, days = 7): Day[] {
   const today = startOfDay(now)
   return Array.from({ length: days }, (_, i) => {
@@ -125,8 +125,11 @@ export function perDay(rows: readonly HistoryRow[], now: number, days = 7): Day[
     const start = d.getTime()
     const next = new Date(start)
     next.setDate(next.getDate() + 1)
-    const jobs = rows.filter(r => r.at >= start && r.at < next.getTime() && (r.kind === 'chore' || r.kind === 'investigate') && isFinished(r)).length
-    return { label: WEEKDAYS[d.getDay()] ?? '', jobs, isToday: start === today }
+    const inDay = rows.filter(r => r.at >= start && r.at < next.getTime())
+    const jobs = inDay.filter(r => (r.kind === 'chore' || r.kind === 'investigate') && isFinished(r)).length
+    const savedUsd = inDay.reduce((n, r) => n + r.savedUsd, 0)
+    const costUsd = inDay.reduce((n, r) => n + r.judgeUsd + r.workerUsd, 0)
+    return { label: WEEKDAYS[d.getDay()] ?? '', jobs, isToday: start === today, savedUsd, costUsd }
   })
 }
 
