@@ -59,6 +59,8 @@ async function change($: EngineInterface, fn: (state: SidekickState) => Sidekick
 const PANE = 'sidekick'
 /** Rows asked for inline, past the default third, so a running assist's command and buttons show. */
 const PANE_ROWS = 28
+/** The control panel's width: room for a setting's name, its note and its pill on one row. */
+const PANEL_WIDTH = 72
 // Raised from 1.8 s: a cold or busy judge (2-4 s measured) sent chores to the main session.
 // Draft judging still makes the usual wait at Enter close to zero.
 const JUDGE_TIMEOUT_MS = 5_000
@@ -1351,7 +1353,9 @@ export const register: Register = (on, options) => {
       ) : null
 
     // ── the control panel (image 3)
-    const inner = Math.max(20, width - 4)
+    // A popup, not a sheet: a fixed width, anchored above the toggle at the right end of the line.
+    const panelW = Math.min(width, PANEL_WIDTH)
+    const inner = Math.max(20, panelW - 4)
     // A chip and the gap after it, as siblings in the row: wrapped in a Box of its own, the last
     // chip's colour stretched to the row's end.
     const chip = (key: string, label: string, isOn_: boolean, color: string, act: () => void) => [
@@ -1412,7 +1416,7 @@ export const register: Register = (on, options) => {
     // LAUNCH on one row of short labels (12).
     const fit = maxRows >= 23 ? 'full' : maxRows >= 18 ? 'roomy' : 'tight'
     const isTight = fit === 'tight'
-    const perRow = isTight ? launch.length : width >= 60 ? 2 : 1
+    const perRow = isTight ? launch.length : panelW >= 60 ? 2 : 1
     const launchRows = Array.from({ length: Math.ceil(launch.length / perRow) }, (_, r) => launch.slice(r * perRow, r * perRow + perRow))
     const showNow = fit === 'full'
     const shortLabel: Record<string, string> = {
@@ -1423,7 +1427,7 @@ export const register: Register = (on, options) => {
       'launch-reset': 'Reset',
     }
     const panel = !state.panelOpen ? null : (
-      <Box key="sk-panel" flexDirection="column" borderStyle="round" borderColor={COLORS.claude} paddingX={1}>
+      <Box key="sk-panel" flexDirection="column" borderStyle="round" borderColor={COLORS.claude} paddingX={1} width={panelW}>
         <Box flexWrap="nowrap">
           <Text color={COLORS.claude}>{'◆  '}</Text>
           <Text bold color={COLORS.orange}>{spaced('SIDEKICK')}</Text>
@@ -1457,7 +1461,7 @@ export const register: Register = (on, options) => {
         </Box>
         {!isTight && rule('r1', 'SETTINGS')}
         {settingRow('investigations', 'Investigations', 'look into services, restart in place', toggle('investigations'))}
-        {settingRow('draftJudging', 'Draft judging', 'judge while you type · ≈$0.0001 a pause', toggle('draftJudging'))}
+        {settingRow('draftJudging', 'Draft judging', 'judge as you type · ≈$0.0001 a pause', toggle('draftJudging'))}
         {settingRow('notifications', 'Notifications', 'a ping when a job finishes', toggle('notifications'))}
         {settingRow(
           'maxConcurrent',
@@ -1512,7 +1516,12 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column">
         {card}
-        {panel}
+        {panel !== null && (
+          <Box key="sk-panel-row" flexWrap="nowrap">
+            <Box flexGrow={1} />
+            {panel}
+          </Box>
+        )}
         {folded}
         {below}
       </Box>
