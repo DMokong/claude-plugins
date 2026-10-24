@@ -1226,6 +1226,13 @@ test('on the desktop, nothing in the band, panel or dashboard can run past its s
   await until($, x => x.entries[0]?.status === 'done')
   // Tiles, the running job's sweep, where it went and the week: real drawings, not cells.
   expect(seen).toEqual({ svg: 6, card: true, panel: true })
+  // The open panel fits the space above the prompt: four rows, never a scroll.
+  const band = await $.ui.mount({ ...(BAND(100, 40) as object), surface: 'desktop' } as never)
+  await band.press({ key: 'band-toggle' })
+  const tree = (await (band as unknown as { drawn: () => Promise<unknown> }).drawn()) as Node
+  const find = (n: Node): Node | undefined => (n.props?.key === 'sk-panel' ? n : (n.children ?? []).filter((c): c is Node => typeof c !== 'string').map(find).find(x => x !== undefined))
+  expect(find(tree)?.children?.length).toBe(4)
+  await band.unmount()
   expect(over).toEqual([])
 })
 
@@ -1259,6 +1266,6 @@ test('on the desktop, the models are dropdowns and side by side is a stepper', a
   await ui.press({ key: 'set-maxConcurrent-down' })
   expect((await state($)).settings.maxConcurrent).toBe(Math.max(1, Math.min(4, many + 1) - 2))
   // The settings are buttons that say their state.
-  expect((await ui.find({ key: 'set-draftJudging' }) as { text?: string })?.text).toBe('● On')
+  expect((await ui.find({ key: 'set-draftJudging' }) as { text?: string })?.text).toBe('● Draft judging')
   await ui.unmount()
 })

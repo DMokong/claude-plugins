@@ -1735,82 +1735,64 @@ export const register: Register = (on, options) => {
           {isOn_ ? `✓ ${label}` : label}
         </Button>
       )
+      // The space above the prompt is short: the panel packs into a few rows, so nothing needs a scroll.
       const models = (field: 'judgeModel' | 'workerModel', chips: typeof JUDGE_CHIPS, title: string) => {
         const options = chipsFor(chips, state.settings[field])
-        return (
-          <Box key={`row-${field}`} flexWrap="wrap" alignItems="center" columnGap="sm" rowGap="xs">
-            <Text dimColor>{title}</Text>
-            {Select !== undefined ? (
-              <Select
-                key={field === 'judgeModel' ? 'judge-model' : 'worker-model'}
-                options={options.map(([label, alias]) => ({ value: alias, label }))}
-                value={state.settings[field]}
-                onSelect={value => void setSetting($, field, value)}
-              />
-            ) : (
-              options.map(([label, alias]) =>
-                pick(`${field === 'judgeModel' ? 'judge' : 'worker'}-${alias}`, label, state.settings[field] === alias, () => void setSetting($, field, alias)),
-              )
-            )}
-          </Box>
-        )
+        return [
+          <Text key={`label-${field}`} dimColor>{title}</Text>,
+          Select !== undefined ? (
+            <Select
+              key={field === 'judgeModel' ? 'judge-model' : 'worker-model'}
+              options={options.map(([label, alias]) => ({ value: alias, label }))}
+              value={state.settings[field]}
+              onSelect={value => void setSetting($, field, value)}
+            />
+          ) : (
+            options.map(([label, alias]) =>
+              pick(`${field === 'judgeModel' ? 'judge' : 'worker'}-${alias}`, label, state.settings[field] === alias, () => void setSetting($, field, alias)),
+            )
+          ),
+        ]
       }
-      const setting = (key: 'investigations' | 'draftJudging' | 'notifications', name: string, desc: string) => (
-        <Box key={`row-${key}`} flexWrap="nowrap" alignItems="center" columnGap="sm">
-          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
-            <Text>{name}</Text>
-            <Text dimColor wrap="truncate-end">{desc}</Text>
-          </Box>
-          <Button key={`set-${key}`} variant={state.settings[key] ? 'primary' : 'secondary'} onPress={() => void toggleSetting($, key)}>
-            {state.settings[key] ? '● On' : '○ Off'}
-          </Button>
-        </Box>
+      const setting = (key: 'investigations' | 'draftJudging' | 'notifications', name: string) => (
+        <Button key={`set-${key}`} variant={state.settings[key] ? 'primary' : 'secondary'} onPress={() => void toggleSetting($, key)}>
+          {`${state.settings[key] ? '●' : '○'} ${name}`}
+        </Button>
       )
       const many = state.settings.maxConcurrent
       const richPanel = !state.panelOpen ? null : (
-        <Box key="sk-panel" flexDirection="column" borderStyle="round" borderColor={COLORS.claude} paddingX={1} rowGap="sm" minWidth={0} flexShrink={1}>
-          <Box flexWrap="wrap" alignItems="center" columnGap="sm">
-            <Text bold color={COLORS.claude}>{'◆ Sidekick'}</Text>
-            <Box flexGrow={1} />
-            {version !== '' && <Text dimColor>{`v${version}`}</Text>}
-          </Box>
+        <Box key="sk-panel" flexDirection="column" borderStyle="round" borderColor={COLORS.claude} paddingX={1} rowGap="xs" minWidth={0} flexShrink={1}>
           <Box key="row-mode" flexWrap="wrap" alignItems="center" columnGap="sm" rowGap="xs">
-            <Text dimColor>{'Mode'}</Text>
+            <Text bold color={COLORS.claude}>{'◆ Sidekick'}</Text>
             {pick('mode-off', 'Off', state.mode === 'off', () => void setMode($, 'off'))}
             {pick('mode-shadow', 'Shadow', state.mode === 'shadow', () => void setMode($, 'shadow'))}
             {pick('mode-auto', 'Auto', state.mode === 'auto', () => void setMode($, 'auto'))}
+            <Box flexGrow={1} />
+            {version !== '' && <Text dimColor>{`v${version}`}</Text>}
           </Box>
-          {models('judgeModel', JUDGE_CHIPS, 'Judge')}
-          {models('workerModel', WORKER_CHIPS, 'Worker')}
-          {setting('investigations', 'Investigations', 'look into services, restart in place')}
-          {setting('draftJudging', 'Draft judging', 'judge as you type · ≈$0.0001 a pause')}
-          {setting('notifications', 'Notifications', 'a ping when a job finishes')}
-          <Box key="row-maxConcurrent" flexWrap="nowrap" alignItems="center" columnGap="sm">
-            <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
-              <Text>{'Side by side'}</Text>
-              <Text dimColor wrap="truncate-end">{'chores in different repos at once'}</Text>
-            </Box>
+          <Box key="row-models" flexWrap="wrap" alignItems="center" columnGap="sm" rowGap="xs">
+            {models('judgeModel', JUDGE_CHIPS, 'Judge')}
+            {models('workerModel', WORKER_CHIPS, 'Worker')}
+            <Text dimColor>{'Side by side'}</Text>
             <Button key="set-maxConcurrent-down" variant="secondary" onPress={() => void setSetting($, 'maxConcurrent', Math.max(1, many - 1))}>
               {'−'}
             </Button>
-            <Text>{`${many} at a time`}</Text>
+            <Text>{String(many)}</Text>
             <Button key="set-maxConcurrent-up" variant="secondary" onPress={() => void setSetting($, 'maxConcurrent', Math.min(4, many + 1))}>
               {'+'}
             </Button>
           </Box>
-          <Box key="launch" flexWrap="wrap" gap="xs">
-            {launch
-              .filter(item => item.key !== 'launch-reset')
-              .map(item => (
-                <Button key={item.key} variant="secondary" onPress={item.act}>
-                  {`${item.glyph} ${item.label}`}
-                </Button>
-              ))}
+          <Box key="row-settings" flexWrap="wrap" alignItems="center" gap="xs">
+            {setting('investigations', 'Investigations')}
+            {setting('draftJudging', 'Draft judging')}
+            {setting('notifications', 'Notifications')}
           </Box>
-          <Box flexWrap="wrap" justifyContent="flex-end">
-            <Button key="launch-reset" variant="secondary" onPress={() => void resetSettings($)}>
-              {'Reset to defaults'}
-            </Button>
+          <Box key="launch" flexWrap="wrap" alignItems="center" gap="xs">
+            {launch.map(item => (
+              <Button key={item.key} variant="secondary" onPress={item.act}>
+                {`${item.glyph} ${item.key === 'launch-reset' ? 'Reset' : item.label}`}
+              </Button>
+            ))}
           </Box>
         </Box>
       )
