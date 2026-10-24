@@ -11,7 +11,9 @@ export const JUDGE_CHIPS: readonly (readonly [string, string])[] = [
   ['Haiku 5.5', 'haiku'],
   ['Sonnet 5.5', 'sonnet'],
 ]
-export const WORKER_CHIPS: readonly (readonly [string, string])[] = [...JUDGE_CHIPS, ['Opus 5.5', 'opus']]
+// No Opus: a worker exists to be cheaper than the main session, and an Opus worker isn't. A
+// chore worth Opus belongs in the main session.
+export const WORKER_CHIPS: readonly (readonly [string, string])[] = JUDGE_CHIPS
 
 /** The settings before any change in the panel: the plugin's options, else the defaults. */
 export function defaultsFrom(options: Readonly<Record<string, unknown>>): Settings {

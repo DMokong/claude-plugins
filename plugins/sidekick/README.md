@@ -295,7 +295,7 @@ starting to type: it never stands between you and the prompt.
 | Row | Does |
 |---|---|
 | **MODE** | Off / Shadow / Auto for this session (see [Modes](#modes)) |
-| **JUDGE**, **WORKER** | Which model judges and which does the work |
+| **JUDGE**, **WORKER** | Which model judges and which does the work: Haiku or Sonnet. No Opus worker: work worth Opus belongs in the main session |
 | **Investigations** | Whether "look into it" messages go to the sidekick (see [Looking into things](#looking-into-things)) |
 | **Draft judging** | Judge while you type, so Enter is instant. Each pause costs about $0.0001, which is the small cost that ticks up while you type. Off: messages are judged when sent, within 5 s |
 | **Notifications** | A system notification when a job finishes; the chat line and band say it either way |
@@ -310,7 +310,7 @@ change made in one session reaches your other open sessions with their next mess
 
 The panel fits the room it has. On a short terminal (the band gets at most half the rows), it drops
 its section rules and NOW and packs LAUNCH into short labels. On a narrow one it drops the settings'
-notes; narrower still, the model chips read `Haiku`, `Sonnet`, `Opus` and the pills `On` / `Off` /
+notes; narrower still, the model chips read `Haiku` and `Sonnet` and the pills `On` / `Off` /
 `1×`. Every control stays.
 
 ---
@@ -619,7 +619,8 @@ and rendered to SVG.
 
 | Version | |
 |---|---|
-| **0.4.3** | The dashboard fits a narrow dock: its header moves the tabs to a second row (models and version give way first) instead of splitting words, and the bars and the 7-day chart shrink their labels and columns. Every one-line row is tested to fit from 28 to 120 columns. |
+| **0.4.4** | The worker is offered Haiku and Sonnet only. An Opus worker costs what the main session does, so that work belongs there. |
+| 0.4.3 | The dashboard fits a narrow dock: its header moves the tabs to a second row (models and version give way first) instead of splitting words, and the bars and the 7-day chart shrink their labels and columns. Every one-line row is tested to fit from 28 to 120 columns. |
 | 0.4.2 | The control panel picks its layout from the room it has: wide keeps every note, compact drops the notes and packs the shortcuts, mini also shortens the model chips and pills. No row runs over at any width. |
 | 0.4.1 | The control panel pops up from the right end of the line, above its button, at a fixed width (72 columns), instead of spanning the whole band. |
 | 0.4.0 | **A control panel and a dashboard.** The band folds to one line (shown even while off) and opens into a control panel: mode, judge and worker models, investigations, draft judging, notifications and side-by-side as live switches that stick across sessions, plus shortcuts. A live card shows the running job. The pane is now a dashboard: DONE / SAVED / COST tiles in big digits for the session, today or the week, where the work went, the last 7 days, and recent jobs that open into their details. A history of finished jobs is kept 35 days. |
