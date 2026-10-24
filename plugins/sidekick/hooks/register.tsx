@@ -1012,17 +1012,38 @@ export const register: Register = (on, options) => {
         <Text color={COLORS.yellow}>{'← back'}</Text>
       </Button>
     )
-    const header = (right: unknown) => (
-      <Box key="hdr" borderStyle="round" borderColor={COLORS.line} paddingX={1} flexWrap="nowrap">
-        <Text bold color={COLORS.claude}>{'✦ SIDEKICK  '}</Text>
-        {modePill}
-        <Text dimColor>{`  ${state.settings.judgeModel} · ${state.settings.workerModel}`}</Text>
-        {version !== '' && <Text dimColor>{'  '}</Text>}
-        {version !== '' && <Text dimColor>{`v${version}`}</Text>}
-        <Box flexGrow={1} />
-        {right as never}
-      </Box>
-    )
+    // The header fits the pane: one row when it all fits, else the right-hand controls on a second
+    // row; the models and the version give way first. `rightWidth` is what `right` draws, in cells.
+    const header = (right: unknown, rightWidth: number) => {
+      const inner = width - 4
+      const title = '✦ SIDEKICK  '
+      const pillWidth = state.mode === 'auto' ? 8 : state.mode === 'shadow' ? 10 : 5
+      const models = `  ${state.settings.judgeModel} · ${state.settings.workerModel}`
+      const ver = version !== '' ? `  v${version}` : ''
+      const core = title.length + pillWidth
+      const isOneRow = core + rightWidth + 1 <= inner
+      const room = inner - core - (isOneRow ? rightWidth + 1 : 0)
+      const showModels = models.length <= room
+      const showVersion = showModels && models.length + ver.length <= room
+      return (
+        <Box key="hdr" flexDirection="column" borderStyle="round" borderColor={COLORS.line} paddingX={1}>
+          <Box flexWrap="nowrap">
+            <Text bold color={COLORS.claude}>{title}</Text>
+            {modePill}
+            {showModels && <Text dimColor>{models}</Text>}
+            {showVersion && <Text dimColor>{ver}</Text>}
+            <Box flexGrow={1} />
+            {isOneRow && (right as never)}
+          </Box>
+          {!isOneRow && (
+            <Box flexWrap="nowrap">
+              <Box flexGrow={1} />
+              {right as never}
+            </Box>
+          )}
+        </Box>
+      )
+    }
 
     // ── one job, in words: everything it did, and what can be done with it
     const job = state.view === 'job' ? state.entries.find(x => x.id === state.jobId) : undefined
@@ -1031,7 +1052,7 @@ export const register: Register = (on, options) => {
       const color = job.status === 'done' ? COLORS.green : job.status === 'failed' || job.status === 'stopped' ? COLORS.pink : COLORS.yellow
       return (
         <Box flexDirection="column">
-          {header(back)}
+          {header(back, 6)}
           <Box flexWrap="nowrap" marginTop={1}>
             <Text bold color={color}>{`${STATUS_MARK[job.status]} `}</Text>
             <Text bold>{clip(`${kindTag(job)}${job.prompt}`, width - 24)}</Text>
@@ -1058,7 +1079,7 @@ export const register: Register = (on, options) => {
     if (state.view === 'learned') {
       return (
         <Box flexDirection="column">
-          {header(back)}
+          {header(back, 6)}
           {rule('lh', 'LEARNED', `${state.learned.length} stored`)}
           {learned.length === 0 && <Text dimColor>{"Nothing yet. Press should've been sidekick on a job that went to Claude."}</Text>}
           {learned.map(m => (
@@ -1080,15 +1101,19 @@ export const register: Register = (on, options) => {
       state.tab === 'session'
         ? { ...totals(rows.filter(r => ids.has(r.id)), 0), costUsd: state.spend.usd }
         : totals(rows, state.tab === 'today' ? startOfDay(now) : weekStart(now))
+    const isShortTabs = width - 4 < 30
+    const tabName = (tab: 'session' | 'today' | 'week') => (isShortTabs ? { session: 'Sess', today: 'Day', week: 'Wk' }[tab] : `${tab[0]!.toUpperCase()}${tab.slice(1)}`)
     const tabs = (['session', 'today', 'week'] as const).map(tab => (
       <Button key={`tab-${tab}`} plain onPress={() => void change($, s => ({ ...s, tab }))}>
         {state.tab === tab ? (
-          <Text bold backgroundColor={COLORS.yellow} color={COLORS.ink}>{` ${tab[0]!.toUpperCase()}${tab.slice(1)} `}</Text>
+          <Text bold backgroundColor={COLORS.yellow} color={COLORS.ink}>{` ${tabName(tab)} `}</Text>
         ) : (
-          <Text dimColor>{` ${tab[0]!.toUpperCase()}${tab.slice(1)} `}</Text>
+          <Text dimColor>{` ${tabName(tab)} `}</Text>
         )}
       </Button>
     ))
+    const learnedText = `✎ ${state.learned.length}  `
+    const tabsWidth = learnedText.length + (['session', 'today', 'week'] as const).reduce((n, t) => n + tabName(t).length + 2, 0)
     // Three tiles side by side need room for `$4.18` in segment digits: 18 cells inside each.
     const isStacked = width < 68
     const isPlain = width < 40
@@ -1114,29 +1139,36 @@ export const register: Register = (on, options) => {
       { glyph: '◷', n: queued.length, label: 'queued', color: COLORS.blue },
       { glyph: '⏸', n: state.waiting.length, label: 'waiting', color: COLORS.yellow },
     ]
-    const barW = Math.max(6, Math.min(30, width - 34))
+    // The bars fit the pane: narrow, the labels shorten and the cost column goes before the bar does.
+    const isNarrowBars = width < 44
+    const labelW = isNarrowBars ? 10 : 16
+    const costW = width >= 36 ? 9 : 0
+    const barW = Math.max(3, Math.min(30, width - 2 - labelW - 5 - costW))
     const where = [
       { key: 'chores', label: 'chores', n: span.chores, cost: span.choreUsd, color: COLORS.yellow },
-      { key: 'looks', label: 'investigations', n: span.looks, cost: span.lookUsd, color: COLORS.pink },
+      { key: 'looks', label: isNarrowBars ? 'looks' : 'investigations', n: span.looks, cost: span.lookUsd, color: COLORS.pink },
       { key: 'claude', label: 'to Claude', n: span.toClaude, cost: span.claudeUsd, color: COLORS.purple },
-      { key: 'drafts', label: 'draft judging', n: span.drafts, cost: span.draftUsd, color: '#8b93a7' },
+      { key: 'drafts', label: isNarrowBars ? 'drafts' : 'draft judging', n: span.drafts, cost: span.draftUsd, color: '#8b93a7' },
     ]
     const top = Math.max(...where.map(w => w.n))
     const days = perDay(rows, now)
     const levels = dayLevels(days.map(d => d.jobs))
     const best = bestDay(days)
     const days_ = streak(days)
-    const colW = Math.max(5, Math.min(9, Math.floor((width - 2) / 7)))
+    // Seven columns in the room there is: the blocks narrow first, then the day names shorten.
+    const colW = Math.max(3, Math.min(9, Math.floor(width / 7)))
+    const gapW = colW >= 5 ? 2 : 1
     const recent = state.entries.filter(x => !ACTIVE.includes(x.status)).slice(0, 6)
     return (
       <Box flexDirection="column">
         {header(
           <Box key="hdr-r" flexWrap="nowrap">
             <Button key="view-learned" plain onPress={() => void change($, s => ({ ...s, view: 'learned' }))}>
-              <Text color={COLORS.purple}>{`✎ ${state.learned.length}  `}</Text>
+              <Text color={COLORS.purple}>{learnedText}</Text>
             </Button>
             {tabs}
           </Box>,
+          tabsWidth,
         )}
         <Box flexDirection={isStacked ? 'column' : 'row'} marginTop={1}>
           {tile('tile-done', 'DONE', String(span.done), COLORS.yellow, `${span.chores} chores · ${span.looks} looks`)}
@@ -1148,7 +1180,7 @@ export const register: Register = (on, options) => {
             <Box key={`lc-${c.label}`} flexWrap="nowrap">
               <Text color={c.n > 0 ? c.color : COLORS.dim}>{`${c.glyph} `}</Text>
               <Text bold>{String(c.n)}</Text>
-              <Text dimColor>{` ${c.label}   `}</Text>
+              <Text dimColor>{width >= 60 ? ` ${c.label}   ` : '   '}</Text>
             </Box>
           ))}
           <Text dimColor>{'·  '}</Text>
@@ -1189,18 +1221,18 @@ export const register: Register = (on, options) => {
           </Box>
         ))}
 
-        {rule('h-where', 'WHERE IT WENT', 'jobs     cost')}
+        {rule('h-where', 'WHERE IT WENT', costW > 0 ? 'jobs     cost' : 'jobs')}
         {where.map(w => {
           const cells = barCells(w.n, top, barW)
           return (
             <Box key={`w-${w.key}`} flexWrap="nowrap">
               <Text color={w.color}>{'● '}</Text>
-              <Text>{w.label.padEnd(16)}</Text>
+              <Text>{w.label.padEnd(labelW)}</Text>
               <Text color={w.color}>{'━'.repeat(cells.filled)}</Text>
               <Text color={COLORS.line}>{'─'.repeat(cells.empty)}</Text>
               <Box flexGrow={1} />
               <Text bold>{String(w.n).padStart(5)}</Text>
-              <Text dimColor>{` ${usd(w.cost).padStart(8)}`}</Text>
+              {costW > 0 && <Text dimColor>{` ${usd(w.cost).padStart(8)}`}</Text>}
             </Box>
           )
         })}
@@ -1210,7 +1242,7 @@ export const register: Register = (on, options) => {
           <Box key={`d-${level}`} flexWrap="nowrap">
             {levels.map((l, i) => (
               <Text key={`d-${level}-${i}`} color={COLORS.blue}>
-                {(l >= level ? '▆'.repeat(colW - 2) : ' '.repeat(colW - 2)) + '  '}
+                {(l >= level ? '▆'.repeat(colW - gapW) : ' '.repeat(colW - gapW)) + ' '.repeat(gapW)}
               </Text>
             ))}
           </Box>
@@ -1218,7 +1250,7 @@ export const register: Register = (on, options) => {
         <Box flexWrap="nowrap">
           {days.map((d, i) => (
             <Text key={`dl-${i}`} bold={d.isToday} dimColor={!d.isToday}>
-              {d.label.padEnd(colW)}
+              {d.label.slice(0, colW >= 5 ? 3 : colW - 1).padEnd(colW)}
             </Text>
           ))}
         </Box>

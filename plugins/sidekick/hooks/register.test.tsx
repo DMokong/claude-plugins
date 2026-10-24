@@ -451,7 +451,7 @@ test('the pane draws the assist with its buttons on every surface', async ($, on
     expect(await ui.find({ type: 'Text', text: /LAST 7 DAYS/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Best day: today, 1 job/ })).toBeDefined()
     // The loaded version, read from the manifest, sits quietly in the header.
-    expect((await ui.find({ type: 'Text', text: /^v9\.9\.9$/ }))?.text).toBe('v9.9.9')
+    expect((await ui.find({ type: 'Text', text: /v9\.9\.9$/ }))?.text?.trim()).toBe('v9.9.9')
     expect(await ui.find({ type: 'Text', text: /caching saved/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /commit and push/ })).toBeDefined()
     // Its words are one press away.
@@ -1062,4 +1062,64 @@ test('a narrow panel drops the notes and shortens chips; a wide one keeps them',
   expect(await mini.find({ type: 'Text', text: /^ Haiku $/ })).toBeDefined()
   expect(await mini.find({ type: 'Text', text: /^ 1× $/ })).toBeDefined()
   await mini.unmount()
+})
+
+test("the dashboard's header fits the pane: one row when it fits, the tabs on a second when not", async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  for (const columns of [120, 80, 60, 45, 40, 34, 28]) {
+    const ui = await $.ui.mount({
+      plugin: 'sidekick',
+      surface: 'terminal',
+      component: 'Pane',
+      requestId: 'sidekick',
+      props: { title: 'Sidekick', isFocused: false, bodyColumns: columns, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
+    } as never)
+    const tree = (await (ui as unknown as { drawn: () => Promise<unknown> }).drawn()) as Node
+    const find = (n: Node): Node | undefined =>
+      n.props?.key === 'hdr' ? n : (n.children ?? []).filter((c): c is Node => typeof c !== 'string').map(find).find(x => x !== undefined)
+    const hdr = find(tree)!
+    const rows = (hdr.children ?? []).filter((c): c is Node => typeof c !== 'string')
+    for (const row of rows) expect(textOf(row).length).toBeLessThanOrEqual(columns - 4)
+    // The title is never split: it stays whole on its row.
+    expect(textOf(rows[0]!)).toContain('✦ SIDEKICK')
+    expect(rows.length).toBe(columns >= 60 ? 1 : 2)
+    for (const key of ['tab-session', 'tab-today', 'tab-week', 'view-learned']) expect(await ui.find({ key })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('every one-line row of the dashboard fits its pane, at every width', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  world(on, { judge: MECHANICAL, worker: DONE, workerGate: gate })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'commit and push all of the documentation changes please', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'running')
+  const over: string[] = []
+  for (const columns of [120, 80, 68, 60, 50, 45, 40, 34, 28]) {
+    const ui = await $.ui.mount({
+      plugin: 'sidekick',
+      surface: 'terminal',
+      component: 'Pane',
+      requestId: 'sidekick',
+      props: { title: 'Sidekick', isFocused: false, bodyColumns: columns, placement: 'dock', scroll: { offset: 0, bodyRows: 80 }, view: {} },
+    } as never)
+    const tree = (await (ui as unknown as { drawn: () => Promise<unknown> }).drawn()) as Node
+    // A bordered box loses 4 cells (border and padding) for what is inside it.
+    const walk = (n: Node, room: number) => {
+      const inside = n.props?.borderStyle !== undefined ? room - 4 : room
+      if (n.type === 'Box' && n.props?.flexWrap === 'nowrap' && textOf(n).length > room) over.push(`${columns}: ${textOf(n)} (${textOf(n).length} > ${room})`)
+      for (const c of n.children ?? []) if (typeof c !== 'string') walk(c, inside)
+    }
+    walk(tree, columns)
+    await ui.unmount()
+  }
+  open()
+  await until($, x => x.entries[0]?.status === 'done')
+  expect(over).toEqual([])
 })

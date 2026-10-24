@@ -148,7 +148,7 @@
       "name": "sidekick",
       "source": "./plugins/sidekick",
       "description": "Per-session sidekick mod: a cheap judge reads each message you type and hands mechanical chores (git, bd) and quick first-pass investigations (logs, job state, health, restarts) to a separate lean worker session, returning a one-line outcome and a handoff note. Never loses work: destructive commands are blocked in the tool layer.",
-      "version": "0.4.2",
+      "version": "0.4.3",
       "author": {
         "name": "Dustin Cheng"
       },
