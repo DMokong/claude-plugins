@@ -30,6 +30,7 @@ opens this control panel in place: mode, models, settings and shortcuts, all one
 - [What it will and won't do](#what-it-will-and-wont-do)
 - [Looking into things](#looking-into-things)
 - [The band and the control panel](#the-band-and-the-control-panel)
+- [On the desktop app, VS Code and the phone](#on-the-desktop-app-vs-code-and-the-phone)
 - [The dashboard](#the-dashboard)
 - [Modes](#modes)
 - [Typing while it works](#typing-while-it-works)
@@ -312,6 +313,25 @@ The panel fits the room it has. On a short terminal (the band gets at most half 
 its section rules and NOW and packs LAUNCH into short labels. On a narrow one it drops the settings'
 notes; narrower still, the model chips read `Haiku` and `Sonnet` and the pills `On` / `Off` /
 `1×`. Every control stays.
+
+---
+
+## On the desktop app, VS Code and the phone
+
+These draw real graphics, so the sidekick draws for them instead of imitating a terminal:
+
+- **The line above the prompt** is a mode badge, the counts in words, saved and cost, and a native
+  **Sidekick ▾** button.
+- **The live job card** shows the job, its latest command and an animated progress sweep.
+- **The control panel** uses native controls: a button per mode (the chosen one marked ✓),
+  dropdowns for the judge and worker models (buttons on the phone, which has no dropdowns), On / Off
+  buttons for the settings, and a − / + stepper for side by side.
+- **The dashboard** has DONE / SAVED / COST tiles with a 7-day trend line, one bar for where the
+  cost went, and a 7-day chart; hover a bar or a day for its numbers. Each recent job is a card, and
+  a job's report shows as formatted text.
+
+Every row wraps or truncates rather than running past the pane, and each drawing scales down to fit
+its slot. Figures deepen on a light theme so they stay readable.
 
 ---
 
@@ -619,7 +639,9 @@ and rendered to SVG.
 
 | Version | |
 |---|---|
-| **0.4.4** | The worker is offered Haiku and Sonnet only. An Opus worker costs what the main session does, so that work belongs there. |
+| **0.5.0** | **A real desktop view.** On the desktop app, VS Code and the phone the band, the control panel and the dashboard are drawn natively instead of in terminal characters: SVG tiles with trend lines, a where-it-went bar and a 7-day chart with tooltips, dropdowns for the models, a stepper for side by side, and job reports as formatted text. Nothing has a fixed width there, and a test checks every row at widths from 24 to 160. The terminal look is unchanged. |
+| 0.4.5 | On the desktop app, the control panel marks the chosen mode, judge and worker with a check and the primary button: the desktop draws its own buttons, so the chip colours never showed there. |
+| 0.4.4 | The worker is offered Haiku and Sonnet only. An Opus worker costs what the main session does, so that work belongs there. |
 | 0.4.3 | The dashboard fits a narrow dock: its header moves the tabs to a second row (models and version give way first) instead of splitting words, and the bars and the 7-day chart shrink their labels and columns. Every one-line row is tested to fit from 28 to 120 columns. |
 | 0.4.2 | The control panel picks its layout from the room it has: wide keeps every note, compact drops the notes and packs the shortcuts, mini also shortens the model chips and pills. No row runs over at any width. |
 | 0.4.1 | The control panel pops up from the right end of the line, above its button, at a fixed width (72 columns), instead of spanning the whole band. |
