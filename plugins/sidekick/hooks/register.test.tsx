@@ -542,12 +542,16 @@ test('on the desktop, the chosen mode and models are marked without relying on c
   await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
   const ui = await $.ui.mount({ ...(BAND() as object), surface: 'desktop' } as never)
   await ui.press({ key: 'band-toggle' })
-  const labelOf = (key: string) => ui.find({ key }).then(x => (x as { text?: string } | undefined)?.text)
-  expect(await labelOf('mode-auto')).toBe('✓ Auto')
-  expect(await labelOf('mode-off')).toBe('Off')
-  expect((await ui.find({ key: 'judge-model' }) as { props?: { value?: string } })?.props?.value).toBe('haiku')
-  expect((await ui.find({ key: 'mode-auto' }) as { props?: { variant?: string } })?.props?.variant).toBe('primary')
-  expect((await ui.find({ key: 'mode-off' }) as { props?: { variant?: string } })?.props?.variant).toBe('secondary')
+  const valueOf = (key: string) => ui.find({ key }).then(x => (x as { props?: { value?: string } } | undefined)?.props?.value)
+  expect(await valueOf('mode-select')).toBe('auto')
+  expect(await valueOf('judge-model')).toBe('haiku')
+  // A pick in the mode dropdown changes the session's mode.
+  await (ui as unknown as { select: (q: { key: string; value: string }) => Promise<unknown> }).select({ key: 'mode-select', value: 'shadow' })
+  expect((await state($)).mode).toBe('shadow')
+  // The toolbox is small type: footnote text, inside the buttons too.
+  const drawn = JSON.stringify(await (ui as unknown as { drawn: () => Promise<unknown> }).drawn())
+  expect(drawn).toMatch(/"type":"Button"[^]*?"size":"footnote"/)
+  expect(drawn).not.toMatch(/"size":"body"/)
   await ui.unmount()
 })
 
@@ -1226,12 +1230,12 @@ test('on the desktop, nothing in the band, panel or dashboard can run past its s
   await until($, x => x.entries[0]?.status === 'done')
   // Tiles, the running job's sweep, where it went and the week: real drawings, not cells.
   expect(seen).toEqual({ svg: 6, card: true, panel: true })
-  // The open panel fits the space above the prompt: four rows, never a scroll.
+  // The open panel fits the space above the prompt: two rows of small type, never a scroll.
   const band = await $.ui.mount({ ...(BAND(100, 40) as object), surface: 'desktop' } as never)
   await band.press({ key: 'band-toggle' })
   const tree = (await (band as unknown as { drawn: () => Promise<unknown> }).drawn()) as Node
   const find = (n: Node): Node | undefined => (n.props?.key === 'sk-panel' ? n : (n.children ?? []).filter((c): c is Node => typeof c !== 'string').map(find).find(x => x !== undefined))
-  expect(find(tree)?.children?.length).toBe(4)
+  expect(find(tree)?.children?.length).toBe(2)
   await band.unmount()
   expect(over).toEqual([])
 })
@@ -1267,5 +1271,7 @@ test('on the desktop, the models are dropdowns and side by side is a stepper', a
   expect((await state($)).settings.maxConcurrent).toBe(Math.max(1, Math.min(4, many + 1) - 2))
   // The settings are buttons that say their state.
   expect((await ui.find({ key: 'set-draftJudging' }) as { text?: string })?.text).toBe('● Draft judging')
+  await ui.press({ key: 'set-draftJudging' })
+  expect((await ui.find({ key: 'set-draftJudging' }) as { text?: string })?.text).toBe('○ Draft judging')
   await ui.unmount()
 })

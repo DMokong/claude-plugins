@@ -1730,69 +1730,66 @@ export const register: Register = (on, options) => {
       const Select = 'Select' in rich ? rich.Select : undefined
       const room = Math.max(16, width - 24)
       const labels = ['running', 'queued', 'waiting']
-      const pick = (key: string, label: string, isOn_: boolean, act: () => void) => (
-        <Button key={key} variant={isOn_ ? 'primary' : 'secondary'} onPress={act}>
-          {isOn_ ? `✓ ${label}` : label}
+      // The space above the prompt is short: the panel packs into a few rows of small type, so it never
+      // needs a scroll and reads as a toolbox, not a form.
+      const small = (key: string, text: string, props: { color?: string; dimColor?: boolean; bold?: boolean } = {}) => (
+        <Text key={key} size="footnote" {...props}>
+          {text}
+        </Text>
+      )
+      const tool = (key: string, act: () => void, parts: { text: string; color?: string; dimColor?: boolean }[]) => (
+        <Button key={key} plain onPress={act}>
+          {parts.map((part, i) => (
+            <Text key={`${key}-${i}`} size="footnote" color={part.color} dimColor={part.dimColor}>
+              {part.text}
+            </Text>
+          ))}
         </Button>
       )
-      // The space above the prompt is short: the panel packs into a few rows, so nothing needs a scroll.
-      const models = (field: 'judgeModel' | 'workerModel', chips: typeof JUDGE_CHIPS, title: string) => {
-        const options = chipsFor(chips, state.settings[field])
-        return [
-          <Text key={`label-${field}`} dimColor>{title}</Text>,
-          Select !== undefined ? (
-            <Select
-              key={field === 'judgeModel' ? 'judge-model' : 'worker-model'}
-              options={options.map(([label, alias]) => ({ value: alias, label }))}
-              value={state.settings[field]}
-              onSelect={value => void setSetting($, field, value)}
-            />
-          ) : (
-            options.map(([label, alias]) =>
-              pick(`${field === 'judgeModel' ? 'judge' : 'worker'}-${alias}`, label, state.settings[field] === alias, () => void setSetting($, field, alias)),
-            )
-          ),
-        ]
-      }
-      const setting = (key: 'investigations' | 'draftJudging' | 'notifications', name: string) => (
-        <Button key={`set-${key}`} variant={state.settings[key] ? 'primary' : 'secondary'} onPress={() => void toggleSetting($, key)}>
-          {`${state.settings[key] ? '●' : '○'} ${name}`}
-        </Button>
-      )
+      const dropdown = (key: string, title: string, options: { value: string; label: string }[], value: string, act: (value: string) => void) => [
+        small(`label-${key}`, title, { dimColor: true }),
+        Select !== undefined ? (
+          <Select key={key} options={options} value={value} onSelect={act} />
+        ) : (
+          options.map(o => tool(`${key.replace(/-model$/, '')}-${o.value}`, () => act(o.value), [{ text: o.value === value ? `✓ ${o.label}` : o.label, dimColor: o.value !== value }]))
+        ),
+      ]
+      const modes = [
+        { value: 'off', label: 'Off' },
+        { value: 'shadow', label: 'Shadow' },
+        { value: 'auto', label: 'Auto' },
+      ]
+      const modelOptions = (chips: typeof JUDGE_CHIPS, field: 'judgeModel' | 'workerModel') => chipsFor(chips, state.settings[field]).map(([label, alias]) => ({ value: alias, label }))
+      const setting = (key: 'investigations' | 'draftJudging' | 'notifications', name: string) =>
+        tool(`set-${key}`, () => void toggleSetting($, key), [
+          { text: state.settings[key] ? '● ' : '○ ', color: state.settings[key] ? COLORS.green : undefined, dimColor: !state.settings[key] },
+          { text: name, dimColor: !state.settings[key] },
+        ])
       const many = state.settings.maxConcurrent
       const richPanel = !state.panelOpen ? null : (
         <Box key="sk-panel" flexDirection="column" borderStyle="round" borderColor={COLORS.claude} paddingX={1} rowGap="xs" minWidth={0} flexShrink={1}>
-          <Box key="row-mode" flexWrap="wrap" alignItems="center" columnGap="sm" rowGap="xs">
-            <Text bold color={COLORS.claude}>{'◆ Sidekick'}</Text>
-            {pick('mode-off', 'Off', state.mode === 'off', () => void setMode($, 'off'))}
-            {pick('mode-shadow', 'Shadow', state.mode === 'shadow', () => void setMode($, 'shadow'))}
-            {pick('mode-auto', 'Auto', state.mode === 'auto', () => void setMode($, 'auto'))}
-            <Box flexGrow={1} />
-            {version !== '' && <Text dimColor>{`v${version}`}</Text>}
-          </Box>
           <Box key="row-models" flexWrap="wrap" alignItems="center" columnGap="sm" rowGap="xs">
-            {models('judgeModel', JUDGE_CHIPS, 'Judge')}
-            {models('workerModel', WORKER_CHIPS, 'Worker')}
-            <Text dimColor>{'Side by side'}</Text>
-            <Button key="set-maxConcurrent-down" variant="secondary" onPress={() => void setSetting($, 'maxConcurrent', Math.max(1, many - 1))}>
-              {'−'}
-            </Button>
-            <Text>{String(many)}</Text>
-            <Button key="set-maxConcurrent-up" variant="secondary" onPress={() => void setSetting($, 'maxConcurrent', Math.min(4, many + 1))}>
-              {'+'}
-            </Button>
+            {small('title', '◆ Sidekick', { color: COLORS.claude, bold: true })}
+            {dropdown('mode-select', 'Mode', modes, state.mode, value => void setMode($, value as Mode))}
+            {dropdown('judge-model', 'Judge', modelOptions(JUDGE_CHIPS, 'judgeModel'), state.settings.judgeModel, value => void setSetting($, 'judgeModel', value))}
+            {dropdown('worker-model', 'Worker', modelOptions(WORKER_CHIPS, 'workerModel'), state.settings.workerModel, value => void setSetting($, 'workerModel', value))}
+            {small('label-many', 'Side by side', { dimColor: true })}
+            {tool('set-maxConcurrent-down', () => void setSetting($, 'maxConcurrent', Math.max(1, many - 1)), [{ text: '−' }])}
+            {small('many', String(many), { bold: true })}
+            {tool('set-maxConcurrent-up', () => void setSetting($, 'maxConcurrent', Math.min(4, many + 1)), [{ text: '+' }])}
           </Box>
-          <Box key="row-settings" flexWrap="wrap" alignItems="center" gap="xs">
+          <Box key="row-settings" flexWrap="wrap" alignItems="center" columnGap="md" rowGap="xs">
             {setting('investigations', 'Investigations')}
             {setting('draftJudging', 'Draft judging')}
             {setting('notifications', 'Notifications')}
-          </Box>
-          <Box key="launch" flexWrap="wrap" alignItems="center" gap="xs">
-            {launch.map(item => (
-              <Button key={item.key} variant="secondary" onPress={item.act}>
-                {`${item.glyph} ${item.key === 'launch-reset' ? 'Reset' : item.label}`}
-              </Button>
-            ))}
+            <Box flexGrow={1} />
+            {launch.map(item =>
+              tool(item.key, item.act, [
+                { text: `${item.glyph} `, color: item.color },
+                { text: item.key === 'launch-reset' ? 'Reset' : (shortLabel[item.key] ?? item.label) },
+              ]),
+            )}
+            {version !== '' && small('version', `v${version}`, { dimColor: true })}
           </Box>
         </Box>
       )
@@ -1816,19 +1813,14 @@ export const register: Register = (on, options) => {
         )
       const richFolded = (
         <Box key="sk-folded" flexWrap="wrap" alignItems="center" columnGap="sm" rowGap="xs">
-          <Text bold={isOn} dimColor={!isOn} color={isOn ? COLORS.claude : undefined}>{'◆ Sidekick'}</Text>
-          {richBadge(Text, state.mode)}
-          {state.isWarming && <Text color={COLORS.purple}>{'warming up…'}</Text>}
-          {isOn &&
-            counts.map((c, i) => (
-              <Text key={`c-${c.glyph}`} color={c.n > 0 ? c.color : undefined} dimColor={c.n === 0}>{`${c.glyph} ${c.n} ${labels[i]}`}</Text>
-            ))}
-          {isOn && <Text color={COLORS.green}>{`saved ${savedText}`}</Text>}
-          {isOn && <Text color={COLORS.blue}>{`cost ${costText}`}</Text>}
+          {small('f-title', '◆ Sidekick', { color: isOn ? COLORS.claude : undefined, dimColor: !isOn, bold: isOn })}
+          {state.mode === 'off' ? small('f-mode', '○ Off', { dimColor: true }) : small('f-mode', state.mode === 'auto' ? '● Auto' : '◌ Shadow', { color: state.mode === 'auto' ? COLORS.green : COLORS.purple, bold: true })}
+          {state.isWarming && small('f-warm', 'warming up…', { color: COLORS.purple })}
+          {isOn && counts.map((c, i) => small(`c-${c.glyph}`, `${c.glyph} ${c.n} ${labels[i]}`, { color: c.n > 0 ? c.color : undefined, dimColor: c.n === 0 }))}
+          {isOn && small('f-saved', `saved ${savedText}`, { color: COLORS.green })}
+          {isOn && small('f-cost', `cost ${costText}`, { color: COLORS.blue })}
           <Box flexGrow={1} />
-          <Button key="band-toggle" variant={state.panelOpen ? 'primary' : 'secondary'} onPress={() => void change($, s => ({ ...s, panelOpen: !s.panelOpen }))}>
-            {state.panelOpen ? 'Sidekick ▴' : 'Sidekick ▾'}
-          </Button>
+          {tool('band-toggle', () => void change($, s => ({ ...s, panelOpen: !s.panelOpen })), [{ text: state.panelOpen ? 'Sidekick ▴' : 'Sidekick ▾', color: COLORS.claude }])}
         </Box>
       )
       return (
