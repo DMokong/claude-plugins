@@ -1,7 +1,7 @@
 # crew-pane
 
 A Claude Code mod for sessions that raise a crew inside Herdr with the `herdr-jutsu` plugin
-from this marketplace: a status line and a `/crew` pane showing each member's status, name,
+from this marketplace: a `/crew` pane (and, optionally, a status line) showing each member's status, name,
 where Herdr shows it, kind, issue, directory and age, plus the `fable-conductor` stream the
 session is conducting.
 
@@ -21,6 +21,15 @@ reads two kinds of file. It sends nothing to any pane.
   empty; the "All" view still lists every live agent Herdr reports.
 - For the stream table: `docs/fable-streams/*/stream.md` under the session's directory, as
   `fable-conductor` writes it. Without it the table is absent.
+
+## Options
+
+In `/config`:
+
+- `Crew pane` (default `on`): poll Herdr and show this session's crew.
+- `Speak when a member blocks` (default `off`): say it aloud as well as showing a toast.
+- `Status line` (default `off`): also show the crew in the status line. The pane always shows it.
+  While off, the mod never sets status-line text, and clears any line an earlier version set.
 
 ## Turning it off
 
