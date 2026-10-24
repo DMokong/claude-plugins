@@ -9,6 +9,8 @@ import { appendRow, weekStart, bestDay, markGiven, perDay, savedFor, startOfDay,
 import type { HistoryRow } from './lib/history'
 import { JUDGE_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
 import { DUMP_KEEP, dumpDir, dumpName, dumpText, redact } from './lib/dump'
+import { DAYS, PROGRESS, STACK, TILE, daysSvg, esc, fitText, progressSvg, stackSvg, textWidth, tileSvg } from './lib/svg'
+import type { Day } from './lib/history'
 
 test('precheck lets short imperative chores through to the judge', async () => {
   expect(precheck('commit and push', false)).toEqual({ isJudged: true })
@@ -500,4 +502,65 @@ test('the week starts six calendar days before today, whatever the clocks did', 
   expect(new Date(start).getHours()).toBe(0)
   expect(Math.round((startOfDay(now) - start) / DAY)).toBe(6)
   expect(perDay([], now)[0]?.label).toBe(['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(start).getDay()])
+})
+
+/** Every x and width the drawing places, and each text's estimated right edge, against its viewBox. */
+function spill(source: string, width: number, height: number): string[] {
+  const out: string[] = []
+  const vb = source.match(/viewBox="0 0 (\S+) (\S+)"/)
+  if (Number(vb?.[1]) !== width || Number(vb?.[2]) !== height) out.push(`viewBox ${vb?.[0]}`)
+  for (const m of source.matchAll(/<rect x="([-\d.]+)"[^>]*? width="([\d.]+)"/g)) {
+    if (source.slice(Math.max(0, m.index! - 40), m.index).includes('<animate')) continue
+    const right = Number(m[1]) + Number(m[2])
+    if (Number(m[1]) < 0 || right > width + 0.01) out.push(`rect ${m[1]}+${m[2]}`)
+  }
+  for (const m of source.matchAll(/<text x="([\d.]+)" y="([\d.]+)" font-size="([\d.]+)"([^>]*)>([^<]*)<\/text>/g)) {
+    const [x, y, size, attrs, raw] = [Number(m[1]), Number(m[2]), Number(m[3]), m[4]!, m[5]!]
+    const text = raw.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    const w = textWidth(text, size, attrs.includes('font-weight'))
+    const left = attrs.includes('text-anchor="middle"') ? x - w / 2 : x
+    if (left < 0 || left + w > width + 0.01) out.push(`text "${text}" ${left.toFixed(1)}..${(left + w).toFixed(1)} of ${width}`)
+    if (y - size < -2 || y > height) out.push(`text "${text}" y ${y}`)
+  }
+  return out
+}
+
+test('tiles keep their figure and words inside, at the longest values a tile shows', async () => {
+  for (const value of ['0', '12', '9999', '$0', '$.004', '$4.18', '$999', '$1.2k', '$999.9k']) {
+    const source = tileSvg({ title: 'SAVED', value, caption: 'est. vs a very long model name indeed, more than fits', color: '#fff', series: [0, 1, 5, 2, 9, 0, 3] })
+    expect(spill(source, TILE.width, TILE.height)).toEqual([])
+  }
+  // The check itself catches what runs over.
+  expect(spill('<svg viewBox="0 0 10 10"><text x="5" y="8" font-size="10">wide text</text><rect x="4" y="0" width="9" height="2"/></svg>', 10, 10).length).toBe(2)
+  // No trend yet draws a flat line, not a path through NaN.
+  expect(tileSvg({ title: 'DONE', value: '0', caption: '', color: '#fff', series: [0, 0, 0, 0, 0, 0, 0] })).not.toContain('NaN')
+})
+
+test('the where-it-went bar fills its width and no more, whatever the shares', async () => {
+  const part = (usd: number, n = 1) => ({ label: 'chores <&>', n, usd, color: '#fff' })
+  for (const parts of [[part(0, 0)], [part(1)], [part(1), part(0.0001), part(0.0001), part(0.0001)], [part(0, 3), part(0, 1)], [part(5), part(5), part(5), part(5)]]) {
+    const source = stackSvg(parts)
+    expect(spill(source, STACK.width, STACK.height)).toEqual([])
+    expect(source).not.toContain('<&>')
+  }
+})
+
+test('the 7-day chart keeps bars and day names inside, and a tooltip on every day', async () => {
+  const day = (jobs: number, i: number): Day => ({ label: ['Fri', 'Sat', 'Sun', 'Mon', 'Tue', 'Wed', 'Thu'][i]!, jobs, isToday: i === 6, savedUsd: jobs * 0.01, costUsd: jobs * 0.001 })
+  for (const jobs of [[0, 0, 0, 0, 0, 0, 0], [1, 0, 0, 0, 0, 0, 0], [3, 0, 2, 5, 999, 6, 12]]) {
+    const source = daysSvg(jobs.map(day), { today: '#ff0', bar: '#00f' })
+    expect(spill(source, DAYS.width, DAYS.height)).toEqual([])
+    expect(source.match(/<title>/g)?.length).toBe(7)
+    expect(source).not.toMatch(/undefined|NaN/)
+  }
+})
+
+test('the progress sweep stays on its track, and text in a drawing is escaped and clipped', async () => {
+  expect(progressSvg('#f80')).toContain(`viewBox="0 0 ${PROGRESS.width} ${PROGRESS.height}"`)
+  expect(progressSvg('#f80')).toContain('clip-path')
+  expect(esc(`<a href="x">&'`)).toBe('&lt;a href=&quot;x&quot;&gt;&amp;&#39;')
+  expect(fitText('short', 10, 100)).toBe('short')
+  const cut = fitText('a caption far too long for the room it has', 10, 60)
+  expect(cut.endsWith('…')).toBe(true)
+  expect(textWidth(cut, 10)).toBeLessThanOrEqual(60)
 })

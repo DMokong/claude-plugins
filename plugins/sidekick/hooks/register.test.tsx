@@ -441,22 +441,32 @@ test('the pane draws the assist with its buttons on every surface', async ($, on
       props: { title: 'Sidekick', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
     } as never)
     if ((await ui.find({ key: 'back' })) !== undefined) await ui.press({ key: 'back' })
-    // The dashboard: hero tiles in segment digits, the live strip, the recent job.
+    // The dashboard: hero tiles (segment digits on the terminal, SVG on the desktop), the live strip,
+    // the recent job.
     expect(await ui.find({ key: 'tile-done' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ {2}╷ $/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^DONE$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^SAVED$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /est\. vs Opus$/ })).toBeDefined()
+    if (surface === 'terminal') {
+      expect(await ui.find({ type: 'Text', text: /^ {2}╷ $/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^DONE$/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^SAVED$/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /est\. vs Opus$/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /Best day: today, 1 job/ })).toBeDefined()
+    } else {
+      const source = (key: string) => ui.find({ key }).then(x => String((x as { children?: { props?: { source?: string } }[] })?.children?.[0]?.props?.source))
+      expect(await source('tile-done')).toContain('>1</text>')
+      expect(await source('tile-saved')).toContain('est. vs Opus')
+      expect(await source('days')).toContain('Today · 1 job')
+      expect(await ui.find({ type: 'Text', text: /best today/ })).toBeDefined()
+    }
     expect(await ui.find({ type: 'Text', text: /WHERE IT WENT/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /LAST 7 DAYS/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /Best day: today, 1 job/ })).toBeDefined()
     // The loaded version, read from the manifest, sits quietly in the header.
     expect((await ui.find({ type: 'Text', text: /v9\.9\.9$/ }))?.text?.trim()).toBe('v9.9.9')
     expect(await ui.find({ type: 'Text', text: /caching saved/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /commit and push/ })).toBeDefined()
+    expect(await ui.find({ key: `job-${(await state($)).entries[0]?.id}` })).toBeDefined()
     // Its words are one press away.
     await openJob(ui, (await state($)).entries[0]?.id)
-    expect(await ui.find({ type: 'Text', text: /Committed 3f2a91c/ })).toBeDefined()
+    if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: /Committed 3f2a91c/ })).toBeDefined()
+    else expect(String((await ui.find({ key: 'job-summary' }) as { props?: { text?: string } })?.props?.text)).toContain('Committed 3f2a91c')
     // The handed-off prompt is not in the up-arrow history, so the pane recalls it.
     filled.length = 0
     await ui.press({ key: `edit-${(await state($)).entries[0]?.id}` })
@@ -512,8 +522,8 @@ test('the folded line shows even while off, and stacks above the band beneath it
   await $.session.start(START)
   for (const surface of ['terminal', 'desktop'] as const) {
     const off = await $.ui.mount({ ...(BAND() as object), surface } as never)
-    expect(await off.find({ type: 'Text', text: /◆ sidekick/ })).toBeDefined()
-    expect(await off.find({ type: 'Text', text: /○ OFF/ })).toBeDefined()
+    expect(await off.find({ type: 'Text', text: /◆ sidekick/i })).toBeDefined()
+    expect(await off.find({ type: 'Text', text: /○ off/i })).toBeDefined()
     expect(await off.find({ key: 'band-toggle' })).toBeDefined()
     expect(await off.find({ type: 'Text', text: /other band/ })).toBeDefined()
     await off.unmount()
@@ -532,9 +542,10 @@ test('on the desktop, the chosen mode and models are marked without relying on c
   await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
   const ui = await $.ui.mount({ ...(BAND() as object), surface: 'desktop' } as never)
   await ui.press({ key: 'band-toggle' })
-  expect(await ui.find({ type: 'Text', text: /✓ Auto/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /✓ Off/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /✓ Haiku/ })).toBeDefined()
+  const labelOf = (key: string) => ui.find({ key }).then(x => (x as { text?: string } | undefined)?.text)
+  expect(await labelOf('mode-auto')).toBe('✓ Auto')
+  expect(await labelOf('mode-off')).toBe('Off')
+  expect((await ui.find({ key: 'judge-model' }) as { props?: { value?: string } })?.props?.value).toBe('haiku')
   expect((await ui.find({ key: 'mode-auto' }) as { props?: { variant?: string } })?.props?.variant).toBe('primary')
   expect((await ui.find({ key: 'mode-off' }) as { props?: { variant?: string } })?.props?.variant).toBe('secondary')
   await ui.unmount()
@@ -1148,5 +1159,106 @@ test('the worker is offered Haiku and Sonnet, not Opus: that work belongs in the
   expect(await ui.find({ key: 'worker-haiku' })).toBeDefined()
   expect(await ui.find({ key: 'worker-sonnet' })).toBeDefined()
   expect(await ui.find({ key: 'worker-opus' })).toBeUndefined()
+  await ui.unmount()
+})
+
+/** What, on a graphical surface, could run past its slot or still look like a terminal. */
+function richSpill(tree: Node, columns: number): string[] {
+  const out: string[] = []
+  const words = (n: Node): string => (n.type === 'Button' ? String(n.props?.label ?? '') : textOf(n))
+  const walk = (n: Node) => {
+    const text = words(n)
+    if (n.type === 'Box' && typeof n.props?.width === 'number') out.push(`${columns}: a fixed width ${n.props.width}`)
+    if (n.type === 'Box' && typeof n.props?.minWidth === 'number' && n.props.minWidth > 0) out.push(`${columns}: a fixed minWidth ${n.props.minWidth}`)
+    if (n.type === 'Text' && /[─━▆╭╮╰╯│▮]/.test(text)) out.push(`${columns}: terminal art "${text}"`)
+    if (n.type === 'Text' && text.length > 40 && n.props?.wrap === undefined) out.push(`${columns}: long text that never wraps "${text}"`)
+    if (n.type === 'Button' && text.length > columns) out.push(`${columns}: a button wider than the slot "${text}"`)
+    // In a row that never wraps, anything long must be able to shrink: truncating text, or a box that gives way.
+    if (n.type === 'Box' && n.props?.flexWrap === 'nowrap')
+      for (const c of n.children ?? []) {
+        if (typeof c === 'string') continue
+        if (c.type === 'Text' && words(c).length > 14 && c.props?.wrap === undefined) out.push(`${columns}: fixed text in a row "${words(c)}"`)
+        if (c.type === 'Button' && words(c).length > 14) out.push(`${columns}: a button that cannot shrink in a row "${words(c)}"`)
+      }
+    for (const c of n.children ?? []) if (typeof c !== 'string') walk(c)
+  }
+  walk(tree)
+  return out
+}
+
+test('on the desktop, nothing in the band, panel or dashboard can run past its slot, at any width', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  world(on, { judge: MECHANICAL, worker: DONE, workerGate: gate })
+  underBand(on)
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'commit and push all of the documentation changes please, then tidy the changelog and the readme as well', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'running')
+  const over: string[] = []
+  const seen = { svg: 0, card: false, panel: false }
+  for (const columns of [24, 30, 45, 60, 100, 160]) {
+    for (const isOpen of [false, true]) {
+      const band = await $.ui.mount({ ...(BAND(columns, 40) as object), surface: 'desktop' } as never)
+      if (isOpen) await band.press({ key: 'band-toggle' })
+      const tree = (await (band as unknown as { drawn: () => Promise<unknown> }).drawn()) as Node
+      seen.card ||= JSON.stringify(tree).includes('"sk-card"')
+      seen.panel ||= JSON.stringify(tree).includes('"sk-panel"')
+      over.push(...richSpill(tree, columns))
+      if (isOpen) await band.press({ key: 'band-toggle' })
+      await band.unmount()
+    }
+    const pane = await $.ui.mount({
+      plugin: 'sidekick',
+      surface: 'desktop',
+      component: 'Pane',
+      requestId: 'sidekick',
+      props: { title: 'Sidekick', isFocused: false, bodyColumns: columns, placement: 'dock', scroll: { offset: 0, bodyRows: 80 }, view: {} },
+    } as never)
+    const tree = (await (pane as unknown as { drawn: () => Promise<unknown> }).drawn()) as Node
+    seen.svg = Math.max(seen.svg, (JSON.stringify(tree).match(/"type":"Svg"/g) ?? []).length)
+    over.push(...richSpill(tree, columns))
+    await pane.unmount()
+  }
+  open()
+  await until($, x => x.entries[0]?.status === 'done')
+  // Tiles, the running job's sweep, where it went and the week: real drawings, not cells.
+  expect(seen).toEqual({ svg: 6, card: true, panel: true })
+  expect(over).toEqual([])
+})
+
+test('the check for spills catches a fixed width, unwrapped words and a button that cannot shrink', async () => {
+  const bad: Node = {
+    type: 'Box',
+    props: { flexWrap: 'nowrap', width: 72 },
+    children: [
+      { type: 'Text', children: ['a long line of words that would run over the edge'] },
+      { type: 'Button', props: { label: 'a long button label' } },
+      { type: 'Text', props: { wrap: 'truncate-end' }, children: ['─────'] },
+    ],
+  }
+  expect(richSpill(bad, 30).length).toBe(5)
+})
+
+test('on the desktop, the models are dropdowns and side by side is a stepper', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  const ui = await $.ui.mount({ ...(BAND() as object), surface: 'desktop' } as never)
+  await ui.press({ key: 'band-toggle' })
+  const select = (ui as unknown as { select: (q: { key: string; value: string }) => Promise<unknown> }).select
+  await select({ key: 'worker-model', value: 'sonnet' })
+  expect((await state($)).settings.workerModel).toBe('sonnet')
+  expect(seen.store.get('settings')).toEqual({ workerModel: 'sonnet' })
+  const many = (await state($)).settings.maxConcurrent
+  await ui.press({ key: 'set-maxConcurrent-up' })
+  expect((await state($)).settings.maxConcurrent).toBe(Math.min(4, many + 1))
+  await ui.press({ key: 'set-maxConcurrent-down' })
+  await ui.press({ key: 'set-maxConcurrent-down' })
+  expect((await state($)).settings.maxConcurrent).toBe(Math.max(1, Math.min(4, many + 1) - 2))
+  // The settings are buttons that say their state.
+  expect((await ui.find({ key: 'set-draftJudging' }) as { text?: string })?.text).toBe('● On')
   await ui.unmount()
 })
