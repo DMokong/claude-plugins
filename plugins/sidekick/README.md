@@ -619,7 +619,8 @@ and rendered to SVG.
 
 | Version | |
 |---|---|
-| **0.4.4** | The worker is offered Haiku and Sonnet only. An Opus worker costs what the main session does, so that work belongs there. |
+| **0.4.5** | On the desktop app, the control panel marks the chosen mode, judge and worker with a check and the primary button: the desktop draws its own buttons, so the chip colours never showed there. |
+| 0.4.4 | The worker is offered Haiku and Sonnet only. An Opus worker costs what the main session does, so that work belongs there. |
 | 0.4.3 | The dashboard fits a narrow dock: its header moves the tabs to a second row (models and version give way first) instead of splitting words, and the bars and the 7-day chart shrink their labels and columns. Every one-line row is tested to fit from 28 to 120 columns. |
 | 0.4.2 | The control panel picks its layout from the room it has: wide keeps every note, compact drops the notes and packs the shortcuts, mini also shortens the model chips and pills. No row runs over at any width. |
 | 0.4.1 | The control panel pops up from the right end of the line, above its button, at a fixed width (72 columns), instead of spanning the whole band. |
