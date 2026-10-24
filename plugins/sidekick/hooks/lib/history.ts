@@ -16,6 +16,8 @@ export type HistoryRow = {
   /** What the main session didn't have to spend, less what the sidekick spent; 0 when it saved nothing. */
   savedUsd: number
   id: string
+  /** Draft rows: how many typing pauses were judged that day. */
+  count?: number
 }
 
 export const HISTORY_KEY = 'history'
@@ -29,6 +31,13 @@ const STATUSES: readonly HistoryRow['status'][] = ['done', 'partial', 'stopped',
 export function startOfDay(now: number): number {
   const d = new Date(now)
   d.setHours(0, 0, 0, 0)
+  return d.getTime()
+}
+
+/** Local midnight six calendar days before today's: the Week tab's span, the same seven days as the chart. */
+export function weekStart(now: number): number {
+  const d = new Date(startOfDay(now))
+  d.setDate(d.getDate() - 6)
   return d.getTime()
 }
 
@@ -57,7 +66,7 @@ export function appendRow(rows: readonly HistoryRow[], row: HistoryRow, now: num
     const day = startOfDay(row.at)
     const same = kept.findIndex(r => r.kind === 'draft' && startOfDay(r.at) === day)
     if (same >= 0) {
-      const merged = { ...kept[same]!, judgeUsd: kept[same]!.judgeUsd + row.judgeUsd }
+      const merged = { ...kept[same]!, judgeUsd: kept[same]!.judgeUsd + row.judgeUsd, count: (kept[same]!.count ?? 1) + (row.count ?? 1) }
       return kept.map((r, i) => (i === same ? merged : r))
     }
   }
@@ -93,7 +102,7 @@ export function totals(rows: readonly HistoryRow[], from: number): Totals {
       t.toClaude += 1
       t.claudeUsd += spent
     } else {
-      t.drafts += 1
+      t.drafts += r.count ?? 1
       t.draftUsd += spent
     }
   }

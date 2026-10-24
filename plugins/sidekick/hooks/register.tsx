@@ -5,7 +5,7 @@ import { MAX_MISSES, canStart, holdsMain, judgePrompt, judgeSystem, lockKeys, pa
 import type { Judgment } from './lib/judge'
 import { NO_SPEND, addTally, modelName, tallyLine, tallyOf, tokens, usd } from './lib/cost'
 import { migrate, toTaught } from './lib/state'
-import { HISTORY_KEY, NO_TOTALS, appendRow, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals } from './lib/history'
+import { HISTORY_KEY, NO_TOTALS, appendRow, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals, weekStart } from './lib/history'
 import type { HistoryRow } from './lib/history'
 import { JUDGE_CHIPS, SETTINGS_KEY, WORKER_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
 import { COLORS, barCells, bigText, dayLevels, spaced, tileMoney } from './lib/draw'
@@ -229,7 +229,8 @@ async function verdictFor($: EngineInterface, text: string): Promise<Judged> {
   )
   const settled = await Promise.race([ahead.judged, timer])
   stop.abort()
-  return settled === timedOut ? settled : { ...settled, ms: (await $.clock.now()) - started }
+  // The draft's judge call was already counted, as draft judging: the submit spent nothing more.
+  return settled === timedOut ? settled : { ...settled, spend: NO_SPEND, ms: (await $.clock.now()) - started }
 }
 
 /** Judges the draft in the background once typing pauses, if it is one the judge would see. */
@@ -240,9 +241,15 @@ function judgeDraftSoon($: EngineInterface, draft: string): void {
   const text = draft.trim()
   if (!precheck(text, false).isJudged || speculation?.text === text) return
   draftTimer = $.clock.after(DRAFT_PAUSE_MS, () => {
-    const judged = judge($, text, null)
-    speculation = { text, judged }
-    void judged.then(j => record($, { at: Date.now(), kind: 'draft', status: 'passed', ms: j.ms, judgeUsd: j.spend.usd, workerUsd: 0, savedUsd: 0, id: `draft-${text.length}` })).catch(() => {})
+    void (async () => {
+      // Turned off in another session since: this one stops paying for drafts too.
+      await refreshSettings($)
+      if (!live.draftJudging) return
+      const judged = judge($, text, null)
+      speculation = { text, judged }
+      const j = await judged
+      await record($, { at: 0, kind: 'draft', status: 'passed', ms: j.ms, judgeUsd: j.spend.usd, workerUsd: 0, savedUsd: 0, id: 'draft', count: 1 })
+    })().catch(() => {})
   })
 }
 
@@ -348,25 +355,57 @@ async function setSetting<K extends keyof Settings>($: EngineInterface, key: K, 
   await refreshSettings($)
 }
 
+/** Flips one on/off setting from its value now, which another session may have changed. */
+async function toggleSetting($: EngineInterface, key: 'investigations' | 'draftJudging' | 'notifications'): Promise<void> {
+  await refreshSettings($)
+  await setSetting($, key, !live[key])
+}
+
 /** Forgets every change made in the panel: the plugin's options are in force again. */
 async function resetSettings($: EngineInterface): Promise<void> {
   await $.store.set(SETTINGS_KEY, {}).catch(() => {})
   await refreshSettings($)
 }
 
+/** The local midnight `state.today` counts from; the band refreshes it when the day turns. */
+let todayFrom = 0
+/** The jobs this session recorded, for the dashboard's Session tab (the entry list keeps only the newest 60). */
+const sessionIds = new Set<string>()
+
 /** Mirrors today's totals into the session's state, where the band can draw them. */
 async function refreshToday($: EngineInterface, rows?: readonly HistoryRow[]): Promise<void> {
-  const all = rows ?? toRows(await $.store.get(HISTORY_KEY).catch(() => []))
-  const today = totals(all, startOfDay(await $.clock.now()))
+  const all = rows ?? toRows(await $.store.get(HISTORY_KEY).catch(() => historyRows))
+  historyRows = [...all]
+  const now = await $.clock.now()
+  todayFrom = startOfDay(now)
+  const today = totals(all, todayFrom)
   await change($, s => ({ ...s, today })).catch(() => {})
+}
+
+/**
+ * History writes, one at a time: each reads the rows, changes them and writes them back, so two at
+ * once (two chores finishing together, a draft and its submit) would lose one.
+ */
+let historyQueue: Promise<void> = Promise.resolve()
+/** The rows as this session last read or wrote them, for the pane to draw without re-reading. */
+let historyRows: HistoryRow[] = []
+
+function editHistory($: EngineInterface, edit: (rows: HistoryRow[], now: number) => HistoryRow[]): Promise<void> {
+  const run = historyQueue.then(async () => {
+    const now = await $.clock.now()
+    const rows = edit(toRows(await $.store.get(HISTORY_KEY).catch(() => historyRows)), now)
+    await $.store.set(HISTORY_KEY, rows).catch(() => {})
+    historyRows = rows
+    await refreshToday($, rows)
+  })
+  historyQueue = run.catch(() => {})
+  return run
 }
 
 /** Adds one row to the history kept across sessions. */
 async function record($: EngineInterface, row: HistoryRow): Promise<void> {
-  const now = await $.clock.now()
-  const rows = appendRow(toRows(await $.store.get(HISTORY_KEY).catch(() => [])), { ...row, at: now }, now)
-  await $.store.set(HISTORY_KEY, rows).catch(() => {})
-  await refreshToday($, rows)
+  if (row.kind !== 'draft') sessionIds.add(row.id)
+  await editHistory($, (rows, now) => appendRow(rows, { ...row, at: now }, now))
 }
 
 /** What the main session would have spent on this job, less what the sidekick did; 0 unless it finished. */
@@ -399,6 +438,19 @@ async function finish($: EngineInterface, id: string, outcome: Outcome, calls: r
   if (dump !== '') await patchEntry($, id, () => ({ dump }))
   const entry = { ...found, dump }
   const status: EntryStatus = outcome.status === 'done' || outcome.status === 'partial' ? 'done' : outcome.status
+  // In the history before it shows as finished, so a give to main pressed at once finds its row.
+  const judgeUsd = found.judgeSpend.usd
+  const workerUsd = found.workerSpend.usd
+  await record($, {
+    at: now,
+    kind: entry.kind,
+    status: outcome.status,
+    ms: now - (entry.startedAt || entry.createdAt),
+    judgeUsd,
+    workerUsd,
+    savedUsd: await savedOn($, outcome.status, judgeUsd + workerUsd),
+    id,
+  })
   await patchEntry($, id, () => ({ status, outcome, endedAt: now }))
   await change($, s => ({
     ...s,
@@ -412,18 +464,6 @@ async function finish($: EngineInterface, id: string, outcome: Outcome, calls: r
   const after = (await load($)).entries.find(x => x.id === id)
   $.ui.log(chatLine(outcome, entry.backend, seconds, (after?.judgeSpend.usd ?? 0) + (after?.workerSpend.usd ?? 0)))
   await deliverNote($, handoffNote(entry.prompt, outcome, entry.backend, entry.dump))
-  const judgeUsd = after?.judgeSpend.usd ?? 0
-  const workerUsd = after?.workerSpend.usd ?? 0
-  await record($, {
-    at: now,
-    kind: entry.kind,
-    status: outcome.status,
-    ms: now - (entry.startedAt || entry.createdAt),
-    judgeUsd,
-    workerUsd,
-    savedUsd: await savedOn($, outcome.status, judgeUsd + workerUsd),
-    id,
-  })
   await tell($, status === 'done' ? `✓ ${outcome.summary}` : `⚠ ${outcome.summary} — open /sidekick to hand it to main`)
   await pump($)
 }
@@ -591,6 +631,7 @@ async function stopEntry($: EngineInterface, id: string): Promise<void> {
   const entry = (await load($)).entries.find(x => x.id === id)
   if (entry?.status === 'queued') {
     const endedAt = await $.clock.now()
+    await record($, { at: 0, kind: entry.kind, status: 'stopped', ms: 0, judgeUsd: entry.judgeSpend.usd, workerUsd: 0, savedUsd: 0, id })
     await patchEntry($, id, () => ({ status: 'stopped', endedAt }))
     await pump($)
   }
@@ -601,9 +642,7 @@ async function giveToMain($: EngineInterface, id: string): Promise<void> {
   if (entry === undefined) return
   if (isActive(entry)) await stopEntry($, id)
   // The main session spends the turn after all, so the job saved nothing.
-  const rows = markGiven(toRows(await $.store.get(HISTORY_KEY).catch(() => [])), id)
-  await $.store.set(HISTORY_KEY, rows).catch(() => {})
-  await refreshToday($, rows)
+  await editHistory($, rows => markGiven(rows, id))
   await $.prompt.submit({ text: giveToMainPrompt(entry.prompt, entry.outcome, entry.steps, entry.dump), asUser: true })
 }
 
@@ -894,7 +933,8 @@ export const register: Register = (on, options) => {
     const queued = state.entries.filter(x => x.status === 'queued')
     // The corrections the judge follows now, newest first; each can be forgotten.
     const learned = state.learned.slice(-MAX_MISSES).reverse()
-    const rows = toRows(await $.store.get(HISTORY_KEY).catch(() => []))
+    // The rows this session last read or wrote: the pane redraws often, the store is read on writes.
+    const rows = historyRows
 
     const buttonsFor = (entry: Entry) => {
       const isWatched = state.watching === entry.id
@@ -1033,11 +1073,11 @@ export const register: Register = (on, options) => {
     }
 
     // ── the dashboard
-    const ids = new Set(state.entries.map(x => x.id))
+    const ids = new Set([...sessionIds, ...state.entries.map(x => x.id)])
     const span =
       state.tab === 'session'
         ? { ...totals(rows.filter(r => ids.has(r.id)), 0), costUsd: state.spend.usd }
-        : totals(rows, state.tab === 'today' ? startOfDay(now) : startOfDay(now) - 6 * 24 * 60 * 60 * 1000)
+        : totals(rows, state.tab === 'today' ? startOfDay(now) : weekStart(now))
     const tabs = (['session', 'today', 'week'] as const).map(tab => (
       <Button key={`tab-${tab}`} plain onPress={() => void change($, s => ({ ...s, tab }))}>
         {state.tab === tab ? (
@@ -1047,7 +1087,8 @@ export const register: Register = (on, options) => {
         )}
       </Button>
     ))
-    const isStacked = width < 60
+    // Three tiles side by side need room for `$4.18` in segment digits: 18 cells inside each.
+    const isStacked = width < 68
     const isPlain = width < 40
     const tileW = isStacked ? width - 2 : Math.floor((width - 2) / 3)
     const mainModel = modelName(await $.session.model().catch(() => 'the main model'))
@@ -1223,7 +1264,8 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
 
     // ── the folded line: what's happening, at a glance; parts give way from the right as it narrows
-    const toggleText = state.panelOpen ? ' ◆ Sidekick ▴ ' : ' ◆ Sidekick ▾ '
+    // The day turned since today's totals were counted: count them again (the draw after shows them).
+    if (todayFrom !== 0 && startOfDay(now) !== todayFrom) void refreshToday($).catch(() => {})
     const counts = [
       { glyph: '●', n: running.length, color: COLORS.pink },
       { glyph: '◷', n: queued.length, color: COLORS.blue },
@@ -1231,9 +1273,17 @@ export const register: Register = (on, options) => {
     ]
     const savedText = tileMoney(state.today.savedUsd)
     const costText = tileMoney(state.today.costUsd)
-    const head = isOn ? 13 + state.mode.length : 18
-    const partWidths = { counts: 14, saved: 9 + savedText.length, cost: 8 + costText.length }
-    const fits = (parts: (keyof typeof partWidths)[]) => head + parts.reduce((n, k) => n + partWidths[k], 0) + toggleText.length <= width
+    const pillText = state.mode === 'auto' ? ' ● AUTO ' : state.mode === 'shadow' ? ' ◌ SHADOW ' : '○ OFF'
+    const head = '◆ sidekick '.length + pillText.length + (state.isWarming ? ' warming up…'.length : 0)
+    const partWidths = {
+      counts: ' │ '.length + counts.reduce((n, c) => n + `${c.glyph} ${c.n} `.length, 0),
+      saved: '│ saved '.length + savedText.length + 1,
+      cost: '│ cost '.length + costText.length,
+    }
+    const longToggle = state.panelOpen ? ' ◆ Sidekick ▴ ' : ' ◆ Sidekick ▾ '
+    // Below the room for the whole button, it keeps its arrow: it always opens the panel.
+    const toggleText = head + longToggle.length + 1 <= width ? longToggle : state.panelOpen ? ' ▴ ' : ' ▾ '
+    const fits = (parts: (keyof typeof partWidths)[]) => head + parts.reduce((n, k) => n + partWidths[k], 0) + toggleText.length + 1 <= width
     const order: (keyof typeof partWidths)[] = ['counts', 'saved', 'cost']
     let shown = isOn ? order : []
     while (shown.length > 0 && !fits(shown)) shown = shown.slice(0, -1)
@@ -1342,7 +1392,7 @@ export const register: Register = (on, options) => {
         {control as never}
       </Box>
     )
-    const toggle = (key: 'investigations' | 'draftJudging' | 'notifications') => pill(`set-${key}`, state.settings[key], () => void setSetting($, key, !state.settings[key]))
+    const toggle = (key: 'investigations' | 'draftJudging' | 'notifications') => pill(`set-${key}`, state.settings[key], () => void toggleSetting($, key))
     const nextJob = queued.at(-1)
     const lastDump = state.entries.find(x => x.dump !== '')
     const lastDone = state.entries.find(x => x.status === 'done' || x.status === 'stopped' || x.status === 'failed')
@@ -1378,12 +1428,13 @@ export const register: Register = (on, options) => {
           <Text color={COLORS.claude}>{'◆  '}</Text>
           <Text bold color={COLORS.orange}>{spaced('SIDEKICK')}</Text>
           <Box flexGrow={1} />
-          {counts.map(c => (
-            <Text key={`pc-${c.glyph}`} color={c.n > 0 ? c.color : COLORS.dim}>{`${c.glyph} ${c.n}  `}</Text>
-          ))}
-          <Text color={COLORS.green}>{`saved ${savedText}`}</Text>
-          <Text dimColor>{' · '}</Text>
-          <Text color={COLORS.blue}>{costText}</Text>
+          {inner >= 60 &&
+            counts.map(c => (
+              <Text key={`pc-${c.glyph}`} color={c.n > 0 ? c.color : COLORS.dim}>{`${c.glyph} ${c.n}  `}</Text>
+            ))}
+          {inner >= 40 && <Text color={COLORS.green}>{`saved ${savedText}`}</Text>}
+          {inner >= 40 && <Text dimColor>{' · '}</Text>}
+          {inner >= 40 && <Text color={COLORS.blue}>{costText}</Text>}
         </Box>
         {!isTight && rule('r0', '')}
         <Box flexWrap="wrap">
@@ -1412,7 +1463,7 @@ export const register: Register = (on, options) => {
           'maxConcurrent',
           'Side by side',
           'chores in different repos at once',
-          <Button key="set-maxConcurrent" plain onPress={() => void setSetting($, 'maxConcurrent', (state.settings.maxConcurrent % 3) + 1)}>
+          <Button key="set-maxConcurrent" plain onPress={() => void setSetting($, 'maxConcurrent', (state.settings.maxConcurrent % 4) + 1)}>
             <Text backgroundColor="#2a2f3a">{` ${state.settings.maxConcurrent} at a time `}</Text>
           </Button>,
         )}
@@ -1443,7 +1494,7 @@ export const register: Register = (on, options) => {
             ))}
         {!isTight && rule('r3', 'LAUNCH')}
         {launchRows.map((row, r) => (
-          <Box key={`lr-${r}`} flexWrap="nowrap">
+          <Box key={`lr-${r}`} flexWrap={isTight ? 'wrap' : 'nowrap'}>
             {row.map(item => (
               <Box key={`li-${item.key}`} width={isTight ? undefined : perRow === 2 ? Math.floor(inner / 2) : inner} flexWrap="nowrap">
                 <Text color={item.color}>{isTight ? `${item.glyph} ` : `${item.glyph}  `}</Text>

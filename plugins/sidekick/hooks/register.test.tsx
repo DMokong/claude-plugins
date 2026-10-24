@@ -3,6 +3,7 @@ import type { MockClock } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import type { SidekickState } from '../types'
+import { tallyOf } from './lib/cost'
 
 let clock: MockClock
 /** The mod's state as it last wrote it, seen from beneath. */
@@ -557,7 +558,7 @@ test('the toggle opens the control panel; its chips and pills change the session
   expect(seen.store.get('settings')).toEqual({ draftJudging: false })
   await ui.press({ key: 'worker-sonnet' })
   expect((await state($)).settings.workerModel).toBe('sonnet')
-  for (const n of [2, 3, 1]) {
+  for (const n of [2, 3, 4, 1]) {
     await ui.press({ key: 'set-maxConcurrent' })
     expect((await state($)).settings.maxConcurrent).toBe(n)
   }
@@ -898,4 +899,77 @@ test('the panel takes the shape that fits the band: NOW when roomy, one LAUNCH r
   const drawn = JSON.stringify(await (short as unknown as { drawn: () => Promise<unknown> }).drawn())
   await short.unmount()
   expect(drawn).toContain('Reset')
+})
+
+test("a draft's judge call is counted once: as draft judging, not again on the message it answered", async ($, on) => {
+  const seen = world(on, { judge: NEEDS_MAIN, worker: DONE })
+  on('prompt.edit', async (_$, e) => ({ text: e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end), cursor: e.start + e.inputText.length }))
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const typing = $.prompt as unknown as { edit: (e: unknown) => Promise<unknown> }
+  await typing.edit({ origin: { kind: 'composer' }, text: '', cursor: 0, start: 0, end: 0, inputText: 'rename the judge' })
+  await clock.advance(500)
+  await until($, () => Array.isArray(seen.store.get('history')))
+  await $.prompt.submit({ text: 'rename the judge', ...TYPED })
+  const rows = seen.store.get('history') as { kind: string; judgeUsd: number }[]
+  const judged = rows.reduce((n, r) => n + r.judgeUsd, 0)
+  // One judge call: 1000 input tokens and 1 output at Haiku's rates.
+  expect(Math.abs(judged - tallyOf('haiku', { input_tokens: 1000, output_tokens: 1 }).usd) < 1e-12).toBe(true)
+  expect(rows.map(r => r.kind).sort()).toEqual(['draft', 'to-claude'])
+})
+
+test('two jobs finishing together both land in the history', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, workerGate: gate, stored: { settings: { maxConcurrent: 2 } } })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await $.prompt.submit({ text: 'close the bd issue', ...TYPED })
+  await until($, x => x.entries.filter(e => e.status === 'running').length === 2)
+  open()
+  await until($, x => x.entries.every(e => e.status === 'done') && x.today.done === 2)
+  expect((seen.store.get('history') as unknown[]).length).toBe(2)
+})
+
+test('the folded line fits its width, keeping the toggle, at every width', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  for (const mode of ['off', 'auto', 'shadow'] as const) {
+    if (mode !== 'off') await $.command.run({ command: 'sidekick', args: mode, origin: { kind: 'composer' }, presentation: 'inline' } as never)
+    for (const width of [24, 30, 40, 66, 67, 68, 80, 120]) {
+      const ui = await $.ui.mount(BAND(width))
+      const tree = (await (ui as unknown as { drawn: () => Promise<unknown> }).drawn()) as { children?: unknown[] }
+      // The folded line is the last row the mod draws, above the band beneath it.
+      const rows = (tree.children ?? []) as { props?: { key?: string } ; children?: unknown[] }[]
+      const line = rows.find(r => JSON.stringify(r).includes('band-toggle'))
+      const text = (JSON.stringify(line).match(/"(?:children|label)":"([^"]*)"/g) ?? []).map(m => JSON.parse(m.slice(m.indexOf(':') + 1)) as string).join('')
+      expect(text.length).toBeLessThanOrEqual(width)
+      expect(await ui.find({ key: 'band-toggle' })).toBeDefined()
+      await ui.unmount()
+    }
+  }
+})
+
+test('tiles sit side by side only where segment money fits in them', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  await $.session.start(START)
+  const pane = (columns: number) =>
+    $.ui.mount({
+      plugin: 'sidekick',
+      surface: 'terminal',
+      component: 'Pane',
+      requestId: 'sidekick',
+      props: { title: 'Sidekick', isFocused: false, bodyColumns: columns, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
+    } as never)
+  for (const [columns, isRow] of [[66, false], [67, false], [68, true]] as const) {
+    const ui = await pane(columns)
+    const drawn = (await (ui as unknown as { drawn: () => Promise<unknown> }).drawn()) as object
+    const tiles = JSON.stringify(drawn).match(/"flexDirection":"(row|column)","marginTop":1/)
+    expect(tiles?.[1]).toBe(isRow ? 'row' : 'column')
+    await ui.unmount()
+  }
 })

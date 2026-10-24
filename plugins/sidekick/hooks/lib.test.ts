@@ -5,7 +5,7 @@ import { migrate, toTaught } from './lib/state'
 import { EMPTY } from './register'
 import { INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPrompt, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
 import { COLORS, barCells, bigText, bigWidth, dayLevels, spaced, tileMoney } from './lib/draw'
-import { appendRow, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals } from './lib/history'
+import { appendRow, weekStart, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals } from './lib/history'
 import type { HistoryRow } from './lib/history'
 import { JUDGE_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
 import { DUMP_KEEP, dumpDir, dumpName, dumpText, redact } from './lib/dump'
@@ -424,6 +424,8 @@ test('history keeps 35 days, and draft spend is one row a day', async () => {
   expect(appendRow([old], row({ at: now, id: 'new' }), now).map(r => r.id)).toEqual(['new'])
   const drafts = appendRow(appendRow([], row({ at: now, kind: 'draft', status: 'passed', judgeUsd: 0.0001, workerUsd: 0, savedUsd: 0, id: 'd1' }), now), row({ at: now + 1000, kind: 'draft', status: 'passed', judgeUsd: 0.0002, workerUsd: 0, savedUsd: 0, id: 'd2' }), now)
   expect(drafts.length).toBe(1)
+  expect(drafts[0]?.count).toBe(2)
+  expect(totals(drafts, 0).drafts).toBe(2)
   expect(near(drafts[0]?.judgeUsd, 0.0003)).toBe(true)
   expect(toRows([row({ id: 'ok' }), 'junk', { at: 'x' }]).map(r => r.id)).toEqual(['ok'])
 })
@@ -490,4 +492,12 @@ test('state from 0.3.0 gets the panel, settings and today defaults', async () =>
   expect(state.view).toBe('dashboard')
   expect(state.settings).toEqual(EMPTY.settings)
   expect(state.today.done).toBe(0)
+})
+
+test('the week starts six calendar days before today, whatever the clocks did', async () => {
+  const now = Date.UTC(2026, 9, 24, 12)
+  const start = weekStart(now)
+  expect(new Date(start).getHours()).toBe(0)
+  expect(Math.round((startOfDay(now) - start) / DAY)).toBe(6)
+  expect(perDay([], now)[0]?.label).toBe(['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(start).getDay()])
 })
