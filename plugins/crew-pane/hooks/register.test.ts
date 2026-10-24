@@ -99,7 +99,7 @@ function world(on: On, state: World) {
 
 const working: Agent = { pane_id: 'wE:p2', agent: 'codex', agent_status: 'working', terminal_title_stripped: 'impl-01', tab_id: 'wE:t2', workspace_id: 'wE', cwd: '/home/me/projects/exampleapp' }
 
-test('the status line shows the crew after the first poll', async ($, on) => {
+test('the status line shows the crew after the first poll when statusLine is on', { options: { statusLine: 'on' } }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000_000 })
   const seen = world(on, { agents: [working], registry: reg('impl-01', 'wE:p2'), env: ENV })
   await $.session.start(START)
@@ -107,7 +107,7 @@ test('the status line shows the crew after the first poll', async ($, on) => {
   expect(seen.status[seen.status.length - 1]).toBe('crew 1 working')
 })
 
-test('a member that blocks raises one toast, and speaks only when asked', async ($, on) => {
+test('a member that blocks raises one toast, and speaks only when asked', { options: { statusLine: 'on' } }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000_000 })
   const state: World = { agents: [working], registry: reg('impl-01', 'wE:p2'), env: ENV }
   const seen = world(on, state)
@@ -119,6 +119,19 @@ test('a member that blocks raises one toast, and speaks only when asked', async 
   expect(seen.toasts.filter(t => t === 'impl-01 is blocked')).toHaveLength(1)
   expect(seen.spoken).toHaveLength(0)
   expect(seen.status[seen.status.length - 1]).toBe('crew 1 blocked')
+})
+
+test('with default options no status text is ever set', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000_000 })
+  const state: World = { agents: [working], registry: reg('impl-01', 'wE:p2'), env: ENV }
+  const seen = world(on, state)
+  await $.session.start(START)
+  await clock.advance(0)
+  state.agents = [{ ...working, agent_status: 'blocked' }]
+  await clock.advance(10_000)
+  await clock.advance(10_000)
+  expect(seen.status.filter(text => text !== undefined)).toEqual([])
+  expect(seen.status).toEqual([undefined])
 })
 
 test('with speak on, a blocked member is spoken', { options: { speak: 'on' } }, async ($, on) => {
@@ -133,7 +146,7 @@ test('with speak on, a blocked member is spoken', { options: { speak: 'on' } }, 
   expect(seen.spoken).toEqual(['impl-01 is blocked'])
 })
 
-test('herdr failing keeps the last crew and never throws', async ($, on) => {
+test('herdr failing keeps the last crew and never throws', { options: { statusLine: 'on' } }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000_000 })
   const state: World = { agents: [working], registry: reg('impl-01', 'wE:p2'), env: ENV }
   const seen = world(on, state)

@@ -1,6 +1,6 @@
 {
   "name": "crew-pane",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Status line and pane for the crew this session raised inside Herdr, and the stream it conducts",
   "author": { "name": "Dustin Cheng" },
   "license": "MIT",
@@ -17,6 +17,13 @@
       "type": "string",
       "title": "Speak when a member blocks",
       "description": "Say it aloud with the system voice as well as showing a toast",
+      "options": ["off", "on"],
+      "default": "off"
+    },
+    "statusLine": {
+      "type": "string",
+      "title": "Status line",
+      "description": "Also show the crew in the status line (the pane always shows it)",
       "options": ["off", "on"],
       "default": "off"
     }

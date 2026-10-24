@@ -39,6 +39,7 @@ function inSession(path: string): string {
 // hooks share lives here rather than in `register`'s closure. `register` sets the options.
 let isOff = false
 let isSpeaking = false
+let isStatusLine = false
 let myPane = ''
 let cwd = ''
 let registryDir: string | null = null
@@ -122,7 +123,7 @@ async function poll($: EngineInterface, withStreams: boolean): Promise<void> {
     const now = await $.clock.now()
     const members = joinCrew({ rows, agents, myPane, showAll: before.showAll, prev: before.members, now, tabs, workspaces })
     await update($, crew, state => ({ ...state, members, streams, error: null }))
-    $.ui.status(statusText(members))
+    if (isStatusLine) $.ui.status(statusText(members))
     for (const alert of alerts(before.members, members)) {
       $.ui.toast(alert.text)
       if (alert.isBlocked && isSpeaking) void $.audio.speak(alert.text).catch(() => {})
@@ -139,11 +140,14 @@ async function isPaneShown($: EngineInterface): Promise<boolean> {
 export const register: Register = (on, options) => {
   isOff = options.enabled === 'off'
   isSpeaking = options.speak === 'on'
+  isStatusLine = options.statusLine === 'on'
 
   on('session.start', async ($, e, next) => {
     if ((await $.env.get('DMOKONG_MODS')) === '0') isOff = true
     if (isOff || !e.isInteractive) return next(e)
     cwd = e.cwd
+    // A session upgraded mid-flight may still hold the line an earlier version set.
+    if (!isStatusLine) $.ui.status(undefined)
     await $.command.register({ name: 'crew', description: 'Open the crew pane: herdr members and the conducted stream' })
     const isInside = (await $.env.get('HERDR_ENV')) === '1'
     if (isInside) myPane = (await $.env.get('HERDR_PANE_ID')) ?? ''
