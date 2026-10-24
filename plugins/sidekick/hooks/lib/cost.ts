@@ -27,6 +27,13 @@ export function priceOf(model: string): { input: number; output: number } | null
   return family === undefined ? null : (PRICES[family] ?? null)
 }
 
+/** A model's family as people say it (`Opus`, `Haiku`), from an alias, id or display name; the input when it names none. */
+export function modelName(model: string): string {
+  const name = model.toLowerCase()
+  const family = Object.keys(PRICES).find(key => name.includes(key))
+  return family === undefined ? model : `${family[0]!.toUpperCase()}${family.slice(1)}`
+}
+
 /** A call's `usage`, as the Messages API and `claude -p`'s result both report it. */
 export type Usage = {
   input_tokens?: number

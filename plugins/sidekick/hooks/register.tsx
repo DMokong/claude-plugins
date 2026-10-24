@@ -3,7 +3,7 @@ import type { EngineInterface, PromptSubmitInput, PromptSubmitResult, Register }
 
 import { MAX_MISSES, canStart, holdsMain, judgePrompt, judgeSystem, lockKeys, parseJudgment, precheck, taughtVerdict } from './lib/judge'
 import type { Judgment } from './lib/judge'
-import { NO_SPEND, addTally, tallyLine, tallyOf, tokens, usd } from './lib/cost'
+import { NO_SPEND, addTally, modelName, tallyLine, tallyOf, tokens, usd } from './lib/cost'
 import { migrate, toTaught } from './lib/state'
 import { HISTORY_KEY, NO_TOTALS, appendRow, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals } from './lib/history'
 import type { HistoryRow } from './lib/history'
@@ -1050,7 +1050,7 @@ export const register: Register = (on, options) => {
     const isStacked = width < 60
     const isPlain = width < 40
     const tileW = isStacked ? width - 2 : Math.floor((width - 2) / 3)
-    const mainModel = await $.session.model().catch(() => 'the main model')
+    const mainModel = modelName(await $.session.model().catch(() => 'the main model'))
     const tile = (key: string, title: string, value: string, color: string, caption: string) => (
       <Box key={key} flexDirection="column" borderStyle="round" borderColor={COLORS.line} paddingX={1} width={tileW}>
         <Text dimColor>{title}</Text>
@@ -1301,13 +1301,16 @@ export const register: Register = (on, options) => {
     // ── the control panel (image 3)
     const inner = Math.max(20, width - 4)
     const chip = (key: string, label: string, isOn_: boolean, color: string, act: () => void) => (
-      <Button key={key} plain onPress={act}>
-        {isOn_ ? (
-          <Text bold backgroundColor={color} color={COLORS.ink}>{` ${label} `}</Text>
-        ) : (
-          <Text>{` ${label} `}</Text>
-        )}
-      </Button>
+      <Box key={`chip-${key}`} flexWrap="nowrap">
+        <Button key={key} plain onPress={act}>
+          {isOn_ ? (
+            <Text bold backgroundColor={color} color={COLORS.ink}>{` ${label} `}</Text>
+          ) : (
+            <Text>{` ${label} `}</Text>
+          )}
+        </Button>
+        <Text>{' '}</Text>
+      </Box>
     )
     const rule = (key: string, title: string) => {
       const label = title === '' ? '' : `── ${spaced(title)} `
@@ -1352,9 +1355,21 @@ export const register: Register = (on, options) => {
       { key: 'launch-main', glyph: '↩', color: COLORS.green, label: 'Give last to main', act: () => void (lastDone !== undefined ? giveToMain($, lastDone.id) : $.ui.toast('Nothing finished yet')) },
       { key: 'launch-reset', glyph: '↺', color: COLORS.dim, label: 'Reset to defaults', act: () => void resetSettings($) },
     ]
-    const perRow = width >= 60 ? 2 : 1
+    // The band gets at most half the terminal: the panel takes the shape that fits its rows.
+    // full: rules, NOW, LAUNCH two to a row (~22 rows); roomy: no NOW (~17); tight: no rules,
+    // LAUNCH on one row of short labels (12).
+    const fit = maxRows >= 23 ? 'full' : maxRows >= 18 ? 'roomy' : 'tight'
+    const isTight = fit === 'tight'
+    const perRow = isTight ? launch.length : width >= 60 ? 2 : 1
     const launchRows = Array.from({ length: Math.ceil(launch.length / perRow) }, (_, r) => launch.slice(r * perRow, r * perRow + perRow))
-    const showNow = maxRows >= 26
+    const showNow = fit === 'full'
+    const shortLabel: Record<string, string> = {
+      'launch-dashboard': 'Dashboard',
+      'launch-learned': `Learned ${state.learned.length}`,
+      'launch-record': 'Record',
+      'launch-main': 'To main',
+      'launch-reset': 'Reset',
+    }
     const panel = !state.panelOpen ? null : (
       <Box key="sk-panel" flexDirection="column" borderStyle="round" borderColor={COLORS.claude} paddingX={1}>
         <Box flexWrap="nowrap">
@@ -1368,10 +1383,10 @@ export const register: Register = (on, options) => {
           <Text dimColor>{' · '}</Text>
           <Text color={COLORS.blue}>{costText}</Text>
         </Box>
-        {rule('r0', '')}
+        {!isTight && rule('r0', '')}
         <Box flexWrap="wrap">
           <Text dimColor>{'MODE      '}</Text>
-          {chip('mode-off', 'Off', state.mode === 'off', COLORS.dim, () => void setMode($, 'off'))}
+          {chip('mode-off', 'Off', state.mode === 'off', '#c9ced8', () => void setMode($, 'off'))}
           {chip('mode-shadow', 'Shadow', state.mode === 'shadow', COLORS.purple, () => void setMode($, 'shadow'))}
           {chip('mode-auto', 'Auto', state.mode === 'auto', COLORS.green, () => void setMode($, 'auto'))}
         </Box>
@@ -1387,7 +1402,7 @@ export const register: Register = (on, options) => {
             chip(`worker-${alias}`, label, state.settings.workerModel === alias, COLORS.purple, () => void setSetting($, 'workerModel', alias)),
           )}
         </Box>
-        {rule('r1', 'SETTINGS')}
+        {!isTight && rule('r1', 'SETTINGS')}
         {settingRow('investigations', 'Investigations', 'look into services, restart in place', toggle('investigations'))}
         {settingRow('draftJudging', 'Draft judging', 'judge while you type · ≈$0.0001 a pause', toggle('draftJudging'))}
         {settingRow('notifications', 'Notifications', 'a ping when a job finishes', toggle('notifications'))}
@@ -1424,15 +1439,16 @@ export const register: Register = (on, options) => {
                 <Text dimColor>{i === 0 ? 'Next' : 'Then'}</Text>
               </Box>
             ))}
-        {rule('r3', 'LAUNCH')}
+        {!isTight && rule('r3', 'LAUNCH')}
         {launchRows.map((row, r) => (
           <Box key={`lr-${r}`} flexWrap="nowrap">
             {row.map(item => (
-              <Box key={`li-${item.key}`} width={perRow === 2 ? Math.floor(inner / 2) : inner} flexWrap="nowrap">
-                <Text color={item.color}>{`${item.glyph}  `}</Text>
+              <Box key={`li-${item.key}`} width={isTight ? undefined : perRow === 2 ? Math.floor(inner / 2) : inner} flexWrap="nowrap">
+                <Text color={item.color}>{isTight ? `${item.glyph} ` : `${item.glyph}  `}</Text>
                 <Button key={item.key} plain onPress={item.act}>
-                  <Text>{item.label}</Text>
+                  <Text>{isTight ? shortLabel[item.key] ?? item.label : item.label}</Text>
                 </Button>
+                {isTight && <Text>{'   '}</Text>}
               </Box>
             ))}
           </Box>

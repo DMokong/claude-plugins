@@ -445,7 +445,7 @@ test('the pane draws the assist with its buttons on every surface', async ($, on
     expect(await ui.find({ type: 'Text', text: /^ {2}╷ $/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^DONE$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^SAVED$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /est\. vs Opus 5\.5/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /est\. vs Opus$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /WHERE IT WENT/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /LAST 7 DAYS/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Best day: today, 1 job/ })).toBeDefined()
@@ -861,4 +861,25 @@ test('the dashboard tabs pick the span, and a narrow pane stacks the tiles', asy
   // Too narrow for segment digits: plain numbers.
   expect(await tiny.find({ type: 'Text', text: /^1$/ })).toBeDefined()
   await tiny.unmount()
+})
+
+test('the panel takes the shape that fits the band: NOW when roomy, one LAUNCH row when tight', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  const tall = await $.ui.mount(BAND(100, 30))
+  await tall.press({ key: 'band-toggle' })
+  expect(await tall.find({ type: 'Text', text: /N O W/ })).toBeDefined()
+  expect(await tall.find({ type: 'Text', text: /What it learned/ })).toBeDefined()
+  await tall.unmount()
+  const short = await $.ui.mount(BAND(100, 12))
+  expect(await short.find({ type: 'Text', text: /N O W/ })).toBeUndefined()
+  expect(await short.find({ type: 'Text', text: /S E T T I N G S/ })).toBeUndefined()
+  expect(await short.find({ type: 'Text', text: /^Learned 0$/ })).toBeDefined()
+  for (const key of ['launch-dashboard', 'launch-learned', 'launch-record', 'launch-main', 'launch-reset', 'set-draftJudging', 'mode-auto']) {
+    expect(await short.find({ key })).toBeDefined()
+  }
+  const drawn = JSON.stringify(await (short as unknown as { drawn: () => Promise<unknown> }).drawn())
+  await short.unmount()
+  expect(drawn).toContain('Reset')
 })
