@@ -15,6 +15,31 @@ export type Tally = {
 /** One instruction file the main session loaded (a CLAUDE.md, a rules file), as it loaded it. */
 export type Instruction = { path: string; kind: string; content: string }
 
+/** The panel's settings: what the person changed there is kept across sessions; the rest follows the plugin's options. */
+export type Settings = {
+  judgeModel: string
+  workerModel: string
+  investigations: boolean
+  draftJudging: boolean
+  notifications: boolean
+  maxConcurrent: number
+}
+
+/** What the tiles and bars count over a span of the history. */
+export type Totals = {
+  done: number
+  chores: number
+  looks: number
+  toClaude: number
+  drafts: number
+  costUsd: number
+  savedUsd: number
+  draftUsd: number
+  choreUsd: number
+  lookUsd: number
+  claudeUsd: number
+}
+
 export type Verdict = 'mechanical' | 'investigate' | 'needs-main' | 'unclear'
 
 /** Which worker setup an assist runs with: a git/bd chore, or a look into something on this machine. */
@@ -101,6 +126,18 @@ export type SidekickState = {
    * same. Null until that happens in a conversation this mod saw (it is redone after a compaction or /clear).
    */
   instructions: Instruction[] | null
+  /** The settings in force: the plugin's options, with what the person changed in the panel over them. */
+  settings: Settings
+  /** True while the band shows the control panel rather than its one folded line. */
+  panelOpen: boolean
+  /** Today's totals across sessions, mirrored from the store's history so the band can draw them. */
+  today: Totals
+  /** The dashboard's span. */
+  tab: 'session' | 'today' | 'week'
+  /** What the pane shows: the dashboard, one job's details, or the learned corrections. */
+  view: 'dashboard' | 'learned' | 'job'
+  /** The job the pane shows when `view` is `job`. */
+  jobId: string
 }
 
 declare module 'claude-code' {

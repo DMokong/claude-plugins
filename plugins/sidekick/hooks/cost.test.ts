@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 
-import { NO_SPEND, addTally, priceOf, tallyLine, tallyOf, tokens, usd } from './lib/cost'
+import { NO_SPEND, addTally, modelName, priceOf, tallyLine, tallyOf, tokens, usd } from './lib/cost'
 
 const near = (actual: number, expected: number) => expect(Math.abs(actual - expected)).toBeLessThan(1e-10)
 
@@ -51,4 +51,11 @@ test('tallies add up, and read as one line', async () => {
   expect(usd(0.0312)).toBe('$0.031')
   expect(usd(-0.025)).toBe('-$0.025')
   expect(tokens(15068)).toBe('15.1k')
+})
+
+test('a model reads as its family, whatever the spelling', async () => {
+  expect(modelName('claude-opus-5-5[1m]')).toBe('Opus')
+  expect(modelName('Haiku 5.5')).toBe('Haiku')
+  expect(modelName('sonnet')).toBe('Sonnet')
+  expect(modelName('mystery-model')).toBe('mystery-model')
 })

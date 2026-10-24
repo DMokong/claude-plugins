@@ -3,6 +3,7 @@ import type { MockClock } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import type { SidekickState } from '../types'
+import { tallyOf } from './lib/cost'
 
 let clock: MockClock
 /** The mod's state as it last wrote it, seen from beneath. */
@@ -22,6 +23,8 @@ type World = {
   workerGate?: Promise<void>
   /** What the record folder holds, as `$.fs.list` answers. */
   listed?: { name: string; kind: 'file'; size: number; mtimeMs: number; isLink: boolean }[]
+  /** The main session's model, as `$.session.model()` answers. */
+  mainModel?: string
   /** What the store holds before the session starts. */
   stored?: Record<string, unknown>
 }
@@ -29,7 +32,20 @@ type World = {
 /** The engine beneath the mod: answers every call it makes and records what it did. */
 function world(on: On, w: World) {
   clock = mock.clock(on)
-  mock.store(on, w.stored)
+  // The mod's store, as a map the test can read and change (another session's write, say).
+  const store = new Map<string, unknown>(Object.entries(w.stored ?? {}).map(([k, v]) => [k, JSON.parse(JSON.stringify(v))]))
+  on('store.get', async (_$, e) => ({ value: store.has(e.key) ? JSON.parse(JSON.stringify(store.get(e.key))) : undefined }))
+  on('store.set', async (_$, e) => {
+    store.set(e.key, JSON.parse(JSON.stringify(e.value)))
+    return { value: undefined }
+  })
+  on('store.delete', async (_$, e) => {
+    store.delete(e.key)
+    return { value: undefined }
+  })
+  on('store.keys', async () => ({ value: [...store.keys()] }))
+  on('session.model', async () => ({ value: w.mainModel ?? 'Opus 5.5' }))
+  on('session.usage', async () => ({ value: { startedAt: 0, context: { tokens: 40_000, window: 200_000 }, rateLimits: [] } }))
   latest = undefined
   on('state.set', async (_$, e, next) => {
     if (e.plugin === 'sidekick' && e.key === 'sidekick') latest = e.value as SidekickState
@@ -51,8 +67,10 @@ function world(on: On, w: World) {
     judged: 0,
     judgments: [] as string[],
     systems: [] as string[],
+    judgedWith: [] as string[],
     toasts: [] as string[],
     status: [] as (string | undefined)[],
+    store,
     release: () => release(),
   }
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
@@ -101,6 +119,7 @@ function world(on: On, w: World) {
     if (e.prompt.includes('<message>')) {
       seen.judgments.push(e.prompt)
       seen.systems.push(typeof e.system === 'string' ? e.system : '')
+      seen.judgedWith.push(e.model ?? '')
     }
     if (w.judgeDelayMs !== undefined) await slow
     return { value: { isAnswered: true, text: w.judge, usage: { input_tokens: 1000, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }
@@ -310,6 +329,7 @@ test("the pane tags an investigation, and its record button copies the record's 
     props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
   } as never)
   expect(await ui.find({ type: 'Text', text: /investigate · check the acme-bot logs/ })).toBeDefined()
+  await openJob(ui, s.entries[0]?.id)
   await ui.press({ key: `dump-${s.entries[0]?.id}` })
   await ui.unmount()
   expect(copied).toEqual([s.entries[0]?.dump ?? ''])
@@ -346,6 +366,8 @@ test('with no instruction files yet, an investigation goes to main instead', asy
     requestId: 'sidekick',
     props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
   } as never)
+  await openJob(ui, (await state($)).entries[0]?.id)
+  expect(await ui.find({ type: 'Text', text: /no instruction files yet/ })).toBeDefined()
   expect(await ui.find({ key: `missed-${(await state($)).entries[0]?.id}` })).toBeUndefined()
   await ui.unmount()
 })
@@ -418,11 +440,22 @@ test('the pane draws the assist with its buttons on every surface', async ($, on
       requestId: 'sidekick',
       props: { title: 'Sidekick', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
     } as never)
-    expect(await ui.find({ type: 'Text', text: /✓ commit and push/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /▌ DONE/ })).toBeDefined()
+    if ((await ui.find({ key: 'back' })) !== undefined) await ui.press({ key: 'back' })
+    // The dashboard: hero tiles in segment digits, the live strip, the recent job.
+    expect(await ui.find({ key: 'tile-done' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ {2}╷ $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^DONE$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^SAVED$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /est\. vs Opus$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /WHERE IT WENT/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /LAST 7 DAYS/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Best day: today, 1 job/ })).toBeDefined()
     // The loaded version, read from the manifest, sits quietly in the header.
     expect((await ui.find({ type: 'Text', text: /^v9\.9\.9$/ }))?.text).toBe('v9.9.9')
     expect(await ui.find({ type: 'Text', text: /caching saved/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /commit and push/ })).toBeDefined()
+    // Its words are one press away.
+    await openJob(ui, (await state($)).entries[0]?.id)
     expect(await ui.find({ type: 'Text', text: /Committed 3f2a91c/ })).toBeDefined()
     // The handed-off prompt is not in the up-arrow history, so the pane recalls it.
     filled.length = 0
@@ -450,7 +483,26 @@ test('a draft judged while typing answers the submit without a second judge call
   expect((await state($)).entries[0]?.status).not.toBe('passed')
 })
 
-test('the band shows while on and stacks above the band beneath it', async ($, on) => {
+type Mounted = { press: (q: { key: string }) => Promise<unknown>; find: (q: object) => Promise<unknown> }
+
+/** Opens one job's details in the pane, from wherever it is: its buttons live there. */
+async function openJob(ui: Mounted, id: string | undefined): Promise<void> {
+  if ((await ui.find({ key: 'back' })) !== undefined) await ui.press({ key: 'back' })
+  await ui.press({ key: `job-${id}` })
+}
+
+/** The engine's own band, beneath the mod's: empty. */
+function underBand(on: On): void {
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{''}</Text>
+  })
+}
+
+const BAND = (columns = 100, maxRows = 40) =>
+  ({ plugin: 'sidekick', component: 'AbovePrompt', surface: 'terminal', props: { bodyColumns: columns, maxRows, hasSurvey: false, isWorking: false, view: {} } }) as never
+
+test('the folded line shows even while off, and stacks above the band beneath it', async ($, on) => {
   world(on, { judge: MECHANICAL, worker: DONE })
   // Another plugin's band, beneath this one.
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
@@ -458,21 +510,125 @@ test('the band shows while on and stacks above the band beneath it', async ($, o
     return <Text>other band</Text>
   })
   await $.session.start(START)
-  const BAND = { plugin: 'sidekick', component: 'AbovePrompt', props: { bodyColumns: 100, hasSurvey: false, view: {} } } as never
   for (const surface of ['terminal', 'desktop'] as const) {
-    const off = await $.ui.mount({ ...(BAND as object), surface } as never)
-    expect(await off.find({ type: 'Text', text: /◆ sidekick/ })).toBeUndefined()
+    const off = await $.ui.mount({ ...(BAND() as object), surface } as never)
+    expect(await off.find({ type: 'Text', text: /◆ sidekick/ })).toBeDefined()
+    expect(await off.find({ type: 'Text', text: /○ OFF/ })).toBeDefined()
+    expect(await off.find({ key: 'band-toggle' })).toBeDefined()
     expect(await off.find({ type: 'Text', text: /other band/ })).toBeDefined()
     await off.unmount()
   }
   await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
-  for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ ...(BAND as object), surface } as never)
-    expect(await ui.find({ type: 'Text', text: /◆ sidekick/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: / AUTO / })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /other band/ })).toBeDefined()
-    await ui.unmount()
+  const ui = await $.ui.mount(BAND())
+  expect(await ui.find({ type: 'Text', text: / ● AUTO / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /saved/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('while the judge warms up, the folded line says so', async ($, on) => {
+  // The judge's first call hangs until released: the warm-up is under way.
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, judgeDelayMs: 1 })
+  underBand(on)
+  await $.session.start(START)
+  // A judge idle for more than 45 s is cold: turning the sidekick on warms it.
+  await clock.advance(50_000)
+  void $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await until($, x => x.isWarming)
+  const ui = await $.ui.mount(BAND())
+  expect(await ui.find({ type: 'Text', text: /warming up/ })).toBeDefined()
+  await ui.unmount()
+  seen.release()
+  await until($, x => !x.isWarming)
+})
+
+test('the toggle opens the control panel; its chips and pills change the session and the settings', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  const ui = await $.ui.mount(BAND())
+  await ui.press({ key: 'band-toggle' })
+  expect((await state($)).panelOpen).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /S I D E K I C K/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /S E T T I N G S/ })).toBeDefined()
+  // One click from off to on.
+  await ui.press({ key: 'mode-auto' })
+  expect((await state($)).mode).toBe('auto')
+  await ui.press({ key: 'set-draftJudging' })
+  expect((await state($)).settings.draftJudging).toBe(false)
+  expect(seen.store.get('settings')).toEqual({ draftJudging: false })
+  await ui.press({ key: 'worker-sonnet' })
+  expect((await state($)).settings.workerModel).toBe('sonnet')
+  for (const n of [2, 3, 4, 1]) {
+    await ui.press({ key: 'set-maxConcurrent' })
+    expect((await state($)).settings.maxConcurrent).toBe(n)
   }
+  await ui.press({ key: 'launch-reset' })
+  expect((await state($)).settings).toEqual({ judgeModel: 'haiku', workerModel: 'haiku', investigations: true, draftJudging: true, notifications: true, maxConcurrent: 1 })
+  expect(seen.store.get('settings')).toEqual({})
+  await ui.press({ key: 'band-toggle' })
+  expect((await state($)).panelOpen).toBe(false)
+  await ui.unmount()
+})
+
+test('typing folds the panel', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  on('prompt.edit', async (_$, e) => ({ text: e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end), cursor: e.start + e.inputText.length }))
+  underBand(on)
+  await $.session.start(START)
+  const ui = await $.ui.mount(BAND())
+  await ui.press({ key: 'band-toggle' })
+  await ui.unmount()
+  const typing = $.prompt as unknown as { edit: (e: unknown) => Promise<unknown> }
+  await typing.edit({ origin: { kind: 'composer' }, text: '', cursor: 0, start: 0, end: 0, inputText: 'c' })
+  expect((await state($)).panelOpen).toBe(false)
+})
+
+test('while a job runs, the band shows its card: the latest command and Working', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  world(on, { judge: MECHANICAL, worker: DONE, workerGate: gate })
+  underBand(on)
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'running' && x.entries[0].steps.length > 0)
+  const ui = await $.ui.mount(BAND())
+  expect(await ui.find({ type: 'Text', text: /Working/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /git commit -m x/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Report back to Claude/ })).toBeDefined()
+  await ui.unmount()
+  open()
+  await until($, x => x.entries[0]?.status === 'done')
+})
+
+test('a narrow band keeps the toggle and drops cost, then saved, then the counts', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const wide = await $.ui.mount(BAND(120))
+  expect(await wide.find({ type: 'Text', text: /^cost/ })).toBeDefined()
+  await wide.unmount()
+  const mid = await $.ui.mount(BAND(60))
+  expect(await mid.find({ type: 'Text', text: /^cost/ })).toBeUndefined()
+  expect(await mid.find({ type: 'Text', text: /^saved/ })).toBeDefined()
+  await mid.unmount()
+  const narrow = await $.ui.mount(BAND(40))
+  expect(await narrow.find({ key: 'band-toggle' })).toBeDefined()
+  expect(await narrow.find({ type: 'Text', text: /^saved/ })).toBeUndefined()
+  await narrow.unmount()
+})
+
+test('state a 0.3.0 session wrote draws the band', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  on('state.get', async (_$, e, next) => (e.key === 'sidekick' ? { value: { value: { mode: 'auto', entries: [] }, version: 1 } } : next(e)))
+  underBand(on)
+  await $.session.start(START)
+  const ui = await $.ui.mount(BAND())
+  expect(await ui.find({ key: 'band-toggle' })).toBeDefined()
+  await ui.unmount()
 })
 
 test("should've been sidekick teaches the judge: the next judgment carries the miss", async ($, on) => {
@@ -488,6 +644,7 @@ test("should've been sidekick teaches the judge: the next judgment carries the m
     requestId: 'sidekick',
     props: { title: 'Sidekick', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
   } as never)
+  await openJob(ui, (await state($)).entries[0]?.id)
   await ui.press({ key: `missed-${(await state($)).entries[0]?.id}` })
   await ui.unmount()
   expect(seen.toasts.some(t => t.includes('tidy up merged branches'))).toBe(true)
@@ -510,7 +667,9 @@ test('learned corrections can be listed and forgotten, from the pane and the com
   for (const text of ['tidy up merged branches', 'sync with origin']) {
     await $.prompt.submit({ text, ...TYPED })
     const ui = await pane()
-    await ui.press({ key: `missed-${(await state($)).entries.find(x => x.prompt === text)?.id}` })
+    const id = (await state($)).entries.find(x => x.prompt === text)?.id
+    await openJob(ui, id)
+    await ui.press({ key: `missed-${id}` })
     await ui.unmount()
   }
   const run = (args: string) => $.command.run({ command: 'sidekick', args, origin: { kind: 'composer' }, presentation: 'inline' } as never) as Promise<{ text: string }>
@@ -519,6 +678,8 @@ test('learned corrections can be listed and forgotten, from the pane and the com
   expect(listed).toContain('2. [chore] tidy up merged branches')
 
   const ui = await pane()
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'view-learned' })
   expect(await ui.find({ type: 'Text', text: /LEARNED/ })).toBeDefined()
   await ui.press({ key: 'forget-tidy up merged branches' })
   await ui.unmount()
@@ -559,8 +720,12 @@ test("should've been sidekick on a message about a running service teaches inves
     requestId: 'sidekick',
     props: { title: 'Sidekick', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
   } as never)
+  await openJob(ui, (await state($)).entries[0]?.id)
   await ui.press({ key: `missed-${(await state($)).entries[0]?.id}` })
-  expect(await ui.find({ type: 'Text', text: /\[investigate\] acme-bot logs look wrong/ })).toBeDefined()
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'view-learned' })
+  expect(await ui.find({ type: 'Text', text: /\[investigate\] / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /acme-bot logs look wrong/ })).toBeDefined()
   await ui.unmount()
   expect((await state($)).learned).toEqual([{ text: 'acme-bot logs look wrong', verdict: 'investigate' }])
   await $.prompt.submit({ text: 'acme-bot health', ...TYPED })
@@ -590,20 +755,221 @@ test("the worker gets the instruction files the main session loaded, and the pan
   await ui.unmount()
 })
 
-test('the band stays on one line when narrow: the least useful parts give way first', async ($, on) => {
-  world(on, { judge: MECHANICAL, worker: DONE })
-  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
-    const { Text } = $.ui.resolve(e)
-    return <Text>beneath</Text>
-  })
+test('settings changed in an earlier session are in force, and only changed ones are kept', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, stored: { settings: { workerModel: 'sonnet', notifications: false } } })
   await $.session.start(START)
   await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
-  const band = (columns: number) => ({ plugin: 'sidekick', component: 'AbovePrompt', surface: 'terminal', props: { bodyColumns: columns, hasSurvey: false, view: {} } }) as never
-  const wide = await $.ui.mount(band(120))
-  expect(await wide.find({ type: 'Text', text: /assists/ })).toBeDefined()
-  await wide.unmount()
-  const narrow = await $.ui.mount(band(46))
-  expect(await narrow.find({ type: 'Text', text: /◆ sidekick/ })).toBeDefined()
-  expect(await narrow.find({ type: 'Text', text: /assists/ })).toBeUndefined()
+  const s0 = await state($)
+  expect(s0.settings.workerModel).toBe('sonnet')
+  expect(s0.settings.notifications).toBe(false)
+  expect(s0.settings.draftJudging).toBe(true)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'done')
+  const argv = seen.spawned[0] ?? []
+  expect(argv[argv.indexOf('--model') + 1]).toBe('sonnet')
+  // Notifications off: no ping, but the chat line still says it.
+  expect(seen.notified).toEqual([])
+  expect(seen.logs.some(line => line.startsWith('✓ Committed 3f2a91c'))).toBe(true)
+})
+
+test("another session's change is in force from the next message", async ($, on) => {
+  const seen = world(on, { judge: NEEDS_MAIN, worker: DONE })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'tidy up', ...TYPED })
+  seen.store.set('settings', { judgeModel: 'sonnet' })
+  await $.prompt.submit({ text: 'tidy up again', ...TYPED })
+  expect(seen.judgedWith.at(-2)).toBe('haiku')
+  expect(seen.judgedWith.at(-1)).toBe('sonnet')
+})
+
+test('draft judging off: pauses in typing cost nothing, and a sent message is still judged', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, stored: { settings: { draftJudging: false } } })
+  on('prompt.edit', async (_$, e) => ({ text: e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end), cursor: e.start + e.inputText.length }))
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const before = seen.judgments.length
+  const typing = $.prompt as unknown as { edit: (e: unknown) => Promise<unknown> }
+  await typing.edit({ origin: { kind: 'composer' }, text: '', cursor: 0, start: 0, end: 0, inputText: 'commit and push' })
+  await clock.advance(2_000)
+  expect(seen.judgments.length).toBe(before)
+  const result = await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  expect(result.drop).toContain('→ sidekick')
+  expect(seen.judgments.length).toBe(before + 1)
+})
+
+test('investigations off: an investigate verdict goes to main, saying why', async ($, on) => {
+  const seen = world(on, { judge: INVESTIGATE, worker: LOOKED, stored: { settings: { investigations: false } } })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await withInstructions($ as never)
+  const result = await $.prompt.submit({ text: 'acme-bot stopped replying, look into it', ...TYPED })
+  expect(result.drop).toBeUndefined()
+  expect(seen.logs.some(line => line.includes('investigations are off'))).toBe(true)
+  expect(seen.spawned).toEqual([])
+})
+
+test('history: finished work and passes are kept across sessions, and give to main takes the saving back', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  const s = await until($, x => x.entries[0]?.status === 'done' && x.today.done === 1)
+  const rows = seen.store.get('history') as { kind: string; status: string; savedUsd: number; id: string }[]
+  expect(rows.length).toBe(1)
+  expect(rows[0]?.kind).toBe('chore')
+  expect(rows[0]?.status).toBe('done')
+  // One Opus turn on a 40k context is worth more than a Haiku chore costs.
+  expect(rows[0]!.savedUsd).toBeGreaterThan(0.02)
+  expect(s.today.savedUsd).toBe(rows[0]!.savedUsd)
+  const ui = await $.ui.mount({
+    plugin: 'sidekick',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'sidekick',
+    props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
+  } as never)
+  await openJob(ui, s.entries[0]?.id)
+  await ui.press({ key: `main-${s.entries[0]?.id}` })
+  await ui.unmount()
+  const after = await until($, x => x.today.savedUsd === 0)
+  expect(after.today.done).toBe(0)
+  expect((seen.store.get('history') as { status: string }[])[0]?.status).toBe('given')
+})
+
+test('a pass to Claude is kept in the history too', async ($, on) => {
+  const seen = world(on, { judge: NEEDS_MAIN, worker: DONE })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'rename the judge function', ...TYPED })
+  expect((seen.store.get('history') as { kind: string }[]).map(r => r.kind)).toEqual(['to-claude'])
+})
+
+test('the dashboard tabs pick the span, and a narrow pane stacks the tiles', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'done' && x.today.done === 1)
+  const pane = (columns: number) =>
+    $.ui.mount({
+      plugin: 'sidekick',
+      surface: 'terminal',
+      component: 'Pane',
+      requestId: 'sidekick',
+      props: { title: 'Sidekick', isFocused: false, bodyColumns: columns, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
+    } as never)
+  const ui = await pane(100)
+  for (const tab of ['week', 'session', 'today'] as const) {
+    await ui.press({ key: `tab-${tab}` })
+    expect((await state($)).tab).toBe(tab)
+    // One chore in every span: the DONE tile draws a 1.
+    expect(await ui.find({ type: 'Text', text: /^ {2}╷ $/ })).toBeDefined()
+  }
+  expect(await ui.find({ type: 'Text', text: /1 chores · 0 looks/ })).toBeDefined()
+  await ui.unmount()
+  const narrow = await pane(50)
+  const drawn = JSON.stringify(await (narrow as unknown as { drawn: () => Promise<unknown> }).drawn())
+  // Stacked: the tiles sit in a column, DONE above SAVED.
+  expect(drawn.indexOf('"DONE"')).toBeLessThan(drawn.indexOf('"SAVED"'))
+  expect(drawn).toContain('"flexDirection":"column"')
   await narrow.unmount()
+  const tiny = await pane(30)
+  // Too narrow for segment digits: plain numbers.
+  expect(await tiny.find({ type: 'Text', text: /^1$/ })).toBeDefined()
+  await tiny.unmount()
+})
+
+test('the panel takes the shape that fits the band: NOW when roomy, one LAUNCH row when tight', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  const tall = await $.ui.mount(BAND(100, 30))
+  await tall.press({ key: 'band-toggle' })
+  expect(await tall.find({ type: 'Text', text: /N O W/ })).toBeDefined()
+  expect(await tall.find({ type: 'Text', text: /What it learned/ })).toBeDefined()
+  await tall.unmount()
+  const short = await $.ui.mount(BAND(100, 12))
+  expect(await short.find({ type: 'Text', text: /N O W/ })).toBeUndefined()
+  expect(await short.find({ type: 'Text', text: /S E T T I N G S/ })).toBeUndefined()
+  expect(await short.find({ type: 'Text', text: /^Learned 0$/ })).toBeDefined()
+  for (const key of ['launch-dashboard', 'launch-learned', 'launch-record', 'launch-main', 'launch-reset', 'set-draftJudging', 'mode-auto']) {
+    expect(await short.find({ key })).toBeDefined()
+  }
+  const drawn = JSON.stringify(await (short as unknown as { drawn: () => Promise<unknown> }).drawn())
+  await short.unmount()
+  expect(drawn).toContain('Reset')
+})
+
+test("a draft's judge call is counted once: as draft judging, not again on the message it answered", async ($, on) => {
+  const seen = world(on, { judge: NEEDS_MAIN, worker: DONE })
+  on('prompt.edit', async (_$, e) => ({ text: e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end), cursor: e.start + e.inputText.length }))
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const typing = $.prompt as unknown as { edit: (e: unknown) => Promise<unknown> }
+  await typing.edit({ origin: { kind: 'composer' }, text: '', cursor: 0, start: 0, end: 0, inputText: 'rename the judge' })
+  await clock.advance(500)
+  await until($, () => Array.isArray(seen.store.get('history')))
+  await $.prompt.submit({ text: 'rename the judge', ...TYPED })
+  const rows = seen.store.get('history') as { kind: string; judgeUsd: number }[]
+  const judged = rows.reduce((n, r) => n + r.judgeUsd, 0)
+  // One judge call: 1000 input tokens and 1 output at Haiku's rates.
+  expect(Math.abs(judged - tallyOf('haiku', { input_tokens: 1000, output_tokens: 1 }).usd) < 1e-12).toBe(true)
+  expect(rows.map(r => r.kind).sort()).toEqual(['draft', 'to-claude'])
+})
+
+test('two jobs finishing together both land in the history', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, workerGate: gate, stored: { settings: { maxConcurrent: 2 } } })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await $.prompt.submit({ text: 'close the bd issue', ...TYPED })
+  await until($, x => x.entries.filter(e => e.status === 'running').length === 2)
+  open()
+  await until($, x => x.entries.every(e => e.status === 'done') && x.today.done === 2)
+  expect((seen.store.get('history') as unknown[]).length).toBe(2)
+})
+
+test('the folded line fits its width, keeping the toggle, at every width', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  for (const mode of ['off', 'auto', 'shadow'] as const) {
+    if (mode !== 'off') await $.command.run({ command: 'sidekick', args: mode, origin: { kind: 'composer' }, presentation: 'inline' } as never)
+    for (const width of [24, 30, 40, 66, 67, 68, 80, 120]) {
+      const ui = await $.ui.mount(BAND(width))
+      const tree = (await (ui as unknown as { drawn: () => Promise<unknown> }).drawn()) as { children?: unknown[] }
+      // The folded line is the last row the mod draws, above the band beneath it.
+      const rows = (tree.children ?? []) as { props?: { key?: string } ; children?: unknown[] }[]
+      const line = rows.find(r => JSON.stringify(r).includes('band-toggle'))
+      const text = (JSON.stringify(line).match(/"(?:children|label)":"([^"]*)"/g) ?? []).map(m => JSON.parse(m.slice(m.indexOf(':') + 1)) as string).join('')
+      expect(text.length).toBeLessThanOrEqual(width)
+      expect(await ui.find({ key: 'band-toggle' })).toBeDefined()
+      await ui.unmount()
+    }
+  }
+})
+
+test('tiles sit side by side only where segment money fits in them', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  await $.session.start(START)
+  const pane = (columns: number) =>
+    $.ui.mount({
+      plugin: 'sidekick',
+      surface: 'terminal',
+      component: 'Pane',
+      requestId: 'sidekick',
+      props: { title: 'Sidekick', isFocused: false, bodyColumns: columns, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
+    } as never)
+  for (const [columns, isRow] of [[66, false], [67, false], [68, true]] as const) {
+    const ui = await pane(columns)
+    const drawn = (await (ui as unknown as { drawn: () => Promise<unknown> }).drawn()) as object
+    const tiles = JSON.stringify(drawn).match(/"flexDirection":"(row|column)","marginTop":1/)
+    expect(tiles?.[1]).toBe(isRow ? 'row' : 'column')
+    await ui.unmount()
+  }
 })

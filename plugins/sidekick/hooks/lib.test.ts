@@ -4,6 +4,10 @@ import { JUDGE_SYSTEM, canStart, holdsMain, judgeSystem, lockKeys, parseJudgment
 import { migrate, toTaught } from './lib/state'
 import { EMPTY } from './register'
 import { INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPrompt, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
+import { COLORS, barCells, bigText, bigWidth, dayLevels, spaced, tileMoney } from './lib/draw'
+import { appendRow, weekStart, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals } from './lib/history'
+import type { HistoryRow } from './lib/history'
+import { JUDGE_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
 import { DUMP_KEEP, dumpDir, dumpName, dumpText, redact } from './lib/dump'
 
 test('precheck lets short imperative chores through to the judge', async () => {
@@ -378,4 +382,122 @@ test('the worker is told to name the upstream in ranges, where braces are refuse
   expect(WORKER_SYSTEM).not.toContain('braces are refused')
   // Claude Code's own prompt says to branch first on the default branch; the worker must not.
   expect(WORKER_SYSTEM).toContain('Work on the branch that is checked out')
+})
+
+test('segment digits are five rows tall and line up', async () => {
+  const rows = bigText('27')
+  expect(rows.length).toBe(5)
+  expect(rows[0]).toBe('╶──╮ ╶──╮')
+  expect(bigWidth('27')).toBe(9)
+  for (const row of rows) expect(row.length).toBe(9)
+  expect(bigText('$4.18')[0]?.startsWith('$')).toBe(true)
+  expect(new Set(bigText('$0.21').map(r => r.length)).size).toBe(1)
+  expect(COLORS.claude).toBe('#d97757')
+})
+
+test('tile money is short: cents, dollars, thousands, never negative', async () => {
+  expect(tileMoney(0)).toBe('$0')
+  expect(tileMoney(-1)).toBe('$0')
+  expect(tileMoney(0.0042)).toBe('$.004')
+  expect(tileMoney(4.183)).toBe('$4.18')
+  expect(tileMoney(42.4)).toBe('$42')
+  expect(tileMoney(1234)).toBe('$1.2k')
+})
+
+test('bars and day blocks share one scale, and anything above zero shows', async () => {
+  expect(barCells(19, 63, 30)).toEqual({ filled: 9, empty: 21 })
+  expect(barCells(1, 1000, 30).filled).toBe(1)
+  expect(barCells(0, 5, 30)).toEqual({ filled: 0, empty: 30 })
+  expect(barCells(5, 0, 30)).toEqual({ filled: 0, empty: 30 })
+  expect(dayLevels([3, 9, 27])).toEqual([1, 1, 4])
+  expect(dayLevels([0, 0])).toEqual([0, 0])
+  expect(spaced('NOW')).toBe('N O W')
+})
+
+const DAY = 24 * 60 * 60 * 1000
+const near = (a: number | undefined, b: number): boolean => a !== undefined && Math.abs(a - b) < 1e-10
+const row = (over: Partial<HistoryRow>): HistoryRow => ({ at: 0, kind: 'chore', status: 'done', ms: 1000, judgeUsd: 0.0001, workerUsd: 0.001, savedUsd: 0.02, id: 'x', ...over })
+
+test('history keeps 35 days, and draft spend is one row a day', async () => {
+  const now = Date.UTC(2026, 9, 24, 12)
+  const old = row({ at: now - 36 * DAY, id: 'old' })
+  expect(appendRow([old], row({ at: now, id: 'new' }), now).map(r => r.id)).toEqual(['new'])
+  const drafts = appendRow(appendRow([], row({ at: now, kind: 'draft', status: 'passed', judgeUsd: 0.0001, workerUsd: 0, savedUsd: 0, id: 'd1' }), now), row({ at: now + 1000, kind: 'draft', status: 'passed', judgeUsd: 0.0002, workerUsd: 0, savedUsd: 0, id: 'd2' }), now)
+  expect(drafts.length).toBe(1)
+  expect(drafts[0]?.count).toBe(2)
+  expect(totals(drafts, 0).drafts).toBe(2)
+  expect(near(drafts[0]?.judgeUsd, 0.0003)).toBe(true)
+  expect(toRows([row({ id: 'ok' }), 'junk', { at: 'x' }]).map(r => r.id)).toEqual(['ok'])
+})
+
+test('totals count finished work, and SAVED never goes below zero', async () => {
+  const rows = [
+    row({ id: 'a' }),
+    row({ id: 'b', kind: 'investigate', status: 'partial', savedUsd: 0.03 }),
+    row({ id: 'c', status: 'stopped', savedUsd: 0 }),
+    row({ id: 'd', kind: 'to-claude', status: 'passed', workerUsd: 0, savedUsd: 0 }),
+    row({ id: 'e', kind: 'draft', status: 'passed', judgeUsd: 0.0005, workerUsd: 0, savedUsd: 0 }),
+  ]
+  const t = totals(rows, 0)
+  expect(t.done).toBe(2)
+  expect(t.chores).toBe(1)
+  expect(t.looks).toBe(1)
+  expect(t.toClaude).toBe(1)
+  expect(near(t.savedUsd, 0.05)).toBe(true)
+  expect(near(t.draftUsd, 0.0005)).toBe(true)
+  const given = totals(markGiven(rows, 'a'), 0)
+  expect(near(given.savedUsd, 0.03)).toBe(true)
+  expect(given.done).toBe(1)
+  expect(totals([row({ status: 'stopped', savedUsd: 0 })], 0).savedUsd).toBe(0)
+  expect(totals(rows, Number.MAX_SAFE_INTEGER).done).toBe(0)
+})
+
+test('seven days, oldest first, with today last, the best day and the streak', async () => {
+  const now = startOfDay(Date.UTC(2026, 9, 24, 12)) + 12 * 60 * 60 * 1000
+  const rows = [row({ at: now }), row({ at: now }), row({ at: now - DAY }), row({ at: now - 3 * DAY })]
+  const days = perDay(rows, now)
+  expect(days.length).toBe(7)
+  expect(days[6]?.isToday).toBe(true)
+  expect(days.map(d => d.jobs)).toEqual([0, 0, 0, 1, 0, 1, 2])
+  expect(streak(days)).toBe(2)
+  expect(bestDay(days)?.jobs).toBe(2)
+  expect(['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']).toContain(days[0]?.label)
+})
+
+test("SAVED is one main-model turn the sidekick took, less what it spent", async () => {
+  expect(near(savedFor('Opus 5.5', 40_000, 0.002), 0.024)).toBe(true)
+  expect(near(savedFor('opus', undefined, 0.002), 0.024)).toBe(true)
+  expect(near(savedFor('some-unknown-model', 40_000, 0.002), 0.024)).toBe(true)
+  expect(savedFor('opus', undefined, 1)).toBe(0)
+})
+
+test('settings: the plugin options are the defaults, and only changed fields are stored', async () => {
+  const defaults = defaultsFrom({ judgeModel: 'haiku', workerModel: '', maxConcurrent: '9' })
+  expect(defaults).toEqual({ judgeModel: 'haiku', workerModel: 'haiku', investigations: true, draftJudging: true, notifications: true, maxConcurrent: 4 })
+  const live = effective(defaults, { draftJudging: false, judgeModel: 3, maxConcurrent: 2 })
+  expect(live.draftJudging).toBe(false)
+  expect(live.judgeModel).toBe('haiku')
+  expect(live.maxConcurrent).toBe(2)
+  expect(effective(defaults, 'junk')).toEqual(defaults)
+  expect(withChange({ notifications: false }, 'draftJudging', false)).toEqual({ notifications: false, draftJudging: false })
+  expect(withChange(undefined, 'workerModel', 'sonnet')).toEqual({ workerModel: 'sonnet' })
+  expect(chipsFor(JUDGE_CHIPS, 'claude-sonnet-5-5').length).toBe(3)
+  expect(chipsFor(JUDGE_CHIPS, 'sonnet').length).toBe(2)
+})
+
+test('state from 0.3.0 gets the panel, settings and today defaults', async () => {
+  const state = migrate({ mode: 'auto' } as never, EMPTY)
+  expect(state.panelOpen).toBe(false)
+  expect(state.tab).toBe('today')
+  expect(state.view).toBe('dashboard')
+  expect(state.settings).toEqual(EMPTY.settings)
+  expect(state.today.done).toBe(0)
+})
+
+test('the week starts six calendar days before today, whatever the clocks did', async () => {
+  const now = Date.UTC(2026, 9, 24, 12)
+  const start = weekStart(now)
+  expect(new Date(start).getHours()).toBe(0)
+  expect(Math.round((startOfDay(now) - start) / DAY)).toBe(6)
+  expect(perDay([], now)[0]?.label).toBe(['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(start).getDay()])
 })
