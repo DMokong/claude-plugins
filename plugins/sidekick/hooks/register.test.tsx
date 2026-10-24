@@ -991,3 +991,75 @@ test('the panel pops up at the right end, a fixed width, not across the band', a
   await narrow.unmount()
   expect(small).toContain('"width":50')
 })
+
+type Node = { type?: string; props?: Record<string, unknown>; children?: (Node | string)[] }
+
+/** The text a node draws, its children's in order. */
+function textOf(node: Node | string): string {
+  if (typeof node === 'string') return node
+  return (node.children ?? []).map(textOf).join('')
+}
+
+/** Every row of the open panel that must stay on one line: its own nowrap boxes. */
+function panelRows(tree: Node): { width: number; rows: string[] } {
+  const find = (n: Node): Node | undefined =>
+    n.props?.key === 'sk-panel' ? n : (n.children ?? []).filter((c): c is Node => typeof c !== 'string').map(find).find(x => x !== undefined)
+  const panel = find(tree)!
+  const rows: string[] = []
+  const walk = (n: Node) => {
+    if (n.type === 'Box' && n.props?.flexWrap === 'nowrap' && n.props?.key !== 'sk-panel') rows.push(textOf(n))
+    else for (const c of n.children ?? []) if (typeof c !== 'string') walk(c)
+  }
+  for (const c of panel.children ?? []) if (typeof c !== 'string') walk(c)
+  return { width: Number(panel.props?.width), rows }
+}
+
+test('the panel picks a layout that fits its width: no row runs over, every control stays', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  world(on, { judge: INVESTIGATE, worker: LOOKED, workerGate: gate })
+  underBand(on)
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await withInstructions($ as never)
+  await $.prompt.submit({ text: 'acme-bot stopped replying overnight, look into it please', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'running')
+  const first = await $.ui.mount(BAND(100, 30))
+  await first.press({ key: 'band-toggle' })
+  await first.unmount()
+  for (const width of [120, 72, 64, 60, 50, 44, 40, 34, 28, 24]) {
+    for (const maxRows of [30, 12]) {
+      const ui = await $.ui.mount(BAND(width, maxRows))
+      const { width: w, rows } = panelRows((await (ui as unknown as { drawn: () => Promise<unknown> }).drawn()) as Node)
+      for (const row of rows) expect(row.length).toBeLessThanOrEqual(Math.max(20, w - 4))
+      for (const key of ['mode-auto', 'judge-haiku', 'worker-opus', 'set-draftJudging', 'set-maxConcurrent', 'launch-dashboard', 'launch-reset']) {
+        expect(await ui.find({ key })).toBeDefined()
+      }
+      await ui.unmount()
+    }
+  }
+  open()
+  await until($, x => x.entries[0]?.status === 'done')
+})
+
+test('a narrow panel drops the notes and shortens chips; a wide one keeps them', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  const wide = await $.ui.mount(BAND(100))
+  await wide.press({ key: 'band-toggle' })
+  expect(await wide.find({ type: 'Text', text: /look into services/ })).toBeDefined()
+  expect(await wide.find({ type: 'Text', text: /What it learned/ })).toBeDefined()
+  await wide.unmount()
+  const compact = await $.ui.mount(BAND(56))
+  expect(await compact.find({ type: 'Text', text: /look into services/ })).toBeUndefined()
+  expect(await compact.find({ type: 'Text', text: /^Learned 0$/ })).toBeDefined()
+  expect(await compact.find({ type: 'Text', text: / Haiku 5\.5 / })).toBeDefined()
+  await compact.unmount()
+  const mini = await $.ui.mount(BAND(36))
+  expect(await mini.find({ type: 'Text', text: /^ Haiku $/ })).toBeDefined()
+  expect(await mini.find({ type: 'Text', text: /^ 1× $/ })).toBeDefined()
+  await mini.unmount()
+})

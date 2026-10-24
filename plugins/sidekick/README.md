@@ -308,8 +308,10 @@ change is kept: a setting you never touched follows the plugin's options (see
 session**: every session starts off, so a forgotten `auto` never takes chores in another project. A
 change made in one session reaches your other open sessions with their next message.
 
-On a short terminal (the band gets at most half the rows), the panel drops its section rules and NOW,
-and puts LAUNCH on one row.
+The panel fits the room it has. On a short terminal (the band gets at most half the rows), it drops
+its section rules and NOW and packs LAUNCH into short labels. On a narrow one it drops the settings'
+notes; narrower still, the model chips read `Haiku`, `Sonnet`, `Opus` and the pills `On` / `Off` /
+`1×`. Every control stays.
 
 ---
 
@@ -617,7 +619,8 @@ and rendered to SVG.
 
 | Version | |
 |---|---|
-| **0.4.1** | The control panel pops up from the right end of the line, above its button, at a fixed width (72 columns), instead of spanning the whole band. |
+| **0.4.2** | The control panel picks its layout from the room it has: wide keeps every note, compact drops the notes and packs the shortcuts, mini also shortens the model chips and pills. No row runs over at any width. |
+| 0.4.1 | The control panel pops up from the right end of the line, above its button, at a fixed width (72 columns), instead of spanning the whole band. |
 | 0.4.0 | **A control panel and a dashboard.** The band folds to one line (shown even while off) and opens into a control panel: mode, judge and worker models, investigations, draft judging, notifications and side-by-side as live switches that stick across sessions, plus shortcuts. A live card shows the running job. The pane is now a dashboard: DONE / SAVED / COST tiles in big digits for the session, today or the week, where the work went, the last 7 days, and recent jobs that open into their details. A history of finished jobs is kept 35 days. |
 | 0.3.0 | **Investigations**: a fourth verdict, `investigate`, for "look into it", "why did X fail" and "restart X". The worker may run any command but the guard's (which now holds the data-loss line outside git too), restarts in place and verifies, and leaves a full redacted record Claude can read. Investigations don't hold your messages to Claude. Corrections teach chore or investigate. `give to main` on a finished entry hands it over for context, with SHAs, changes and doubts. The braces rule now says what's actually refused (`@{u}` in a range). Worker sessions no longer leave saved output on disk. |
 | 0.2.5 | The worker gets the instruction files your main session loaded (CLAUDE.md, rules), in its cached system prompt; the pane shows them as `context`. Credential files (`.env`, `.mcp.json`, keys) can't be read by any worker tool. The worker no longer loads auto-memory of its own. |
