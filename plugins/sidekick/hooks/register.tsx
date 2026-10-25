@@ -1605,7 +1605,6 @@ export const register: Register = (on, options) => {
       </Box>
     )
     const toggle = (key: 'investigations' | 'draftJudging' | 'notifications') => pill(`set-${key}`, state.settings[key], () => void toggleSetting($, key))
-    const nextJob = queued.at(-1)
     const lastDump = state.entries.find(x => x.dump !== '')
     const lastDone = state.entries.find(x => x.status === 'done' || x.status === 'stopped' || x.status === 'failed')
     const openPane = (view: SidekickState['view']) => {
@@ -1620,17 +1619,15 @@ export const register: Register = (on, options) => {
       { key: 'launch-reset', glyph: '↺', color: COLORS.dim, label: 'Reset to defaults', act: () => void resetSettings($) },
     ]
     // The band gets at most half the terminal: the panel takes the shape that fits its rows.
-    // full: rules, NOW, LAUNCH three to a row (~21 rows); roomy: no NOW (~16); tight: no rules,
-    // LAUNCH on one row of short labels (12).
-    const fit = maxRows >= 23 ? 'full' : maxRows >= 18 ? 'roomy' : 'tight'
-    const isTight = fit === 'tight'
+    // At most 15 rows (Dustin), so the folded line stays in view: rules, LAUNCH three to a row;
+    // tight: no rules, LAUNCH on one row of short labels (12). No NOW: the job card shows it.
+    const isTight = maxRows < 18
     // Short labels on wrapping rows when the rows are few or the panel is narrow.
     const isPacked = isTight || size !== 'wide'
     // Three to a row keeps LAUNCH to two rows.
     const perRow = isPacked ? launch.length : 3
     const cellW = Math.floor(inner / perRow)
     const launchRows = Array.from({ length: Math.ceil(launch.length / perRow) }, (_, r) => launch.slice(r * perRow, r * perRow + perRow))
-    const showNow = fit === 'full'
     const shortLabel: Record<string, string> = {
       'launch-dashboard': 'Dashboard',
       'launch-learned': `Learned ${state.learned.length}`,
@@ -1683,31 +1680,6 @@ export const register: Register = (on, options) => {
             <Text backgroundColor="#2a2f3a">{isMini ? ` ${state.settings.maxConcurrent}× ` : ` ${state.settings.maxConcurrent} at a time `}</Text>
           </Button>,
         )}
-        {showNow && rule('r2', 'NOW')}
-        {showNow && lead === undefined && nextJob === undefined && <Text dimColor>{'nothing running'}</Text>}
-        {showNow && lead !== undefined && (
-          <Box flexWrap="nowrap">
-            <Text color={COLORS.pink}>{'● '}</Text>
-            {size === 'wide' && <Text bold color={COLORS.orange}>{lead.kind === 'investigate' ? 'investigate ' : ''}</Text>}
-            <Text>{clip(lead.prompt, Math.max(4, inner - (size === 'wide' ? 30 : 18)))}</Text>
-            <Box flexGrow={1} />
-            {!isMini && block(lead)}
-            <Text bold color={COLORS.pink}>{'  Working'}</Text>
-            <Text dimColor>{` ${ageOf(lead)}s`}</Text>
-          </Box>
-        )}
-        {showNow &&
-          queued
-            .slice(-2)
-            .reverse()
-            .map((q, i) => (
-              <Box key={`q-${q.id}`} flexWrap="nowrap">
-                <Text color={COLORS.blue}>{'◷ '}</Text>
-                <Text>{clip(q.prompt, inner - 12)}</Text>
-                <Box flexGrow={1} />
-                <Text dimColor>{i === 0 ? 'Next' : 'Then'}</Text>
-              </Box>
-            ))}
         {!isTight && rule('r3', 'LAUNCH')}
         {launchRows.map((row, r) => (
           <Box key={`lr-${r}`} flexWrap={isPacked ? 'wrap' : 'nowrap'}>
