@@ -910,13 +910,14 @@ test('the dashboard tabs pick the span, and a narrow pane stacks the tiles', asy
   await tiny.unmount()
 })
 
-test('the panel takes the shape that fits the band: NOW when roomy, one LAUNCH row when tight', async ($, on) => {
+test('the panel takes the shape that fits the band: rules when roomy, one LAUNCH row when tight', async ($, on) => {
   world(on, { judge: MECHANICAL, worker: DONE })
   underBand(on)
   await $.session.start(START)
   const tall = await $.ui.mount(BAND(100, 30))
   await tall.press({ key: 'band-toggle' })
-  expect(await tall.find({ type: 'Text', text: /N O W/ })).toBeDefined()
+  expect(await tall.find({ type: 'Text', text: /N O W/ })).toBeUndefined()
+  expect(await tall.find({ type: 'Text', text: /S E T T I N G S/ })).toBeDefined()
   expect(await tall.find({ type: 'Text', text: /What it learned/ })).toBeDefined()
   // LAUNCH is at most two rows: three to a row, full labels.
   expect(await tall.find({ key: 'lr-1' })).toBeDefined()
@@ -1277,4 +1278,22 @@ test('on the desktop, the models are dropdowns and side by side is a stepper', a
   await ui.press({ key: 'set-draftJudging' })
   expect((await ui.find({ key: 'set-draftJudging' }) as { text?: string })?.text).toBe('○ Draft judging')
   await ui.unmount()
+})
+
+test('the open panel is never taller than 15 rows, so the folded line stays in view', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  for (const maxRows of [12, 18, 23, 30, 60]) {
+    const ui = await $.ui.mount(BAND(100, maxRows))
+    if ((await ui.find({ key: 'sk-panel' })) === undefined) await ui.press({ key: 'band-toggle' })
+    const tree = (await (ui as unknown as { drawn: () => Promise<unknown> }).drawn()) as Node
+    const find = (n: Node): Node | undefined =>
+      n.props?.key === 'sk-panel' ? n : (n.children ?? []).filter((c): c is Node => typeof c !== 'string').map(find).find(x => x !== undefined)
+    const panel = find(tree)!
+    // One row per child at this width, plus the two borders.
+    const height = (panel.children ?? []).filter(c => typeof c !== 'string').length + 2
+    expect({ maxRows, height: Math.min(height, 15) }).toEqual({ maxRows, height })
+    await ui.unmount()
+  }
 })

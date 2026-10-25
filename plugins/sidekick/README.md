@@ -1,6 +1,20 @@
-# sidekick
+<div align="center">
+
+# ◆ sidekick
 
 **A cheap, fast helper for Claude Code that takes the chores so your main session doesn't have to.**
+
+[![version](https://img.shields.io/badge/version-0.5.4-d97757)](#changelog)
+[![Claude Code](https://img.shields.io/badge/Claude_Code-%E2%89%A5_2.1.308-d97757?logo=claude&logoColor=white)](https://claude.com/claude-code)
+[![type: mod](https://img.shields.io/badge/type-Claude_Code_mod-8b5cf6)](#working-on-it)
+[![marketplace](https://img.shields.io/badge/marketplace-dmokong--plugins-2563eb)](#install)
+[![cost per chore](https://img.shields.io/badge/cost-~%240.002_per_chore-16a34a)](#cost-and-caching)
+[![surfaces](https://img.shields.io/badge/runs_in-terminal_%C2%B7_desktop_%C2%B7_VS_Code_%C2%B7_phone-475569)](#on-the-desktop-app-vs-code-and-the-phone)
+[![last commit](https://img.shields.io/github/last-commit/DMokong/claude-plugins?path=plugins%2Fsidekick&label=last%20commit&color=475569)](https://github.com/DMokong/claude-plugins/commits/main/plugins/sidekick)
+
+[**Install**](#install) · [**Quick start**](#quick-start-60-seconds) · [**How it works**](#how-it-works) · [**Safety**](#what-it-will-and-wont-do) · [**Dashboard**](#the-dashboard) · [**FAQ**](#faq) · [**Changelog**](#changelog)
+
+</div>
 
 Turn it on and keep typing as usual. When you send a mechanical chore like *"commit and push"*,
 *"pull main"* or *"close the bd issue"*, a small judge model sees it's a chore and hands it to a
@@ -18,6 +32,15 @@ record Claude can read if the answer isn't enough.
 
 <sub>A real session. The one line above the prompt says what the sidekick is doing, and **◆ Sidekick ▾**
 opens this control panel in place: mode, models, settings and shortcuts, all one click away.</sub>
+
+### Before and after
+
+| | Without sidekick | With sidekick |
+|---|---|---|
+| *"commit and push"* | A full main-model turn, plus the git output in Claude's context | A Haiku worker does it in a few seconds; Claude gets a short note |
+| *"why did the nightly job fail?"* | Claude reads logs and job state turn by turn | One cheap first pass (logs, job state, health checks) and a record Claude reads only if it needs to |
+| *"refactor this function"* | Claude | Claude, unchanged: anything that needs the conversation stays there |
+| A slow or unsure judge | n/a | The message goes to Claude. Nothing is ever dropped |
 
 ---
 
@@ -63,8 +86,9 @@ opens this control panel in place: mode, models, settings and shortcuts, all one
 
 ## Install
 
-You need **Claude Code 2.1.308 or later** (mods support), plus `claude` and `python3` on your
-`PATH`. `python3` runs the safety guard; macOS has it with the developer tools.
+> [!IMPORTANT]
+> You need **Claude Code 2.1.308 or later** (mods support), plus `claude` and `python3` on your
+> `PATH`. `python3` runs the safety guard; macOS has it with the developer tools.
 
 ```bash
 claude plugin marketplace add DMokong/claude-plugins
@@ -77,10 +101,10 @@ Then, in any Claude Code session that was already open:
 /reload-plugins
 ```
 
-Check that it loaded: run `/sidekick`. The pane opens with the version (`v0.2.3`) at the top right.
+Check that it loaded: run `/sidekick`. The pane opens with the version (`v0.5.4`) at the top right.
 
-> **Updating later:**
-> `claude plugin marketplace update dmokong-plugins && claude plugin update sidekick@dmokong-plugins`,
+> [!TIP]
+> **Updating later:** `claude plugin marketplace update dmokong-plugins && claude plugin update sidekick@dmokong-plugins`,
 > then `/reload-plugins` in any open session. Your session's mode and history carry over.
 
 ---
@@ -309,8 +333,9 @@ change is kept: a setting you never touched follows the plugin's options (see
 session**: every session starts off, so a forgotten `auto` never takes chores in another project. A
 change made in one session reaches your other open sessions with their next message.
 
-The panel fits the room it has. On a short terminal (the band gets at most half the rows), it drops
-its section rules and NOW and packs LAUNCH into short labels. On a narrow one it drops the settings'
+The panel is never taller than 15 rows, so the line above the prompt stays in view without
+scrolling; the running job is on its card, not in the panel. On a short terminal (the band gets at
+most half the rows), it drops its section rules and packs LAUNCH into one row of short labels. On a narrow one it drops the settings'
 notes; narrower still, the model chips read `Haiku` and `Sonnet` and the pills `On` / `Off` /
 `1×`. Every control stays.
 
@@ -640,9 +665,16 @@ and rendered to SVG.
 
 | Version | |
 |---|---|
+| **0.5.4** | The control panel is never taller than 15 rows, so the line above the prompt stays in view: the NOW section is gone (the job card shows the running job). A test holds the height at every band size. |
 | **0.5.3** | The terminal control panel's LAUNCH section is three to a row, so it takes two rows, not three. |
-| **0.5.2** | The desktop control panel is a compact toolbox: small type, the mode as a dropdown beside the models, the settings and shortcuts as small plain buttons, two rows in all. The line above the prompt is in small type too. |
+| 0.5.2 | The desktop control panel is a compact toolbox: small type, the mode as a dropdown beside the models, the settings and shortcuts as small plain buttons, two rows in all. The line above the prompt is in small type too. |
 | 0.5.1 | The desktop control panel packs into four rows, so it shows whole above the prompt without scrolling. |
+
+<details>
+<summary><b>Older versions</b> (0.1.0 – 0.5.0)</summary>
+
+| Version | |
+|---|---|
 | 0.5.0 | **A real desktop view.** On the desktop app, VS Code and the phone the band, the control panel and the dashboard are drawn natively instead of in terminal characters: SVG tiles with trend lines, a where-it-went bar and a 7-day chart with tooltips, dropdowns for the models, a stepper for side by side, and job reports as formatted text. Nothing has a fixed width there, and a test checks every row at widths from 24 to 160. The terminal look is unchanged. |
 | 0.4.5 | On the desktop app, the control panel marks the chosen mode, judge and worker with a check and the primary button: the desktop draws its own buttons, so the chip colours never showed there. |
 | 0.4.4 | The worker is offered Haiku and Sonnet only. An Opus worker costs what the main session does, so that work belongs there. |
@@ -660,3 +692,5 @@ and rendered to SVG.
 | 0.1.2 | Messages passed to Claude are visible. Status shows the mode. |
 | 0.1.1 | Your words are quoted in the chat line, with `edit` to recall them. |
 | 0.1.0 | First release. |
+
+</details>
