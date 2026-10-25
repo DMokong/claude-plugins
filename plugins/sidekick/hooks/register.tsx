@@ -1620,13 +1620,15 @@ export const register: Register = (on, options) => {
       { key: 'launch-reset', glyph: '↺', color: COLORS.dim, label: 'Reset to defaults', act: () => void resetSettings($) },
     ]
     // The band gets at most half the terminal: the panel takes the shape that fits its rows.
-    // full: rules, NOW, LAUNCH two to a row (~22 rows); roomy: no NOW (~17); tight: no rules,
+    // full: rules, NOW, LAUNCH three to a row (~21 rows); roomy: no NOW (~16); tight: no rules,
     // LAUNCH on one row of short labels (12).
     const fit = maxRows >= 23 ? 'full' : maxRows >= 18 ? 'roomy' : 'tight'
     const isTight = fit === 'tight'
     // Short labels on wrapping rows when the rows are few or the panel is narrow.
     const isPacked = isTight || size !== 'wide'
-    const perRow = isPacked ? launch.length : 2
+    // Three to a row keeps LAUNCH to two rows.
+    const perRow = isPacked ? launch.length : 3
+    const cellW = Math.floor(inner / perRow)
     const launchRows = Array.from({ length: Math.ceil(launch.length / perRow) }, (_, r) => launch.slice(r * perRow, r * perRow + perRow))
     const showNow = fit === 'full'
     const shortLabel: Record<string, string> = {
@@ -1710,10 +1712,10 @@ export const register: Register = (on, options) => {
         {launchRows.map((row, r) => (
           <Box key={`lr-${r}`} flexWrap={isPacked ? 'wrap' : 'nowrap'}>
             {row.map(item => (
-              <Box key={`li-${item.key}`} width={isPacked ? undefined : Math.floor(inner / 2)} flexWrap="nowrap">
-                <Text color={item.color}>{isPacked ? `${item.glyph} ` : `${item.glyph}  `}</Text>
+              <Box key={`li-${item.key}`} width={isPacked ? undefined : cellW} flexWrap="nowrap">
+                <Text color={item.color}>{`${item.glyph} `}</Text>
                 <Button key={item.key} plain onPress={item.act}>
-                  <Text>{isPacked ? shortLabel[item.key] ?? item.label : item.label}</Text>
+                  <Text>{isPacked ? shortLabel[item.key] ?? item.label : clip(item.label, cellW - 2)}</Text>
                 </Button>
                 {isPacked && <Text>{isMini ? '  ' : '   '}</Text>}
               </Box>

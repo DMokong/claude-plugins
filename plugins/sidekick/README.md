@@ -640,6 +640,7 @@ and rendered to SVG.
 
 | Version | |
 |---|---|
+| **0.5.3** | The terminal control panel's LAUNCH section is three to a row, so it takes two rows, not three. |
 | **0.5.2** | The desktop control panel is a compact toolbox: small type, the mode as a dropdown beside the models, the settings and shortcuts as small plain buttons, two rows in all. The line above the prompt is in small type too. |
 | 0.5.1 | The desktop control panel packs into four rows, so it shows whole above the prompt without scrolling. |
 | 0.5.0 | **A real desktop view.** On the desktop app, VS Code and the phone the band, the control panel and the dashboard are drawn natively instead of in terminal characters: SVG tiles with trend lines, a where-it-went bar and a 7-day chart with tooltips, dropdowns for the models, a stepper for side by side, and job reports as formatted text. Nothing has a fixed width there, and a test checks every row at widths from 24 to 160. The terminal look is unchanged. |
