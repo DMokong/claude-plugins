@@ -5,6 +5,8 @@
 **A cheap, fast helper for Claude Code that takes the chores so your main session doesn't have to.**
 
 [![version](https://img.shields.io/badge/version-0.5.4-d97757)](#changelog)
+[![tests](https://github.com/DMokong/claude-plugins/actions/workflows/tests.yml/badge.svg)](https://github.com/DMokong/claude-plugins/actions/workflows/tests.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue)](../../LICENSE)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-%E2%89%A5_2.1.308-d97757?logo=claude&logoColor=white)](https://claude.com/claude-code)
 [![type: mod](https://img.shields.io/badge/type-Claude_Code_mod-8b5cf6)](#working-on-it)
 [![marketplace](https://img.shields.io/badge/marketplace-dmokong--plugins-2563eb)](#install)
