@@ -918,6 +918,9 @@ test('the panel takes the shape that fits the band: NOW when roomy, one LAUNCH r
   await tall.press({ key: 'band-toggle' })
   expect(await tall.find({ type: 'Text', text: /N O W/ })).toBeDefined()
   expect(await tall.find({ type: 'Text', text: /What it learned/ })).toBeDefined()
+  // LAUNCH is at most two rows: three to a row, full labels.
+  expect(await tall.find({ key: 'lr-1' })).toBeDefined()
+  expect(await tall.find({ key: 'lr-2' })).toBeUndefined()
   await tall.unmount()
   const short = await $.ui.mount(BAND(100, 12))
   expect(await short.find({ type: 'Text', text: /N O W/ })).toBeUndefined()
