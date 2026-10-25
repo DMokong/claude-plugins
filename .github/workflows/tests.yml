@@ -42,9 +42,11 @@ jobs:
         if: matrix.mod == 'sidekick'
         run: python3 -m unittest discover -s plugins/sidekick/tests -v
 
+  # These suites drive macOS tools (BSD stat and date) and check that node is not
+  # group-writable, as on a Mac; they run on macOS.
   suites:
     name: suite · ${{ matrix.suite }}
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
