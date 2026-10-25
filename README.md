@@ -1,5 +1,8 @@
 # dmokong-plugins
 
+[![tests](https://github.com/DMokong/claude-plugins/actions/workflows/tests.yml/badge.svg)](https://github.com/DMokong/claude-plugins/actions/workflows/tests.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 A plugin marketplace for **Claude Code and Codex**. Eight plugins, six of which live in this
 repo and two of which are vendored from their own repos by URL.
 
