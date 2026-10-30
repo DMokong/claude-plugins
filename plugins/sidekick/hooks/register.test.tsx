@@ -1297,3 +1297,44 @@ test('the open panel is never taller than 15 rows, so the folded line stays in v
     await ui.unmount()
   }
 })
+
+test('on an engine before 2.1.308, the panel draws: every Button is its label alone', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  on('session.version', async () => ({ value: { version: '2.1.300' } }))
+  await $.session.start(START)
+  const ui = await $.ui.mount(BAND())
+  await ui.press({ key: 'band-toggle' })
+  const found: Node[] = []
+  const walk = (n: Node) => {
+    if (n.type === 'Button') found.push(n)
+    for (const child of n.children ?? []) if (typeof child === 'object') walk(child as Node)
+  }
+  walk((await (ui as unknown as { drawn: () => Promise<Node> }).drawn()))
+  expect(found.length).toBeGreaterThan(5)
+  expect(found.filter(n => (n.children ?? []).some(child => typeof child === 'object'))).toEqual([])
+  await ui.unmount()
+})
+
+test('on an engine before 2.1.308, the desktop says to update and the session is told once', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  on('session.version', async () => ({ value: { version: '2.1.300' } }))
+  await $.session.start(START)
+  expect(seen.toasts.filter(text => /2\.1\.308/.test(text))).toHaveLength(1)
+  const ui = await $.ui.mount({ ...(BAND() as object), surface: 'desktop' } as never)
+  expect(await ui.find({ type: 'Text', text: /claude update/ })).toBeDefined()
+  expect(await ui.find({ key: 'band-toggle' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('on 2.1.308 itself, nothing asks for an update', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  on('session.version', async () => ({ value: { version: '2.1.308' } }))
+  await $.session.start(START)
+  expect(seen.toasts.filter(text => /2\.1\.308/.test(text))).toEqual([])
+  const ui = await $.ui.mount({ ...(BAND() as object), surface: 'desktop' } as never)
+  expect(await ui.find({ key: 'band-toggle' })).toBeDefined()
+  await ui.unmount()
+})

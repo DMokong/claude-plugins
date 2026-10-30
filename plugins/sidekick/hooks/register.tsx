@@ -63,6 +63,17 @@ const PANE_ROWS = 28
 /** The control panel's width: room for a setting's name, its note and its pill on one row. */
 const PANEL_WIDTH = 72
 
+/** Engines before this refuse a Button holding Text, and any children beside a label. */
+const RICH_BUTTONS_SINCE = [2, 1, 308]
+const UPDATE_MESSAGE = 'Sidekick needs Claude Code 2.1.308 or later for its full panel: run claude update'
+
+function isBefore(release: string, since: number[]): boolean {
+  const parts = /^(\d+)\.(\d+)\.(\d+)/.exec(release)?.slice(1).map(Number)
+  if (parts === undefined) return false
+  const at = parts.findIndex((part, i) => part !== since[i])
+  return at !== -1 && parts[at]! < since[at]!
+}
+
 /** The surfaces that draw graphics: the desktop app, the editor, the phone. */
 type RichSurface = 'desktop' | 'vscode' | 'mobile'
 
@@ -96,6 +107,8 @@ let cwd = ''
 let guardPath = ''
 /** The loaded version, from the plugin's own manifest; shown in the pane so a stale load is visible. */
 let version = ''
+/** An older engine draws each Button's label alone, without its colours. */
+let isLabelOnly = false
 /** The person's "should've been sidekick" corrections, across sessions; the judge learns from them. */
 let misses: Taught[] = []
 const MISSES_KEY = 'missed'
@@ -802,6 +815,12 @@ export const register: Register = (on, options) => {
     } catch {
       version = ''
     }
+    try {
+      isLabelOnly = isBefore((await $.session.version()).version, RICH_BUTTONS_SINCE)
+    } catch {
+      isLabelOnly = false
+    }
+    if (isLabelOnly) $.ui.toast(UPDATE_MESSAGE)
     // A reload keeps the session's mode; the new module's connection starts cold.
     try {
       const stored = await $.store.get(MISSES_KEY)
@@ -941,7 +960,10 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e)) // fail open: any error lets the prompt through as typed
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const { Box, Button: DrawnButton, Text } = $.ui.resolve(e)
+    const Button: typeof DrawnButton = isLabelOnly ? ({ children: _, ...props }) => DrawnButton(props) : DrawnButton
+    // An older engine refuses the graphical layout too; only its terminal gets the panel.
+    if (isLabelOnly && e.surface !== 'terminal') return <Text>{UPDATE_MESSAGE}</Text>
     // A desktop, an editor or a phone draws real graphics: they get SVG charts, rendered markdown and
     // native controls, laid out to flow; the terminal gets the drawing in cells.
     const rich = e.surface === 'terminal' ? null : ($.ui.resolve(e) as ElementTable<RichSurface>)
@@ -1033,7 +1055,7 @@ export const register: Register = (on, options) => {
         <Text key="mp" dimColor>{'○ OFF'}</Text>
       )
     const back = (
-      <Button key="back" plain onPress={() => void change($, s => ({ ...s, view: 'dashboard', jobId: '' }))}>
+      <Button key="back" label="← back" plain onPress={() => void change($, s => ({ ...s, view: 'dashboard', jobId: '' }))}>
         <Text color={COLORS.yellow}>{'← back'}</Text>
       </Button>
     )
@@ -1145,7 +1167,7 @@ export const register: Register = (on, options) => {
     const isShortTabs = width - 4 < 30
     const tabName = (tab: 'session' | 'today' | 'week') => (isShortTabs ? { session: 'Sess', today: 'Day', week: 'Wk' }[tab] : `${tab[0]!.toUpperCase()}${tab.slice(1)}`)
     const tabs = (['session', 'today', 'week'] as const).map(tab => (
-      <Button key={`tab-${tab}`} plain onPress={() => void change($, s => ({ ...s, tab }))}>
+      <Button key={`tab-${tab}`} label={`${state.tab === tab ? '✓ ' : ''}${tabName(tab)}`} plain onPress={() => void change($, s => ({ ...s, tab }))}>
         {state.tab === tab ? (
           <Text bold backgroundColor={COLORS.yellow} color={COLORS.ink}>{` ${tabName(tab)} `}</Text>
         ) : (
@@ -1216,13 +1238,9 @@ export const register: Register = (on, options) => {
           {header(
             <Box key="hdr-r" flexWrap="wrap" columnGap="xs">
               {(['session', 'today', 'week'] as const).map(tab => (
-                <Button key={`tab-${tab}`} variant={state.tab === tab ? 'primary' : 'secondary'} onPress={() => void change($, s => ({ ...s, tab }))}>
-                  {`${state.tab === tab ? '✓ ' : ''}${tab[0]!.toUpperCase()}${tab.slice(1)}`}
-                </Button>
+                <Button key={`tab-${tab}`} variant={state.tab === tab ? 'primary' : 'secondary'} onPress={() => void change($, s => ({ ...s, tab }))} label={`${state.tab === tab ? '✓ ' : ''}${tab[0]!.toUpperCase()}${tab.slice(1)}`} />
               ))}
-              <Button key="view-learned" variant="secondary" onPress={() => void change($, s => ({ ...s, view: 'learned' }))}>
-                {`✎ Learned ${state.learned.length}`}
-              </Button>
+              <Button key="view-learned" variant="secondary" onPress={() => void change($, s => ({ ...s, view: 'learned' }))} label={`✎ Learned ${state.learned.length}`} />
             </Box>,
             0,
           )}
@@ -1251,9 +1269,7 @@ export const register: Register = (on, options) => {
               <Box flexWrap="nowrap" alignItems="center" columnGap="sm">
                 <Text color={COLORS.pink}>{'●'}</Text>
                 <Box flexGrow={1} flexShrink={1} minWidth={0}>
-                  <Button key={`job-${entry.id}`} variant="secondary" onPress={openJob(entry.id)}>
-                    {clip(`${kindTag(entry)}${entry.prompt}`, room)}
-                  </Button>
+                  <Button key={`job-${entry.id}`} variant="secondary" onPress={openJob(entry.id)} label={clip(`${kindTag(entry)}${entry.prompt}`, room)} />
                 </Box>
                 <Text dimColor>{`${Math.round((now - (entry.startedAt || entry.createdAt)) / 1000)}s`}</Text>
               </Box>
@@ -1278,9 +1294,7 @@ export const register: Register = (on, options) => {
               <Box flexGrow={1} flexShrink={1} minWidth={0}>
                 <Text wrap="truncate-end">{clip(held.text, room)}</Text>
               </Box>
-              <Button key={`send-${held.id}`} variant="secondary" onPress={() => void sendNow($, held.id)}>
-                {'Send now'}
-              </Button>
+              <Button key={`send-${held.id}`} variant="secondary" onPress={() => void sendNow($, held.id)} label="Send now" />
             </Box>
           ))}
 
@@ -1313,9 +1327,7 @@ export const register: Register = (on, options) => {
                 <Box flexWrap="nowrap" alignItems="center" columnGap="sm">
                   <Text color={color}>{mark}</Text>
                   <Box flexGrow={1} flexShrink={1} minWidth={0}>
-                    <Button key={`job-${entry.id}`} variant="secondary" onPress={openJob(entry.id)}>
-                      {clip(`${kindTag(entry)}${entry.prompt}`, room)}
-                    </Button>
+                    <Button key={`job-${entry.id}`} variant="secondary" onPress={openJob(entry.id)} label={clip(`${kindTag(entry)}${entry.prompt}`, room)} />
                   </Box>
                   <Text dimColor>{cost > 0 ? usd(cost) : ''}</Text>
                 </Box>
@@ -1331,7 +1343,7 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column">
         {header(
           <Box key="hdr-r" flexWrap="nowrap">
-            <Button key="view-learned" plain onPress={() => void change($, s => ({ ...s, view: 'learned' }))}>
+            <Button key="view-learned" label={learnedText} plain onPress={() => void change($, s => ({ ...s, view: 'learned' }))}>
               <Text color={COLORS.purple}>{learnedText}</Text>
             </Button>
             {tabs}
@@ -1362,7 +1374,7 @@ export const register: Register = (on, options) => {
           <Box key={`n-${entry.id}`} flexDirection="column">
             <Box flexWrap="nowrap">
               <Text color={COLORS.pink}>{'● '}</Text>
-              <Button key={`job-${entry.id}`} plain onPress={() => void change($, s => ({ ...s, view: 'job', jobId: entry.id }))}>
+              <Button key={`job-${entry.id}`} label={clip(`${kindTag(entry)}${entry.prompt}`, width - 26)} plain onPress={() => void change($, s => ({ ...s, view: 'job', jobId: entry.id }))}>
                 <Text bold>{clip(`${kindTag(entry)}${entry.prompt}`, width - 26)}</Text>
               </Button>
               <Box flexGrow={1} />
@@ -1434,7 +1446,7 @@ export const register: Register = (on, options) => {
             const seconds = entry.endedAt > 0 ? `${Math.max(1, Math.round((entry.endedAt - (entry.startedAt || entry.createdAt)) / 1000))}s` : ''
             return (
               <Box key={`rc-${entry.id}`} flexWrap="nowrap">
-                <Button key={`job-${entry.id}`} plain onPress={openJob(entry.id)}>
+                <Button key={`job-${entry.id}`} label={`${mark} ${clip(`${kindTag(entry)}${entry.prompt}`, Math.max(20, Math.floor(width / 2) - 8))}`} plain onPress={openJob(entry.id)}>
                   <Text color={color}>{`${mark} `}</Text>
                   <Text>{clip(`${kindTag(entry)}${entry.prompt}`, Math.max(20, Math.floor(width / 2) - 8))}</Text>
                 </Button>
@@ -1455,7 +1467,17 @@ export const register: Register = (on, options) => {
     if (isOff || e.props.hasSurvey) return next(e)
     const state = await load($)
     const below = await next(e)
-    const { Box, Button, Text } = $.ui.resolve(e)
+    if (isLabelOnly && e.surface !== 'terminal') {
+      const { Box, Text } = $.ui.resolve(e)
+      return (
+        <Box flexDirection="column">
+          <Text>{UPDATE_MESSAGE}</Text>
+          {below}
+        </Box>
+      )
+    }
+    const { Box, Button: DrawnButton, Text } = $.ui.resolve(e)
+    const Button: typeof DrawnButton = isLabelOnly ? ({ children: _, ...props }) => DrawnButton(props) : DrawnButton
     const width = Math.max(24, e.props.bodyColumns ?? 80)
     const maxRows = e.props.maxRows ?? 40
     const running = state.entries.filter(x => x.status === 'running')
@@ -1514,7 +1536,7 @@ export const register: Register = (on, options) => {
         {shown.includes('cost') && <Text dimColor>{'cost '}</Text>}
         {shown.includes('cost') && <Text color={COLORS.blue}>{costText}</Text>}
         <Box flexGrow={1} />
-        <Button key="band-toggle" plain onPress={() => void change($, s => ({ ...s, panelOpen: !s.panelOpen }))}>
+        <Button key="band-toggle" label={toggleText} plain onPress={() => void change($, s => ({ ...s, panelOpen: !s.panelOpen }))}>
           <Text bold backgroundColor={COLORS.claude} color={COLORS.ink}>{toggleText}</Text>
         </Button>
       </Box>
@@ -1567,7 +1589,7 @@ export const register: Register = (on, options) => {
     // chip is lost there: it gets the primary button and a check mark instead.
     const isTerminal = e.surface === 'terminal'
     const chip = (key: string, label: string, isOn_: boolean, color: string, act: () => void) => [
-      <Button key={key} plain onPress={act} variant={isOn_ ? 'primary' : 'secondary'}>
+      <Button key={key} label={isOn_ ? `✓ ${label}` : label} plain onPress={act} variant={isOn_ ? 'primary' : 'secondary'}>
         {isOn_ ? (
           <Text bold backgroundColor={color} color={COLORS.ink}>{isTerminal ? ` ${label} ` : ` ✓ ${label} `}</Text>
         ) : (
@@ -1587,7 +1609,7 @@ export const register: Register = (on, options) => {
       )
     }
     const pill = (key: string, on_: boolean, act: () => void) => (
-      <Button key={key} plain onPress={act}>
+      <Button key={key} label={on_ ? '● On' : '○ Off'} plain onPress={act}>
         {on_ ? (
           <Text bold backgroundColor={COLORS.green} color={COLORS.ink}>{isMini ? ' On ' : ' ● On '}</Text>
         ) : (
@@ -1676,7 +1698,7 @@ export const register: Register = (on, options) => {
           'maxConcurrent',
           'Side by side',
           'chores in different repos at once',
-          <Button key="set-maxConcurrent" plain onPress={() => void setSetting($, 'maxConcurrent', (state.settings.maxConcurrent % 4) + 1)}>
+          <Button key="set-maxConcurrent" label={isMini ? `${state.settings.maxConcurrent}×` : `${state.settings.maxConcurrent} at a time`} plain onPress={() => void setSetting($, 'maxConcurrent', (state.settings.maxConcurrent % 4) + 1)}>
             <Text backgroundColor="#2a2f3a">{isMini ? ` ${state.settings.maxConcurrent}× ` : ` ${state.settings.maxConcurrent} at a time `}</Text>
           </Button>,
         )}
@@ -1686,7 +1708,7 @@ export const register: Register = (on, options) => {
             {row.map(item => (
               <Box key={`li-${item.key}`} width={isPacked ? undefined : cellW} flexWrap="nowrap">
                 <Text color={item.color}>{`${item.glyph} `}</Text>
-                <Button key={item.key} plain onPress={item.act}>
+                <Button key={item.key} label={isPacked ? shortLabel[item.key] ?? item.label : clip(item.label, cellW - 2)} plain onPress={item.act}>
                   <Text>{isPacked ? shortLabel[item.key] ?? item.label : clip(item.label, cellW - 2)}</Text>
                 </Button>
                 {isPacked && <Text>{isMini ? '  ' : '   '}</Text>}
@@ -1712,7 +1734,7 @@ export const register: Register = (on, options) => {
         </Text>
       )
       const tool = (key: string, act: () => void, parts: { text: string; color?: string; dimColor?: boolean }[]) => (
-        <Button key={key} plain onPress={act}>
+        <Button key={key} label={parts.map(part => part.text).join('')} plain onPress={act}>
           {parts.map((part, i) => (
             <Text key={`${key}-${i}`} size="footnote" color={part.color} dimColor={part.dimColor}>
               {part.text}
