@@ -7,6 +7,7 @@ import { NO_SPEND, addTally, modelName, tallyLine, tallyOf, tokens, usd } from '
 import { migrate, toTaught } from './lib/state'
 import { HISTORY_KEY, NO_TOTALS, appendRow, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals, weekStart } from './lib/history'
 import type { HistoryRow } from './lib/history'
+import { PET_CHIPS, PET_COLUMNS, PET_ROWS, isPetChoice, moodOf, petFrame } from './lib/pets'
 import { JUDGE_CHIPS, SETTINGS_KEY, WORKER_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
 import { COLORS, barCells, bigText, dayLevels, spaced, tileMoney } from './lib/draw'
 import { daysSvg, progressSvg, stackSvg, tileSvg } from './lib/svg'
@@ -46,6 +47,7 @@ export const EMPTY: SidekickState = {
 }
 
 const sidekick = atom({ plugin: 'sidekick', key: 'sidekick' } as const, EMPTY)
+const petBeat = atom({ plugin: 'sidekick', key: 'petBeat' } as const, 0)
 
 /** The session's state, upgraded from whatever version wrote it. */
 async function load($: EngineInterface): Promise<SidekickState> {
@@ -389,6 +391,18 @@ async function setSetting<K extends keyof Settings>($: EngineInterface, key: K, 
 async function toggleSetting($: EngineInterface, key: 'investigations' | 'draftJudging' | 'notifications'): Promise<void> {
   await refreshSettings($)
   await setSetting($, key, !live[key])
+}
+
+/** When the pet was chosen, so it says hello, and when this session began. */
+let petChosenAt = 0
+let petStartedAt = 0
+/** Whether the pet last drew something moving; a resting pet changes frame a third as often. */
+let isPetLively = false
+const PET_FRAME_MS = 200
+
+async function choosePet($: EngineInterface, pet: Settings['pet']): Promise<void> {
+  petChosenAt = await $.clock.now()
+  await setSetting($, 'pet', pet)
 }
 
 /** Forgets every change made in the panel: the plugin's options are in force again. */
@@ -837,10 +851,17 @@ export const register: Register = (on, options) => {
     $.ui.status(undefined)
     const { mode } = await load($)
     if (mode !== 'off') void warm($)
+    petStartedAt = await $.clock.now()
+    let petTicks = 0
+    $.clock.every(PET_FRAME_MS, () => {
+      if (live.pet === 'off') return
+      petTicks += 1
+      if (isPetLively || petTicks % 3 === 0) void update($, petBeat, n => n + 1).catch(() => {})
+    })
     await $.command.register({
       name: 'sidekick',
       description: 'Sidekick for this session: hand mechanical chores (git, bd) to a cheap worker',
-      argumentHint: '[auto|shadow|off|learned|forget <n|all>]',
+      argumentHint: '[auto|shadow|off|learned|forget <n|all>|pet [off|kiki|ibara]]',
     })
     return next(e)
   })
@@ -886,8 +907,15 @@ export const register: Register = (on, options) => {
       await forget($, target.text)
       return { text: `Forgot "${clip(target.text, 60)}"; the judge no longer follows it.` }
     }
+    if (arg === 'pet' || arg.startsWith('pet ')) {
+      const what = arg.slice('pet'.length).trim()
+      if (what === '') return { text: `Your pet is ${live.pet}. /sidekick pet off, kiki (the quokka) or ibara (the capybara).` }
+      if (!isPetChoice(what)) return { text: 'Usage: /sidekick pet [off|kiki|ibara]' }
+      await choosePet($, what)
+      return { text: what === 'off' ? 'Pet hidden.' : `${what === 'kiki' ? 'Kiki the quokka' : 'Ibara the capybara'} is with you, above the prompt.` }
+    }
     const asked: Mode | null = arg === 'auto' ? 'auto' : arg === 'off' ? 'off' : arg === 'on' || arg === 'shadow' ? 'shadow' : null
-    if (arg !== '' && asked === null) return { text: 'Usage: /sidekick [auto|shadow|off|learned|forget <n|all>]' }
+    if (arg !== '' && asked === null) return { text: 'Usage: /sidekick [auto|shadow|off|learned|forget <n|all>|pet [off|kiki|ibara]]' }
     if (asked !== null) await setMode($, asked)
     const { mode } = await load($)
     if (mode !== 'off') await $.ui.open({ id: PANE, title: 'Sidekick', rows: PANE_ROWS })
@@ -1476,7 +1504,8 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
-    const { Box, Button: DrawnButton, Text } = $.ui.resolve(e)
+    const elements = $.ui.resolve(e)
+    const { Box, Button: DrawnButton, Text } = elements
     const Button: typeof DrawnButton = isLabelOnly ? ({ children: _, ...props }) => DrawnButton(props) : DrawnButton
     const width = Math.max(24, e.props.bodyColumns ?? 80)
     const maxRows = e.props.maxRows ?? 40
@@ -1485,6 +1514,12 @@ export const register: Register = (on, options) => {
     const isOn = state.mode !== 'off'
     const lead = running[0]
     const now = await $.clock.now()
+    // The pet needs its rows and the folded line's, and room for a job card beside it. Terminal only;
+    // engines before 2.1.308 keep the plainer panel, without it.
+    const pet = state.settings.pet === 'off' ? null : state.settings.pet
+    const canHavePet = e.surface === 'terminal' && !isLabelOnly && 'Raster' in elements
+    const shownPet = pet !== null && canHavePet && !state.panelOpen && maxRows > PET_ROWS && width >= PET_COLUMNS + 40 ? pet : null
+    const cardWidth = shownPet === null ? width : width - PET_COLUMNS
 
     // ── the folded line: what's happening, at a glance; parts give way from the right as it narrows
     // The day turned since today's totals were counted: count them again (the draw after shows them).
@@ -1554,12 +1589,12 @@ export const register: Register = (on, options) => {
           <Box flexWrap="nowrap">
             <Text color={COLORS.pink}>{'✦ '}</Text>
             <Text bold color={COLORS.orange}>{lead.kind === 'investigate' ? 'investigate ' : 'chore '}</Text>
-            <Text bold>{clip(lead.prompt, width - 20)}</Text>
+            <Text bold>{clip(lead.prompt, cardWidth - 20)}</Text>
             {running.length > 1 && <Text dimColor>{`  +${running.length - 1}`}</Text>}
           </Box>
           <Box flexWrap="nowrap">
             <Text color={COLORS.pink}>{'● '}</Text>
-            <Text bold>{clip((lead.steps.at(-1) ?? 'starting the worker…').replace(/^\$ /, ''), width - 30)}</Text>
+            <Text bold>{clip((lead.steps.at(-1) ?? 'starting the worker…').replace(/^\$ /, ''), cardWidth - 30)}</Text>
             <Box flexGrow={1} />
             {block(lead)}
             <Text bold color={COLORS.pink}>{'  Working'}</Text>
@@ -1671,7 +1706,7 @@ export const register: Register = (on, options) => {
           {inner >= 40 && <Text dimColor>{' · '}</Text>}
           {inner >= 40 && <Text color={COLORS.blue}>{costText}</Text>}
         </Box>
-        {!isTight && rule('r0', '')}
+        {!isTight && !canHavePet && rule('r0', '')}
         <Box flexWrap="wrap">
           <Text dimColor>{rowLabel('MODE')}</Text>
           {chip('mode-off', 'Off', state.mode === 'off', '#c9ced8', () => void setMode($, 'off'))}
@@ -1690,6 +1725,12 @@ export const register: Register = (on, options) => {
             chip(`worker-${alias}`, chipLabel(label), state.settings.workerModel === alias, COLORS.purple, () => void setSetting($, 'workerModel', alias)),
           )}
         </Box>
+        {canHavePet && (
+          <Box flexWrap="wrap">
+            <Text dimColor>{rowLabel('PET')}</Text>
+            {PET_CHIPS.map(([label, choice]) => chip(`pet-${choice}`, label, state.settings.pet === choice, COLORS.orange, () => void choosePet($, choice)))}
+          </Box>
+        )}
         {!isTight && rule('r1', 'SETTINGS')}
         {settingRow('investigations', 'Investigations', 'look into services, restart in place', toggle('investigations'))}
         {settingRow('draftJudging', 'Draft judging', 'judge as you type · ≈$0.0001 a pause', toggle('draftJudging'))}
@@ -1834,9 +1875,24 @@ export const register: Register = (on, options) => {
       )
     }
 
+    let petRow = null
+    if (shownPet !== null && 'Raster' in elements) {
+      const { Raster } = elements
+      const mood = moodOf(shownPet, { mode: state.mode, entries: state.entries, now, chosenAt: petChosenAt, startedAt: petStartedAt })
+      isPetLively = mood.isLively
+      const art = petFrame(shownPet, mood.animation, await read($, petBeat))
+      petRow = (
+        <Box key="sk-pet" gap={1} flexWrap="nowrap">
+          <Raster key={`sk-pet-${shownPet}`} columns={art.columns} rows={art.rows} cells={art.cells} />
+          <Box flexDirection="column" flexGrow={1}>
+            {card ?? <Text dimColor>{mood.caption}</Text>}
+          </Box>
+        </Box>
+      )
+    }
     return (
       <Box flexDirection="column">
-        {card}
+        {petRow ?? card}
         {panel !== null && (
           <Box key="sk-panel-row" flexWrap="nowrap">
             <Box flexGrow={1} />

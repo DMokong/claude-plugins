@@ -23,6 +23,8 @@ export type Settings = {
   draftJudging: boolean
   notifications: boolean
   maxConcurrent: number
+  /** Which pet keeps you company above the prompt, in the terminal; off for none. */
+  pet: 'off' | 'kiki' | 'ibara'
 }
 
 /** What the tiles and bars count over a span of the history. */
@@ -142,6 +144,10 @@ export type SidekickState = {
 
 declare module 'claude-code' {
   interface PluginState {
-    sidekick: { sidekick: SidekickState }
+    sidekick: {
+      sidekick: SidekickState
+      /** Counts the pet's frames; kept apart so its redraws touch nothing else. */
+      petBeat: number
+    }
   }
 }
