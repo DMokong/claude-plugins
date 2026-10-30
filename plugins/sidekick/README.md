@@ -91,6 +91,9 @@ opens this control panel in place: mode, models, settings and shortcuts, all one
 > [!IMPORTANT]
 > You need **Claude Code 2.1.308 or later** (mods support), plus `claude` and `python3` on your
 > `PATH`. `python3` runs the safety guard; macOS has it with the developer tools.
+>
+> Older builds that can load mods get a plainer terminal panel, without its colours, and a prompt
+> to update; on the desktop they get only the prompt.
 
 ```bash
 claude plugin marketplace add DMokong/claude-plugins
