@@ -593,7 +593,7 @@ test('the toggle opens the control panel; its chips and pills change the session
     expect((await state($)).settings.maxConcurrent).toBe(n)
   }
   await ui.press({ key: 'launch-reset' })
-  expect((await state($)).settings).toEqual({ judgeModel: 'haiku', workerModel: 'haiku', investigations: true, draftJudging: true, notifications: true, maxConcurrent: 1 })
+  expect((await state($)).settings).toEqual({ judgeModel: 'haiku', workerModel: 'haiku', investigations: true, draftJudging: true, notifications: true, maxConcurrent: 1, pet: 'off' })
   expect(seen.store.get('settings')).toEqual({})
   await ui.press({ key: 'band-toggle' })
   expect((await state($)).panelOpen).toBe(false)
@@ -1336,5 +1336,67 @@ test('on 2.1.308 itself, nothing asks for an update', async ($, on) => {
   expect(seen.toasts.filter(text => /2\.1\.308/.test(text))).toEqual([])
   const ui = await $.ui.mount({ ...(BAND() as object), surface: 'desktop' } as never)
   expect(await ui.find({ key: 'band-toggle' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the pet starts off, and the panel chooses it, keeps it and hides it', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  const ui = await $.ui.mount(BAND(100, 30))
+  expect(await ui.find({ key: 'sk-pet' })).toBeUndefined()
+  await ui.press({ key: 'band-toggle' })
+  await ui.press({ key: 'pet-kiki' })
+  expect((await state($)).settings.pet).toBe('kiki')
+  expect(seen.store.get('settings')).toEqual({ pet: 'kiki' })
+  // The panel has the rows; it comes back when the panel folds.
+  expect(await ui.find({ key: 'sk-pet' })).toBeUndefined()
+  await ui.press({ key: 'band-toggle' })
+  expect(await ui.find({ key: 'sk-pet-kiki' })).toBeDefined()
+  await ui.press({ key: 'band-toggle' })
+  await ui.press({ key: 'pet-ibara' })
+  await ui.press({ key: 'band-toggle' })
+  expect(await ui.find({ key: 'sk-pet-ibara' })).toBeDefined()
+  await ui.press({ key: 'band-toggle' })
+  await ui.press({ key: 'pet-off' })
+  await ui.press({ key: 'band-toggle' })
+  expect(await ui.find({ key: 'sk-pet' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('/sidekick pet chooses, and refuses what is not a pet', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  await $.session.start(START)
+  const run = async (args: string) => ((await $.command.run({ command: 'sidekick', args, origin: { kind: 'composer' }, presentation: 'inline' } as never)) as { text: string }).text
+  expect(await run('pet ibara')).toContain('Ibara')
+  expect((await state($)).settings.pet).toBe('ibara')
+  expect(await run('pet')).toContain('ibara')
+  expect(await run('pet hamster')).toContain('Usage')
+  expect((await state($)).settings.pet).toBe('ibara')
+  await run('pet off')
+  expect((await state($)).settings.pet).toBe('off')
+})
+
+test('a short or narrow band keeps the folded line and leaves the pet out', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE, stored: { settings: { pet: 'kiki' } } })
+  underBand(on)
+  await $.session.start(START)
+  for (const [columns, maxRows, shows] of [[100, 6, false], [100, 7, true], [58, 30, false], [59, 30, true]] as const) {
+    const ui = await $.ui.mount(BAND(columns, maxRows))
+    expect({ columns, maxRows, shows: (await ui.find({ key: 'sk-pet' })) !== undefined }).toEqual({ columns, maxRows, shows })
+    expect(await ui.find({ key: 'band-toggle' })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('on an engine before 2.1.308 there is no pet and no chip for one', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE, stored: { settings: { pet: 'kiki' } } })
+  underBand(on)
+  on('session.version', async () => ({ value: { version: '2.1.300' } }))
+  await $.session.start(START)
+  const ui = await $.ui.mount(BAND(100, 30))
+  expect(await ui.find({ key: 'sk-pet' })).toBeUndefined()
+  await ui.press({ key: 'band-toggle' })
+  expect(await ui.find({ key: 'pet-kiki' })).toBeUndefined()
   await ui.unmount()
 })

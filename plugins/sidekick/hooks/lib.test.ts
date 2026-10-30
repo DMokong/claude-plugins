@@ -7,6 +7,7 @@ import { INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPro
 import { COLORS, barCells, bigText, bigWidth, dayLevels, spaced, tileMoney } from './lib/draw'
 import { appendRow, weekStart, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals } from './lib/history'
 import type { HistoryRow } from './lib/history'
+import { PET_COLUMNS, SHEETS, encodeFrame, moodOf, petFrame } from './lib/pets'
 import { JUDGE_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
 import { DUMP_KEEP, dumpDir, dumpName, dumpText, redact } from './lib/dump'
 import { DAYS, PROGRESS, STACK, TILE, daysSvg, esc, fitText, progressSvg, stackSvg, textWidth, tileSvg } from './lib/svg'
@@ -475,7 +476,7 @@ test("SAVED is one main-model turn the sidekick took, less what it spent", async
 
 test('settings: the plugin options are the defaults, and only changed fields are stored', async () => {
   const defaults = defaultsFrom({ judgeModel: 'haiku', workerModel: '', maxConcurrent: '9' })
-  expect(defaults).toEqual({ judgeModel: 'haiku', workerModel: 'haiku', investigations: true, draftJudging: true, notifications: true, maxConcurrent: 4 })
+  expect(defaults).toEqual({ judgeModel: 'haiku', workerModel: 'haiku', investigations: true, draftJudging: true, notifications: true, maxConcurrent: 4, pet: 'off' })
   const live = effective(defaults, { draftJudging: false, judgeModel: 3, maxConcurrent: 2 })
   expect(live.draftJudging).toBe(false)
   expect(live.judgeModel).toBe('haiku')
@@ -563,4 +564,66 @@ test('the progress sweep stays on its track, and text in a drawing is escaped an
   const cut = fitText('a caption far too long for the room it has', 10, 60)
   expect(cut.endsWith('…')).toBe(true)
   expect(textWidth(cut, 10)).toBeLessThanOrEqual(60)
+})
+
+const seenPet = (over: Partial<Parameters<typeof moodOf>[1]> = {}) => ({ mode: 'auto' as const, entries: [], now: 1_000_000, chosenAt: 0, startedAt: 1_000_000, ...over })
+const job = (over: object) => ({ kind: 'chore', status: 'running', createdAt: 1_000_000, endedAt: 0, steps: [], ...over })
+
+test('every frame of every pet is 12 rows of its width, in its palette, with an animation for each mood', () => {
+  for (const name of ['kiki', 'ibara'] as const) {
+    const sheet = SHEETS[name]
+    for (const frames of Object.values(sheet.animations)) {
+      expect(frames.length).toBe(8)
+      for (const frame of frames) {
+        const rows = frame.split('/')
+        expect(rows.length).toBe(12)
+        for (const row of rows) {
+          expect(row.length).toBe(sheet.width)
+          for (const pixel of row) if (pixel !== '.') expect(Number.parseInt(pixel, 36)).toBeLessThan(sheet.palette.length)
+        }
+      }
+    }
+    expect(sheet.width).toBeLessThan(PET_COLUMNS)
+    const moods = [
+      seenPet({ chosenAt: 1_000_000 }),
+      seenPet({ mode: 'off' }),
+      seenPet({ entries: [job({})] }),
+      seenPet({ entries: [job({ kind: 'investigate' })] }),
+      seenPet({ entries: [job({ status: 'judging' })] }),
+      seenPet({ entries: [job({ status: 'failed', endedAt: 999_000 })] }),
+      seenPet({ entries: [job({ status: 'done', endedAt: 999_000 })] }),
+      seenPet({ entries: [job({ status: 'done', endedAt: 995_000 })] }),
+      seenPet({ entries: [job({ status: 'done', endedAt: 990_000 })] }),
+      seenPet({ now: 1_000_000 + 10 * 60_000 }),
+      ...[0, 1, 2, 3].map(n => seenPet({ now: 1_000_000 - (1_000_000 % 180_000) + 180_000 * (n + 1), startedAt: 1_000_000 + 180_000 * n })),
+    ]
+    for (const seen of moods) expect(sheet.animations[moodOf(name, seen).animation]).toBeDefined()
+  }
+})
+
+test('a frame encodes to a Raster: 12 bytes a cell, half-blocks over the terminal default', () => {
+  const art = petFrame('kiki', 'idle', 9)
+  expect(art.rows).toBe(6)
+  const padded = art.columns * art.rows * 12
+  expect(art.cells.length).toBe((Math.ceil(padded / 3)) * 4)
+  // One clear cell and one lower-half cell: [0x20, default, default], [0x2584, red, default].
+  expect(encodeFrame(['..', '.0'], ['#ff0000'])).toBe('IAAAAAAAAAEAAAABhCUAAAAA/wAAAAAB')
+})
+
+test('the pet follows the work: hello, asleep when off, hauling, then pleased with itself', () => {
+  expect(moodOf('kiki', seenPet({ chosenAt: 999_000 })).animation).toBe('wave')
+  expect(moodOf('kiki', seenPet({ mode: 'off' })).animation).toBe('sleep')
+  expect(moodOf('kiki', seenPet({ entries: [job({})] }))).toEqual({ animation: 'haul', caption: 'Kiki · hauling it along', isLively: true })
+  expect(moodOf('ibara', seenPet({ entries: [job({})] })).animation).toBe('work')
+  expect(moodOf('ibara', seenPet({ entries: [job({ steps: ['$ git commit -m x'] })] })).animation).toBe('haul')
+  expect(moodOf('ibara', seenPet({ entries: [job({ status: 'done', endedAt: 999_000 })] })).animation).toBe('success')
+  expect(moodOf('kiki', seenPet({ entries: [job({ status: 'done', endedAt: 999_000 })] })).animation).toBe('hop')
+  expect(moodOf('kiki', seenPet({ entries: [job({ status: 'done', endedAt: 990_000 })] })).animation).toBe('smug')
+  expect(moodOf('ibara', seenPet({ entries: [job({ status: 'failed', endedAt: 999_000 })] })).animation).toBe('alert')
+  expect(moodOf('kiki', seenPet({ now: 1_000_000 + 10 * 60_000 })).animation).toBe('sleep')
+})
+
+test('a stored pet that is no pet reads as the default', () => {
+  expect(effective(defaultsFrom({}), { pet: 'hamster' }).pet).toBe('off')
+  expect(effective(defaultsFrom({}), { pet: 'ibara' }).pet).toBe('ibara')
 })

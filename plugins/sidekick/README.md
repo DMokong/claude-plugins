@@ -55,6 +55,7 @@ opens this control panel in place: mode, models, settings and shortcuts, all one
 - [What it will and won't do](#what-it-will-and-wont-do)
 - [Looking into things](#looking-into-things)
 - [The band and the control panel](#the-band-and-the-control-panel)
+- [Pets](#pets)
 - [On the desktop app, VS Code and the phone](#on-the-desktop-app-vs-code-and-the-phone)
 - [The dashboard](#the-dashboard)
 - [Modes](#modes)
@@ -326,11 +327,27 @@ starting to type: it never stands between you and the prompt.
 |---|---|
 | **MODE** | Off / Shadow / Auto for this session (see [Modes](#modes)) |
 | **JUDGE**, **WORKER** | Which model judges and which does the work: Haiku or Sonnet. No Opus worker: work worth Opus belongs in the main session |
+| **PET** | Off, Kiki the quokka or Ibara the capybara, in the terminal (see [Pets](#pets)) |
 | **Investigations** | Whether "look into it" messages go to the sidekick (see [Looking into things](#looking-into-things)) |
 | **Draft judging** | Judge while you type, so Enter is instant. Each pause costs about $0.0001, which is the small cost that ticks up while you type. Off: messages are judged when sent, within 5 s |
 | **Notifications** | A system notification when a job finishes; the chat line and band say it either way |
 | **Side by side** | How many chores in different repos may run at once (1–3) |
 | **LAUNCH** | Dashboard · What it learned · the last investigation record · give the last job to Claude · Reset to defaults |
+
+### Pets
+
+A small animated companion can sit above the prompt: **Kiki the quokka** or **Ibara the capybara**
+(working names). Pick one under **PET** in the control panel, or with `/sidekick pet kiki`,
+`/sidekick pet ibara` and `/sidekick pet off`. It starts off, and your choice is kept for every
+session.
+
+The pet follows the sidekick's work. It sleeps while the sidekick is off or after five quiet
+minutes, thinks while the judge does, hauls or works through a job with the job's card beside it,
+cheers and looks pleased with itself when a job finishes, and is alarmed when one fails. Between
+jobs it takes the occasional snack; Ibara also drinks, sweeps and has a bath.
+
+It takes six rows, in the terminal only. It steps aside while the panel is open, and when the band
+has fewer than seven rows or the terminal is under 59 columns. Builds before 2.1.308 don't get it.
 
 **Settings stick.** What you change in the panel is kept for every future session. Only what you
 change is kept: a setting you never touched follows the plugin's options (see
@@ -670,6 +687,8 @@ and rendered to SVG.
 
 | Version | |
 |---|---|
+| **0.6.0** | Pets: Kiki the quokka or Ibara the capybara above the prompt, off by default, chosen in the panel's PET row or with `/sidekick pet`. They follow the sidekick's work, in the terminal only. |
+| **0.5.5** | Draws on engines before 2.1.308: a plainer terminal panel and a prompt to update; graphical surfaces show only the update message. |
 | **0.5.4** | The control panel is never taller than 15 rows, so the line above the prompt stays in view: the NOW section is gone (the job card shows the running job). A test holds the height at every band size. |
 | **0.5.3** | The terminal control panel's LAUNCH section is three to a row, so it takes two rows, not three. |
 | 0.5.2 | The desktop control panel is a compact toolbox: small type, the mode as a dropdown beside the models, the settings and shortcuts as small plain buttons, two rows in all. The line above the prompt is in small type too. |
