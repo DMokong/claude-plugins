@@ -613,7 +613,7 @@ All calls go through your own Claude Code login. The sidekick sends nothing anyw
 The history behind the dashboard is kept there too, 35 days, one key per session (`history:<session>`).
 A session writes only its own key, so two sessions at once cannot overwrite each other's rows; the
 dashboard merges them all. The Session tab is the rows under this session's key, which survives a
-reload. Sessions still running a version before this one write the older shared `history` key, which
+reload. A session's key is deleted only once everything in it is over 90 days old and a second read agrees. Sessions still running a version before this one write the older shared `history` key, which
 is read but never written; they can still lose each other's rows.
 
 ---

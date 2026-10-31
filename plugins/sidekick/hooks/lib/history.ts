@@ -65,7 +65,9 @@ export function toRows(raw: unknown): HistoryRow[] {
 }
 
 /**
- * Every session's rows as one list, oldest first. Earlier lists win a tie: a job that is in two
+ * Every session's rows as one list, oldest first. Earlier lists win a tie, so they come in order of
+ * trust: this session's own, other sessions', the shared key of 0.7.x last (its copy of a job is the
+ * stale one, as a later update is only ever written to a session's own key): a job that is in two
  * (copied from the shared key into a session's own) is counted once. Draft rows are a day's total
  * each and never tie.
  */
@@ -85,9 +87,12 @@ export function mergeHistory(lists: readonly (readonly HistoryRow[])[]): History
   return merged.sort((a, b) => a.at - b.at)
 }
 
-/** Whether a stored list is rows that are all past the 35 days kept, so its key can go. Anything else, unreadable included, stays. */
+/** How long a session's key sits untouched before it may be taken for finished: far past the 35 days shown, since age only suggests a session is over. */
+export const GONE_DAYS = 90
+
+/** Whether a stored list is rows that are all older than `GONE_DAYS`, so its key may go. Anything else, unreadable included, stays. */
 export function isExpired(raw: unknown, now: number): boolean {
-  return Array.isArray(raw) && raw.every(r => r !== null && typeof r === 'object' && typeof (r as { at?: unknown }).at === 'number' && (r as { at: number }).at < now - KEEP_DAYS * DAY_MS)
+  return Array.isArray(raw) && raw.every(r => r !== null && typeof r === 'object' && typeof (r as { at?: unknown }).at === 'number' && (r as { at: number }).at < now - GONE_DAYS * DAY_MS)
 }
 
 /** Adds a row, dropping what is older than 35 days; draft spend joins the day's draft row. */

@@ -388,10 +388,12 @@ test("each session keeps its own history key; the merge counts a job once and ke
   expect(mergeHistory([[row('a', 1)], [row('a', 2)]]).length).toBe(2)
 })
 
-test('a session key is only deleted when every row in it is past the 35 days kept', async () => {
+test('a session key is only deleted when every row in it is long out of date', async () => {
   const now = 100 * 24 * 60 * 60 * 1000
-  const old = { at: now - 40 * 24 * 60 * 60 * 1000 }
+  const old = { at: now - 100 * 24 * 60 * 60 * 1000 }
   expect(isExpired([old, old], now)).toBe(true)
+  // Past the 35 days shown is not yet gone: age only suggests a session is over.
+  expect(isExpired([{ at: now - 40 * 24 * 60 * 60 * 1000 }], now)).toBe(false)
   expect(isExpired([old, { at: now - 1000 }], now)).toBe(false)
   // Unreadable or empty-of-evidence stays: a failed read must never delete someone's rows.
   expect(isExpired(undefined, now)).toBe(false)
