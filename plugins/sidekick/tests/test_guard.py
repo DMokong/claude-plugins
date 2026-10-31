@@ -11,13 +11,20 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 
 GUARD = os.path.join(os.path.dirname(__file__), "..", "bin", "sidekick-guard")
+PLUGIN = os.path.join(os.path.dirname(__file__), "..")
 HOME = os.path.expanduser("~")
 
 
 def run(tool_input, tool="Bash", profile="investigate", session="s-own"):
     argv = ["python3", GUARD] + ([profile] if profile else [])
     event = {"tool_name": tool, "tool_input": tool_input, "session_id": session}
-    done = subprocess.run(argv, input=json.dumps(event), capture_output=True, text=True)
+    done = subprocess.run(argv, input=json.dumps(event), capture_output=True, text=True, cwd=PLUGIN)
+    return done.returncode, done.stderr
+
+
+def run_in(cwd, tool_input, tool="Bash", profile="investigate"):
+    event = {"tool_name": tool, "tool_input": tool_input, "session_id": "s-own", "cwd": cwd}
+    done = subprocess.run(["python3", GUARD, profile], input=json.dumps(event), capture_output=True, text=True, cwd=cwd)
     return done.returncode, done.stderr
 
 
@@ -640,6 +647,90 @@ BOTH_REFUSED = [
     "cmd='git reset --hard'; eval \"$cmd\"",
     'for c in "ls" "rm x"; do eval "$c"; done',
     'for f in .env; do bash -c "cat $f"; done',
+    # round 2: operators glued together (`);` `)|` `&&(`) were one token, so the command after them was never judged
+    "(ls); rm x",
+    "(cd /tmp); git reset --hard",
+    "(ls)|rm x",
+    "(ls)&rm x",
+    "ls;(ls)&&rm x",
+    "echo a;(ls); rm x",
+    "(ls);(rm x)",
+    "(ls)||rm x",
+    "true &&(rm x)",
+    "(true)&&(git clean -fd)",
+    "FLAGS=(--hard); git reset ${FLAGS[@]}",
+    'git reset "${FLAGS[@]}"',
+    'git push "$@"',
+    'curl "$@"',
+    # round 2: an option the shell fills in, or splits, is judged as every value it can take
+    "curl ${FLAGS:---request=DELETE} https://example.com/x",
+    "git reset ${FLAGS:---hard}",
+    "git reset $FLAGS",
+    "git push $OPTS origin x",
+    "curl $OPTS https://example.com",
+    "curl ${OPTS} https://example.com",
+    "git reset --$mode",
+    "git reset $(echo --hard)",
+    "git reset `echo --hard`",
+    "git push ${F:---force} origin x",
+    "FLAGS=--hard; git reset $FLAGS",
+    "M=--hard; git reset ${M}",
+    'F="--request DELETE"; curl $F https://example.com',
+    "for f in --soft --hard; do git reset $f; done",
+    "for m in GET DELETE; do curl --request=$m https://example.com/x; done",
+    "env git reset ${FLAGS:---hard}",
+    # round 2: work-losing git
+    "git checkout HEAD file.txt",
+    "git checkout HEAD~1 README.md",
+    "git checkout main src/",
+    "git checkout bin",
+    "git checkout README.md",
+    "git checkout --ours f",
+    "git checkout --theirs f",
+    "git checkout -p",
+    "git checkout --patch HEAD f",
+    "git read-tree --reset -u HEAD",
+    "git read-tree -u -m HEAD",
+    "git checkout-index -f -a",
+    "git checkout-index --force --all",
+    "git apply -R p.diff",
+    "git apply --reverse p.diff",
+    "git rm -f f",
+    "git rm --force f",
+    "git rm -rf d",
+    "git mv -f a b",
+    "git tag -d v1",
+    "git tag -f v1",
+    "git tag --delete v1",
+    "git prune",
+    "git branch -f main HEAD~3",
+    "git submodule update --force",
+    "git worktree remove -f w",
+    # round 2: credentials beyond .env, and a name that is only known from the directory above it
+    "cat ~/.npmrc",
+    "cat .npmrc",
+    "cat ~/.git-credentials",
+    "cat ~/.aws/credentials",
+    "cat ~/.aws/*",
+    "cat ~/.aws/cred*",
+    "cat ~/.pypirc",
+    "cat ~/.docker/config.json",
+    "cat ~/.kube/config",
+    "cat ~/.config/gh/hosts.yml",
+    "cat ~/.cargo/credentials.toml",
+    "cat ~/.vault-token",
+    "cat ~/.my.cnf",
+    "cat ~/.claude/.credentials.json",
+    "cat ~/.ssh/id_dsa",
+    "cat ~/.config/gcloud/application_default_credentials.json",
+    "git show HEAD:.npmrc",
+    # round 2: curl -G makes the data a query, but not a form or an upload
+    "curl --get -X POST -d q=x https://example.com",
+    "curl -G -F a=b https://example.com",
+    "curl -G -T f https://example.com",
+    "curl -G --json x https://example.com",
+    "curl --data-urlencode q=x https://example.com",
+    "curl -G -o f --data q=x https://example.com",
 ]
 
 # The legitimate neighbours of the above: all must keep working in both profiles.
@@ -673,7 +764,6 @@ BOTH_ALLOWED = [
     "cat .env.*example",
     "cat .envrc",
     "cat id_rsa.pub.md",
-    "ls .git*",
     "grep -E '.e*' notes.md",
     "grep '.*' notes.md",
     "grep -E 'a|b' notes.md",
@@ -794,6 +884,31 @@ BOTH_ALLOWED = [
     "bash -o pipefail -c 'ls'",
     "bash -euxo pipefail scripts/health-check.sh",
     "git log --oneline",
+    "(ls); date",
+    "(cd src; ls) && date",
+    "ls;(date)",
+    "echo $(date); (ls)",
+    "curl --get --data-urlencode q=health https://example.com/search",
+    "curl -G -d q=health https://example.com/search",
+    "curl -sG --data-urlencode q=x https://example.com/search",
+    "curl --get --data q=x https://example.com/search",
+    "curl -s -G --data-urlencode 'q=a b' https://example.com/search",
+    'git log "$base..HEAD"',
+    'git diff "$a" "$b" -- src/',
+    "git show $(git rev-parse HEAD)",
+    "wc -l $(git ls-files)",
+    "echo $(date)",
+    "ls $(pwd)",
+    'curl -s "https://example.com/$path"',
+    'curl -s "$URL"',
+    "curl ${FLAGS:--sS} https://example.com",
+    "git log ${N:--5}",
+    "cat ~/.aws/config",
+    "cat ~/.docker/daemon.json",
+    "cat ~/.config/gh/config.yml",
+    "cat ~/.ssh/config",
+    "cat ~/.cargo/config.toml",
+    "cat ~/.kube/config.md",
 ]
 
 # Only an investigation fails closed on what the shell has yet to expand.
@@ -805,9 +920,62 @@ INVESTIGATE_REFUSED = [
     'head -n 3 "${1}"',
     "grep x $@",
     "git show HEAD:$f",
+    "curl -s $URL",
+    "git push origin $branch",
+    "ls | xargs cat",
+]
+
+# A chore refuses a command substitution as the argument of a reader, as an investigation does,
+# and an unquoted variable where a git or curl option could be.
+CHORE_REFUSED = [
+    "ls .git*",  # the price of .git-credentials: this pattern could be it
+    "cat $(printf '%s%s' .en v)",
+    "cat `printf .env`",
+    'cat "$(printf \'%s%s\' .en v)"',
+    "cat $(ls -t logs/*.log | head -1)",
+    "head -n 3 $(ls)",
+    "grep x $(ls)",
+    "tail $(find . -name x)",
+    "sed p $(ls)",
+    "jq . $(ls)",
+    "curl -s $URL",
+    "git push origin $branch",
 ]
 
 CHORE_ALLOWED = [
+    "git diff $(git merge-base main HEAD)..HEAD",
+    "git log $(git describe --tags --abbrev=0)..HEAD",
+    'git push origin "$branch"',
+    "bash $(git rev-parse --show-toplevel)/scripts/health-check.sh",
+    "git checkout main",
+    "git checkout -b x",
+    "git checkout -b x main",
+    "git checkout -b feature/x origin/main",
+    "git checkout feature/x",
+    "git checkout --track origin/main",
+    "git checkout -",
+    "git checkout --detach HEAD~1",
+    "git checkout -B x",
+    "git switch main",
+    "git switch -c x",
+    "git stash",
+    "git stash pop",
+    "git stash push -m x",
+    "git stash list",
+    "git apply p.diff",
+    "git apply --check p.diff",
+    "git rm --cached f",
+    "git rm f",
+    "git mv a b",
+    "git tag v1",
+    "git tag -l",
+    "git tag -a v1 -m x",
+    "git branch x",
+    "git branch -d x",
+    "git read-tree HEAD",
+    "git checkout-index f",
+    'git commit -m "$msg"',
+    'git push -u origin "$branch"',
     "shopt",
     "shopt -p",
     "xattr -l f",
@@ -822,7 +990,6 @@ CHORE_ALLOWED = [
     "git restore -S f",
     'while read f; do cat "$f"; done < list.txt',
     "cat $UNKNOWN",
-    "cat $(ls -t logs/*.log | head -1)",
     "git show HEAD:$f",
     "git show $sha",
 ]
@@ -891,6 +1058,9 @@ class GuardRefuses(unittest.TestCase):
         for command, code, said in bash_all(CHORE_ALLOWED, "chore"):
             with self.subTest(command=command, profile="chore"):
                 self.assertEqual(code, 0, f"refused: {command!r}: {said}")
+        for command, code, said in bash_all(CHORE_REFUSED, "chore"):
+            with self.subTest(command=command, profile="chore"):
+                self.assertEqual(code, 2, f"not refused: {command!r}")
 
     def test_a_glob_that_matches_a_file_in_the_working_directory_is_refused(self):
         with tempfile.TemporaryDirectory() as there:
@@ -902,6 +1072,60 @@ class GuardRefuses(unittest.TestCase):
                     with self.subTest(command=command, profile=profile):
                         done = subprocess.run(["python3", GUARD, profile], input=json.dumps(event(command)), capture_output=True, text=True)
                         self.assertEqual(done.returncode, want, f"{command!r}: {done.stderr}")
+
+    def test_recursive_reads_and_links_are_judged_by_what_they_would_reach(self):
+        with tempfile.TemporaryDirectory() as there:
+            for name in ("sub", "clean", "keys"):
+                os.mkdir(os.path.join(there, name))
+            for name in (".env", "sub/.env", "clean/a.txt", "keys/id_rsa", "notes.md"):
+                open(os.path.join(there, name), "w").close()
+            os.symlink(".env", os.path.join(there, "link"))
+            os.symlink("clean/a.txt", os.path.join(there, "plain"))
+            refused = [
+                "grep -r API_KEY .", "grep -R x .", "grep -rn x", "grep --recursive x .", "grep -rI x ./", "grep -r foo sub",
+                "grep -r x keys", "grep -r -e x .", "grep -d recurse x .", "egrep -r x .",
+                "find . -type f -exec cat {} +", "find . -type f -exec grep x {} +", "find . -type f -exec head {} \\;",
+                "find . -type f | xargs cat", "find . -type f | xargs grep foo", "find . | xargs -I{} cat {}",
+                "rg --hidden foo .", "rg -uu foo", "rg -u foo", "rg --no-ignore --hidden x", "rg foo keys", "rg foo .", "ag --hidden foo", "ag foo keys",
+                "cat link", "cat ./link", "grep foo link", "head link", "cat li*", "cat l?nk", "cat < link", "sed p link",
+            ]
+            allowed = [
+                "grep -r foo clean", "grep -r foo clean/", "grep -r foo clean --exclude-dir=x", "grep foo notes.md", "cat notes.md",
+                "cat plain", "cat clean/a.txt", "grep -r foo notes.md",
+                "find clean -type f -exec cat {} +", "find . -name '*.md' -exec cat {} +", "find . -name '*.md' | xargs cat",
+                "find clean -type f | xargs grep foo", "find . -type f -exec ls -l {} +", "find . -type f | xargs ls -l",
+                "rg foo clean", "rg foo notes.md", "ag foo clean", "ls -la", "ls clean",
+            ]
+            for profile in ("chore", "investigate"):
+                for command in refused:
+                    with self.subTest(command=command, profile=profile):
+                        code, said = run_in(there, {"command": command}, profile=profile)
+                        self.assertEqual(code, 2, f"not refused: {command!r}")
+                for command in allowed:
+                    with self.subTest(command=command, profile=profile):
+                        code, said = run_in(there, {"command": command}, profile=profile)
+                        self.assertEqual(code, 0, f"refused: {command!r}: {said}")
+            # The Grep tool searches hidden files too: a directory is judged by what it holds.
+            tools = [
+                ("Grep", {"pattern": "x", "path": there}, 2),
+                ("Grep", {"pattern": "x"}, 2),
+                ("Grep", {"pattern": "x", "path": os.path.join(there, "sub")}, 2),
+                ("Grep", {"pattern": "x", "path": there, "glob": "*"}, 2),
+                ("Grep", {"pattern": "x", "path": there, "glob": "*.json"}, 0),
+                ("Grep", {"pattern": "x", "path": os.path.join(there, "clean")}, 0),
+                ("Grep", {"pattern": "x", "path": there, "glob": "*.md"}, 0),
+                ("Grep", {"pattern": "x", "path": there, "glob": "*.ts"}, 0),
+                ("Grep", {"pattern": "x", "path": there, "type": "py"}, 0),
+                ("Grep", {"pattern": "x", "path": there, "type": "json"}, 0),
+                ("Grep", {"pattern": "x", "path": os.path.join(there, "notes.md")}, 0),
+                ("Read", {"file_path": os.path.join(there, "link")}, 2),
+                ("Read", {"file_path": os.path.join(there, "plain")}, 0),
+            ]
+            for tool, given, want in tools:
+                for profile in ("chore", "investigate"):
+                    with self.subTest(tool=tool, given=given, profile=profile):
+                        code, said = run_in(there, given, tool=tool, profile=profile)
+                        self.assertEqual(code, want, said)
 
     def test_the_file_tools_get_the_same_checks_as_the_shell(self):
         refused = [

@@ -204,7 +204,7 @@ is allowed. A bad commit can be reverted, so pushing is fine.
 | rebase **unpushed** commits | `checkout --` / `restore` over uncommitted changes |
 | `bd` create / update / comment / close / list | `stash drop / clear`, `filter-branch`, reflog expiry, `update-ref -d`, `gc --prune` |
 | `cd`, `head`, `tail`, `wc`, `ls`, `cat` (read-only helpers) | writing files by redirect (`> file`), `Edit`/`Write`, any other program |
-| templates like `.env.example` | **reading credentials**: `.env`, `.env.*`, `.mcp.json`, `.netrc`, `.pgpass`, SSH keys, `*.pem`/`*.key`, by any tool (Bash, Read, Grep) |
+| templates like `.env.example` | **reading credentials**: `.env`, `.env.*`, `.mcp.json`, `.netrc`, `.pgpass`, `.npmrc`, `.git-credentials`, `~/.aws/credentials`, SSH keys, `*.pem`/`*.key`, by any tool (Bash, Read, Grep), a link to one, or a search that sweeps a folder holding one |
 
 The blocks are enforced in two layers: Claude Code's own permission rules (`dontAsk` mode with an
 allowlist), and a PreToolUse guard (`bin/sidekick-guard`) that also catches a flag placed after
@@ -276,8 +276,23 @@ everything in the table above:
 | git anything but reads | an investigation doesn't move a repo |
 | another Claude session's files under `~/.claude/projects/` | private, and stale |
 
-The guard looks inside `bash -c '…'`, `$(…)`, `<(…)`, backticks, `xargs`, `find -exec`, `watch`,
-`eval`, loops and `docker exec`, and refuses a command it can't parse. **A script is the deliberate gap:** the guard
+The guard reads a command the way the shell will run it, not the way it was typed. It looks inside
+`bash -c '…'` (however the flags are bundled: `-lc`, `-euxo pipefail -c`), `$(…)`, `<(…)`, backticks, `xargs`,
+`find -exec`, `watch`, `eval`, `trap`, loops and `docker exec`; it judges every command by its name without the
+folder or the case (`/usr/bin/git`, `env git`, `nice -n 5 git`); and it fills in quotes, `$'…'`, braces, `~`,
+globs and variables first, so `cat .e*`, `cat .{env,x}` and `f=.env; cat $f` are refused like `cat .env`. A
+variable that holds an option (`git reset ${FLAGS:---hard}`) is judged as every value it can take, and one the
+guard can't know where git or curl expect an option is refused: quote it (`"$branch"`) if it is a single value.
+Options are read in all their spellings (`--request=DELETE`, `-XDELETE`, `-sXDELETE`, an abbreviated `--req`).
+
+Credentials include `.env*`, `.mcp.json`, `.netrc`, `.pgpass`, `.npmrc`, `.git-credentials`, `.pypirc`, SSH
+keys, `*.pem`/`*.key`, and `~/.aws/credentials`, `~/.docker/config.json`, `~/.kube/config` and the like. A link to one
+is judged by what it points at. A search that sweeps a folder (`grep -r`, `rg`, `find -exec cat`, the Grep tool,
+which reads hidden files) is refused if that folder holds one, so `grep -r foo src/` still works. A command
+substitution handed to a reader (`cat $(…)`) is refused, and in an investigation so is any file name the guard can't
+resolve. A command the guard can't parse, or a guard that fails, refuses.
+
+**A script is the deliberate gap:** the guard
 can't see inside your project's own scripts, so those are your maintainers' call, and the worker is
 told to use the read-only or restart ones. The file and process rows hold for chores too.
 
