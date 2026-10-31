@@ -205,8 +205,12 @@ async function judge($: EngineInterface, text: string, budgetMs: number | null =
   const started = await $.clock.now()
   lastJudgeAt = started
   const timedOut: Judgment = { verdict: 'unclear', task: '', resources: [], reason: 'judge timed out' }
-  // Set when the budget ran out first: the call's spend then reaches no entry, so it is recorded here.
+  // The spend of a call is recorded by exactly one of two paths: the caller, with the entry, when the
+  // answer made it in time; else this function, once both facts are known (the budget ran out, and
+  // the spend is counted), whichever comes second.
   let isLate = false
+  let isCounted = false
+  const recordLate = () => record($, { at: 0, kind: 'draft', status: 'passed', ms: 0, judgeUsd: spent.usd, workerUsd: 0, savedUsd: 0, id: 'draft', count: 0 })
   let repo = cwd
   let stateMs = 0
   let spent: Tally = NO_SPEND
@@ -234,7 +238,8 @@ async function judge($: EngineInterface, text: string, budgetMs: number | null =
     await state
     spent = tallyOf(live.judgeModel, reply.usage)
     await addSpend($, spent)
-    if (isLate && spent.usd > 0) await record($, { at: 0, kind: 'draft', status: 'passed', ms: 0, judgeUsd: spent.usd, workerUsd: 0, savedUsd: 0, id: 'draft', count: 0 })
+    isCounted = true
+    if (isLate && spent.usd > 0) await recordLate()
     if (!reply.isAnswered) return { verdict: 'unclear', task: '', resources: [], reason: `judge: ${reply.reason}` }
     return parseJudgment(reply.text, text)
   })().catch((): Judgment => ({ verdict: 'unclear', task: '', resources: [], reason: 'judge failed' }))
@@ -243,15 +248,18 @@ async function judge($: EngineInterface, text: string, budgetMs: number | null =
     budgetMs === null
       ? asked
       : $.clock.sleep(budgetMs, { signal: stop.signal }).then(
-          () => {
-            isLate = true
-            return timedOut
-          },
+          () => timedOut,
           () => timedOut,
         )
   const judgment = await Promise.race([asked, timer])
   stop.abort()
-  return { judgment, ms: (await $.clock.now()) - started, stateMs, repo, spend: spent }
+  // Timed out: the caller gets no spend, and whatever the call costs is recorded here (now, if it is already counted).
+  const isTimedOut = judgment === timedOut
+  if (isTimedOut) {
+    isLate = true
+    if (isCounted && spent.usd > 0) void recordLate().catch(() => {})
+  }
+  return { judgment, ms: (await $.clock.now()) - started, stateMs, repo, spend: isTimedOut ? NO_SPEND : spent }
 }
 
 /**
@@ -468,7 +476,9 @@ async function readHistory($: EngineInterface): Promise<{ all: HistoryRow[]; own
   const keys = (await $.store.keys().catch(() => [mine])).filter(isHistoryKey)
   const lists = await Promise.all(keys.map(async key => ({ key, raw: await $.store.get(key).catch(() => (key === mine ? ownRows : undefined)) })))
   const own = toRows(lists.find(l => l.key === mine)?.raw)
-  const others = lists.filter(l => l.key !== mine)
+  // Session keys before the shared one, whatever order the store lists them: an update to a job is
+  // only ever written to a session's own key, so the shared key's copy of it is the stale one.
+  const others = [...lists.filter(l => l.key !== mine && l.key !== HISTORY_KEY), ...lists.filter(l => l.key === HISTORY_KEY && l.key !== mine)]
   return { own, all: mergeHistory([own, ...others.map(l => toRows(l.raw))]), stale: others.filter(l => isExpired(l.raw, now)).map(l => l.key) }
 }
 
@@ -506,8 +516,10 @@ function editHistory($: EngineInterface, edit: (rows: HistoryRow[], now: number)
       if (JSON.stringify(await $.store.get(key).catch(() => undefined)) === JSON.stringify(rows)) break
     }
     ownRows = rows
-    // A session whose rows have all aged out writes that key no more, so it goes.
-    for (const stale of await refreshToday($)) await $.store.delete(stale).catch(() => {})
+    // A session whose rows are all long out of date has probably ended, so its key goes. Read again just
+    // before: one that was idle may have written since. (A write in the instant between that read and the
+    // delete is the one window left.)
+    for (const stale of await refreshToday($)) if (isExpired(await $.store.get(stale).catch(() => undefined), now)) await $.store.delete(stale).catch(() => {})
   })
   historyQueue = run.catch(() => {})
   return run
@@ -592,8 +604,8 @@ async function finish($: EngineInterface, id: string, outcome: Outcome, calls: r
  * A reload kills the workers with the old module while the session's state stays, so an entry left
  * running has no process, and one left judging has no judge: they would hold their locks and the
  * prompts held behind them for good, and stop could not clear them. Settles them as failed (a
- * running one is a job: counted once, its row written unless the history has it), then pumps so
- * held prompts go. An entry with a live process in this module is left alone.
+ * running one is a job: counted once, its row written unless the history has it). An entry with a
+ * live process in this module is left alone. The start pumps after, whether or not anything was settled.
  */
 async function settleOrphans($: EngineInterface): Promise<void> {
   const now = await $.clock.now()
@@ -636,7 +648,6 @@ async function settleOrphans($: EngineInterface): Promise<void> {
   })
   $.ui.log(`⚠ The sidekick reloaded: ${gone.length === 1 ? 'a job was' : `${gone.length} jobs were`} cut off and marked failed (check git status).`)
   for (const entry of gone.filter(x => x.status === 'running')) await deliverNote($, handoffNote(entry.prompt, outcomes.get(entry.id)!, entry.backend, entry.dump))
-  await pump($)
 }
 
 async function runAssist($: EngineInterface, id: string): Promise<void> {
@@ -1051,6 +1062,8 @@ export const register: Register = (on, options) => {
     if (sessionKey === minted && begun.entries.length > 0) await adoptRows($, new Set(begun.entries.map(x => x.id))).catch(() => {})
     await refreshToday($)
     await settleOrphans($).catch(() => {})
+    // Whatever the state held: a queue to start, prompts to release, locks the settling just freed.
+    await pump($).catch(() => {})
     // Store the upgraded shape, so state written by an older version is current from here on.
     await change($, state => state)
     // 0.1.2 kept the mode in the status line; the band carries it now, so clear what it left.

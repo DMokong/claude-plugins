@@ -34,6 +34,8 @@ type World = {
   seed?: Record<string, unknown>
   /** Runs before each write of the session's state lands, with the state as it stood and as it will stand; the write waits for it. */
   beforeWrite?: (was: SidekickState | undefined, will: SidekickState) => Promise<void>
+  /** Runs before the store answers a read of `key`. */
+  beforeGet?: (key: string) => void
   /** How many writes of a history key the store loses: the next ones answer and keep nothing. */
   losesWrites?: { count: number }
 }
@@ -43,7 +45,10 @@ function world(on: On, w: World) {
   clock = mock.clock(on)
   // The mod's store, as a map the test can read and change (another session's write, say).
   const store = new Map<string, unknown>(Object.entries(w.stored ?? {}).map(([k, v]) => [k, JSON.parse(JSON.stringify(v))]))
-  on('store.get', async (_$, e) => ({ value: store.has(e.key) ? JSON.parse(JSON.stringify(store.get(e.key))) : undefined }))
+  on('store.get', async (_$, e) => {
+    w.beforeGet?.(e.key)
+    return { value: store.has(e.key) ? JSON.parse(JSON.stringify(store.get(e.key))) : undefined }
+  })
   on('store.set', async (_$, e) => {
     if (e.key.startsWith('history:') && w.losesWrites !== undefined && w.losesWrites.count > 0) {
       w.losesWrites.count -= 1
@@ -2094,4 +2099,103 @@ test('a judge call that answers after its budget is in the history, so the histo
   expect(Math.abs(recorded - (await state($)).spend.usd)).toBeLessThan(1e-12)
   // It is money in draft judging; it makes no job.
   expect((await state($)).today.done).toBe(0)
+})
+
+// ── round 2
+
+test('a reload with only a queued job, or only held prompts, still moves them', async ($, on) => {
+  const seen = world(on, {
+    judge: MECHANICAL,
+    worker: DONE,
+    seed: { mode: 'auto', entries: [leftover('q1', 'queued', { task: 'tag it', locks: ['bd'] })], waiting: [{ id: 'w1', text: 'why does the doc mention codex twice?' }] },
+  })
+  await $.session.start(START)
+  // Nothing was running or judging; the queue and the held prompt still go.
+  await until($, x => x.entries[0]?.status === 'done' && x.waiting.length === 0)
+  expect(seen.spawned.length).toBe(1)
+  expect(seen.resubmitted).toEqual(['why does the doc mention codex twice?'])
+})
+
+test('a reload with only held prompts releases them', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, seed: { mode: 'auto', entries: [], waiting: [{ id: 'w1', text: 'why does the doc mention codex twice?' }] } })
+  await $.session.start(START)
+  await until($, x => x.waiting.length === 0)
+  expect(seen.resubmitted).toEqual(['why does the doc mention codex twice?'])
+})
+
+test("another session's history is kept unless it is long idle, and a write that lands as it is judged idle keeps it", async ($, on) => {
+  let armed = false
+  let reads = 0
+  const seen = world(on, {
+    judge: MECHANICAL,
+    worker: DONE,
+    beforeGet: key => {
+      if (!armed || key !== 'history:ancient') return
+      reads += 1
+      // The session wakes and writes between the first read (judged idle) and the read before deleting.
+      if (reads === 2) seen.store.set('history:ancient', [chore(clock.now(), 0, 'woke')])
+    },
+  })
+  await clock.set(Date.UTC(2026, 9, 14, 12))
+  const now = clock.now()
+  seen.store.set('history:idle-40-days', [chore(now, 40 * DAY, 'a')])
+  seen.store.set('history:ancient', [chore(now, 200 * DAY, 'b')])
+  seen.store.set('history:ancient-2', [chore(now, 200 * DAY, 'c')])
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  armed = true
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'done')
+  await clock.advance(100)
+  // 40 days is past what is shown, not past what is trusted gone.
+  expect(seen.store.has('history:idle-40-days')).toBe(true)
+  // The long-idle one that stayed idle goes; the one that woke does not.
+  expect(seen.store.has('history:ancient-2')).toBe(false)
+  expect((seen.store.get('history:ancient') as { id: string }[]).map(r => r.id)).toEqual(['woke'])
+})
+
+test("a job given to main in its session's key stays given, whichever key is read first", async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE })
+  await clock.set(Date.UTC(2026, 9, 14, 12))
+  const now = clock.now()
+  const done = chore(now, 5000, 'migrated')
+  // The shared key is listed first: its stale copy says done and saved; the session's own key says given.
+  seen.store.set('history', [done])
+  seen.store.set('history:session-a', [{ ...done, status: 'given', savedUsd: 0 }])
+  await $.session.start(START)
+  const s = await until($, x => x.today.costUsd > 0)
+  expect(s.today.done).toBe(0)
+  expect(s.today.savedUsd).toBe(0)
+})
+
+test('a judge reply that lands just before the deadline is recorded once, though its spend is counted after it', async ($, on) => {
+  const parked: (() => void)[] = []
+  let isParking = false
+  const seen = world(on, {
+    judge: MECHANICAL,
+    judgeDelayMs: 4_000,
+    worker: DONE,
+    beforeWrite: async (was, will) => {
+      // The write that counts the reply's spend waits, across the deadline.
+      if (isParking && will.spend.usd > (was?.spend.usd ?? 0)) await new Promise<void>(resolve => parked.push(resolve))
+    },
+  })
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  const pending = $.prompt.submit({ text: 'push it', ...TYPED })
+  await clock.advance(10)
+  isParking = true
+  seen.release()
+  for (let i = 0; i < 20 && parked.length < 1; i += 1) await clock.advance(10)
+  expect(parked.length).toBe(1)
+  await clock.advance(5_000)
+  const result = await pending
+  expect(result.drop).toBeUndefined()
+  expect((await state($)).entries[0]?.reason).toBe('judge timed out')
+  isParking = false
+  for (const release of parked) release()
+  await until($, x => x.spend.usd > 0)
+  await clock.advance(100)
+  const recorded = storedRows(seen).reduce((n, r) => n + r.judgeUsd + r.workerUsd, 0)
+  expect(Math.abs(recorded - (await state($)).spend.usd)).toBeLessThan(1e-12)
 })
