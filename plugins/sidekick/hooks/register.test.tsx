@@ -38,7 +38,12 @@ type World = {
   beforeGet?: (key: string) => void
   /** How many writes of a history key the store loses: the next ones answer and keep nothing. */
   losesWrites?: { count: number }
+  /** The main session's steps, as the peek log holds them from the start. */
+  peekSteps?: unknown[]
 }
+
+let peeks: Record<string, unknown>[] = []
+let peekReply: string | undefined = 'It is running the tests.'
 
 /** The engine beneath the mod: answers every call it makes and records what it did. */
 function world(on: On, w: World) {
@@ -70,6 +75,12 @@ function world(on: On, w: World) {
     on('state.get', async (_$, e, next) => {
       const read = await next(e)
       return e.plugin === 'sidekick' && e.key === 'sidekick' && read.value.version === 0 ? { value: { value: w.seed, version: 0 } } : read
+    })
+  }
+  if (w.peekSteps !== undefined) {
+    on('state.get', async (_$, e, next) => {
+      const read = await next(e)
+      return e.plugin === 'sidekick' && e.key === 'peek' && read.value.version === 0 ? { value: { value: { steps: w.peekSteps, turnStartedAt: 0, turnEndedAt: 0, isOpen: false, isAsking: false, isSteps: false, summary: '', askedAt: 0 }, version: 0 } } : read
     })
   }
   on('state.set', async (_$, e, next) => {
@@ -147,6 +158,11 @@ function world(on: On, w: World) {
     if (typeof e.system === 'string' && e.system.startsWith('You review')) {
       reviews.push(e.prompt)
       return { value: { isAnswered: true, text: w.review ?? '', usage: { input_tokens: 500, output_tokens: 50 } } } as never
+    }
+    if (typeof e.system === 'string' && e.system.startsWith('You tell a developer')) {
+      peeks.push({ ...e })
+      if (peekReply === undefined) return { value: { isAnswered: false, reason: 'refused', usage: { input_tokens: 500, output_tokens: 0 } } } as never
+      return { value: { isAnswered: true, text: peekReply, usage: { input_tokens: 500, output_tokens: 30 } } } as never
     }
     seen.judged += 1
     if (e.prompt.includes('<message>')) {
@@ -231,7 +247,7 @@ test('in auto, a mechanical chore is dropped from main, done by the worker, and 
   const result = await $.prompt.submit({ text: 'commit and push', ...TYPED })
   expect(result.drop).toContain('→ sidekick (haiku)')
   // The person's own words stay in the transcript even though the main session never sees them.
-  expect(result.drop?.startsWith('❯ commit and push')).toBe(true)
+  expect(seen.logs).toContain('❯ commit and push')
   expect(seen.toMain).toEqual([])
 
   const s = await until($, x => x.entries[0]?.status === 'done')
@@ -1494,6 +1510,92 @@ test('the pane fills the space beside the pet with facts the tiles do not show',
   expect(await pane.find({ type: 'Text', text: /1 day · best 1/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /✓ commit and push/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /2m ago/ })).toBeDefined()
+  await pane.unmount()
+})
+
+const PEEK_STEP = { id: 't1', tool: 'Bash', detail: 'bun test --all', status: 'running' as const, isAgent: false, at: 500, endedAt: 0 }
+
+test('peek tells what the session is doing mid-turn, and only tells', async ($, on) => {
+  peeks = []
+  peekReply = 'It is running the tests.'
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, peekSteps: [PEEK_STEP] })
+  underBand(on)
+  await $.session.start(START)
+  const band = await $.ui.mount(BAND(100, 30))
+  expect(await band.find({ key: 'sk-peek' })).toBeUndefined()
+  await clock.advance(2_000)
+  await band.press({ key: 'band-peek' })
+  await clock.advance(10)
+  expect(await band.find({ type: 'Text', text: /It is running the tests/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /is working/ })).toBeDefined()
+  // It saw the call still running, and asked with no way to act.
+  expect(String(peeks[0]?.prompt)).toContain('● Bash bun test --all')
+  expect(peeks[0]).not.toHaveProperty('tools')
+  await band.press({ key: 'peek-steps' })
+  expect(await band.find({ type: 'Text', text: /● Bash bun test --all/ })).toBeDefined()
+  // Nothing reached the session or started a worker.
+  expect(seen.toMain).toEqual([])
+  expect(seen.appended).toEqual([])
+  expect(seen.resubmitted).toEqual([])
+  expect(seen.spawned).toEqual([])
+  await band.press({ key: 'peek-close' })
+  expect(await band.find({ key: 'sk-peek' })).toBeUndefined()
+  await band.unmount()
+})
+
+test('peek says so when the call fails', async ($, on) => {
+  peeks = []
+  peekReply = undefined
+  world(on, { judge: MECHANICAL, worker: DONE, peekSteps: [PEEK_STEP] })
+  underBand(on)
+  await $.session.start(START)
+  const band = await $.ui.mount(BAND(100, 30))
+  await band.press({ key: 'band-peek' })
+  await clock.advance(10)
+  expect(await band.find({ type: 'Text', text: /Couldn't get a summary/ })).toBeDefined()
+  await band.unmount()
+})
+
+test('peek says working from the start of a turn, before any tool call, and idle after it', async ($, on) => {
+  peeks = []
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  on('turn.start', () => ({ turnId: 't1' }) as never)
+  await $.session.start(START)
+  const band = await $.ui.mount(BAND(100, 30))
+  await band.press({ key: 'band-peek' })
+  await clock.advance(10)
+  expect(await band.find({ type: 'Text', text: /is idle/ })).toBeDefined()
+  await clock.advance(1_000)
+  await $.turn.start({ text: 'think about it', turnId: 't1' })
+  await clock.advance(10)
+  expect(await band.find({ type: 'Text', text: /is working/ })).toBeDefined()
+  await band.unmount()
+})
+
+test('with nothing yet, peek says so without a call', async ($, on) => {
+  peeks = []
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  const band = await $.ui.mount(BAND(100, 30))
+  await band.press({ key: 'band-peek' })
+  await clock.advance(10)
+  expect(await band.find({ type: 'Text', text: /is idle/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /Nothing has happened/ })).toBeDefined()
+  expect(peeks).toEqual([])
+  await band.unmount()
+})
+
+test('the pet section of the pane has its own peek button', async ($, on) => {
+  peeks = []
+  world(on, { judge: MECHANICAL, worker: DONE, stored: { settings: { pet: 'tater' } } })
+  underBand(on)
+  await $.session.start(START)
+  const pane = await $.ui.mount(PET_PANE)
+  await pane.press({ key: 'pane-pet-peek' })
+  await clock.advance(10)
+  expect(await pane.find({ type: 'Text', text: /Nothing has happened/ })).toBeDefined()
   await pane.unmount()
 })
 

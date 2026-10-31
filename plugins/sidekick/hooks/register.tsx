@@ -6,16 +6,19 @@ import type { Judgment } from './lib/judge'
 import { NO_SPEND, addTally, modelName, tallyLine, tallyOf, tokens, usd } from './lib/cost'
 import { guidanceFor, learnSuggestion, needsNoReview, reviewOutcome, REVIEW_SYSTEM, reviewPrompt, toolUsesSince } from './lib/review'
 import { capEntries, migrate, toTaught } from './lib/state'
+import { NO_PEEK, PEEK_SYSTEM, addStep, detailOf, endStep, isGoing, isSessionCall, lastSaid, peekPrompt, stepLine, stepStatus } from './lib/peek'
 import { HISTORY_KEY, NO_TOTALS, agoText, appendRow, bestDay, historyKey, isExpired, isHistoryKey, markGiven, mergeHistory, perDay, savedFor, startOfDay, streak, toRows, totals, trackRecord, weekStart } from './lib/history'
 import type { HistoryRow } from './lib/history'
 import { PET_CHIPS, PET_COLUMNS, PET_ROWS, PET_STROLL, isPetChoice, moodOf, newWalker, pastimeOf, petPose } from './lib/pets'
 import { JUDGE_CHIPS, SETTINGS_KEY, WORKER_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
 import { COLORS, barCells, bigText, dayLevels, spaced, tileMoney } from './lib/draw'
 import { daysSvg, progressSvg, stackSvg, tileSvg } from './lib/svg'
-import { DUMP_KEEP, configRoot, dumpDir, dumpName, dumpText } from './lib/dump'
+import { DUMP_KEEP, configRoot, dumpDir, dumpName, dumpText, persistedPath } from './lib/dump'
 import type { Call } from './lib/dump'
 import {
+  MARK,
   chatLine,
+  chatParts,
   cleanupArgv,
   giveToMainPrompt,
   handoffNote,
@@ -53,6 +56,10 @@ export const EMPTY: SidekickState = {
 
 const sidekick = atom({ plugin: 'sidekick', key: 'sidekick' } as const, EMPTY)
 const petBeat = atom({ plugin: 'sidekick', key: 'petBeat' } as const, 0)
+const peekAtom = atom({ plugin: 'sidekick', key: 'peek' } as const, NO_PEEK)
+const openBoxes = atom({ plugin: 'sidekick', key: 'openBoxes' } as const, [] as string[])
+/** Jobs whose result is drawn in a box in the chat. */
+const boxed = new Set<string>()
 
 /** The session's state, upgraded from whatever version wrote it. */
 async function load($: EngineInterface): Promise<SidekickState> {
@@ -234,7 +241,8 @@ async function judge($: EngineInterface, text: string, budgetMs: number | null =
         prompt: judgePrompt(text, `cwd: ${cwd}`),
         // A verdict and a reason of a dozen words.
         maxTokens: 40,
-        ...(budgetMs === null ? {} : { timeoutMs: budgetMs }),
+        // A little past the timer, so running out of time always reads as a timeout.
+        ...(budgetMs === null ? {} : { timeoutMs: budgetMs + 1_000 }),
       },
       { signal: stop.signal },
     )
@@ -243,7 +251,7 @@ async function judge($: EngineInterface, text: string, budgetMs: number | null =
     await addSpend($, spent)
     isCounted = true
     if (isLate && spent.usd > 0) await recordLate()
-    if (!reply.isAnswered) return { verdict: 'unclear', task: '', resources: [], reason: `judge: ${reply.reason}` }
+    if (!reply.isAnswered) return { verdict: 'unclear', task: '', resources: [], reason: reply.reason === 'aborted' ? 'the judge call was cut off before it answered' : `judge: ${reply.reason}` }
     return parseJudgment(reply.text, text)
   })().catch((): Judgment => ({ verdict: 'unclear', task: '', resources: [], reason: 'judge failed' }))
   // Shadow passes no budget: it holds nothing, so it measures what the judge really takes.
@@ -407,7 +415,12 @@ async function writeDump($: EngineInterface, entry: Entry, calls: readonly Call[
     const dir = dumpDir(home, typeof configDir === 'string' ? configDir : undefined)
     const path = `${dir}/${dumpName(now, entry.id)}`
     const cost = usd(entry.judgeSpend.usd + entry.workerSpend.usd)
-    await $.fs.write(path, dumpText(entry, calls, outcome, cost === '$0' ? 'cost unknown' : `≈${cost}`))
+    const store = `${configRoot(home, typeof configDir === 'string' ? configDir : undefined)}/projects`
+    const whole = await Promise.all(calls.map(async call => {
+      const saved = persistedPath(call.output, store)
+      return saved === undefined ? call : { ...call, output: await $.fs.read(saved).catch(() => call.output) }
+    }))
+    await $.fs.write(path, dumpText(entry, whole, outcome, cost === '$0' ? 'cost unknown' : `≈${cost}`))
     const kept = (await $.fs.list(dir)).filter(f => f.kind === 'file' && f.name.endsWith('.md')).map(f => f.name).sort()
     // $.fs has no delete; these are the mod's own files.
     for (const name of kept.slice(0, Math.max(0, kept.length - DUMP_KEEP))) await $.process.run(['rm', '-f', `${dir}/${name}`], { timeoutMs: 2_000 })
@@ -564,6 +577,13 @@ async function cleanupSession($: EngineInterface, sessionId: string): Promise<vo
   }
 }
 
+/** Puts the job's box in the chat, where a surface can draw one. */
+async function placeBox($: EngineInterface, id: string): Promise<boolean> {
+  const placed = await $.ui.place({ id: `job-${id}` }).catch(() => ({ isPlaced: false as const }))
+  if (placed.isPlaced) boxed.add(id)
+  return placed.isPlaced
+}
+
 async function finish($: EngineInterface, id: string, outcome: Outcome, calls: readonly Call[] = []): Promise<void> {
   workers.delete(id)
   const now = await $.clock.now()
@@ -597,7 +617,8 @@ async function finish($: EngineInterface, id: string, outcome: Outcome, calls: r
   }))
   const seconds = Math.max(1, Math.round((now - (entry.startedAt || entry.createdAt)) / 1000))
   const after = (await load($)).entries.find(x => x.id === id)
-  $.ui.log(chatLine(outcome, entry.backend, seconds, (after?.judgeSpend.usd ?? 0) + (after?.workerSpend.usd ?? 0), entry.dump))
+  // A job with a box in the chat shows its result there; without one, each line is a row of its own.
+  if (!boxed.has(id)) for (const row of chatLine(outcome, entry.backend, seconds, (after?.judgeSpend.usd ?? 0) + (after?.workerSpend.usd ?? 0), entry.dump).split('\n')) $.ui.log(row)
   await deliverNote($, handoffNote(entry.prompt, outcome, entry.backend, entry.dump))
   await tell($, status === 'done' ? `✓ ${shortAnswer(outcome.summary, 200, entry.dump)}` : `⚠ ${shortAnswer(outcome.summary, 200, entry.dump)} — open /sidekick to hand it to main`)
   await pump($)
@@ -937,6 +958,30 @@ async function reviewTurn($: EngineInterface, prompt: string, answer: string): P
   if (live.notifications) $.ui.toast(said)
 }
 
+/**
+ * Tells the person what the main session is doing. Read-only by design: it reads the conversation and
+ * the step log, asks a model with no tools, and shows the answer; nothing goes to the session.
+ */
+async function askPeek($: EngineInterface): Promise<void> {
+  const peek = await read($, peekAtom)
+  if (peek.isAsking) return
+  await update($, peekAtom, p => ({ ...p, isOpen: true, isAsking: true }))
+  const messages = await $.session.messages().catch(() => [])
+  const now = await $.clock.now()
+  const said = lastSaid(messages)
+  let summary = 'Nothing has happened in this session yet.'
+  if (peek.steps.length > 0 || said.asked !== '' || said.said !== '') {
+    const reply = await $.model.complete({ model: live.judgeModel, system: PEEK_SYSTEM, prompt: peekPrompt(peek, said, now), maxTokens: 200 }).catch(() => undefined)
+    if (reply !== undefined) {
+      const spent = tallyOf(live.judgeModel, reply.usage)
+      await addSpend($, spent)
+      await record($, { at: 0, kind: 'draft', status: 'passed', ms: 0, judgeUsd: spent.usd, workerUsd: 0, savedUsd: 0, id: 'draft', count: 1 })
+    }
+    summary = reply?.isAnswered === true && reply.text.trim() !== '' ? reply.text.trim() : "Couldn't get a summary just now; the steps below are still right."
+  }
+  await update($, peekAtom, p => ({ ...p, isAsking: false, summary, askedAt: now }))
+}
+
 /** Keeps how a review came out, the last few, for the pane. */
 async function noteReview($: EngineInterface, note: ReviewNote): Promise<void> {
   const at = await $.clock.now()
@@ -1256,15 +1301,99 @@ export const register: Register = (on, options) => {
     void enqueue($, id, routed, repo).catch(() => {})
     clearRestored($, e.text)
     const doing = routed.verdict === 'investigate' ? ' · investigating' : ''
-    return { drop: `❯ ${e.text} → sidekick (${live.workerModel})${doing} · judged in ${(ms / 1000).toFixed(1)}s — ${routed.reason}` }
+    if (await placeBox($, id)) return { drop: `→ sidekick (${live.workerModel})${doing}` }
+    $.ui.log(`❯ ${e.text}`)
+    return { drop: `→ sidekick (${live.workerModel})${doing} · judged in ${(ms / 1000).toFixed(1)}s: ${routed.reason}` }
   }).catch(($, e, next) => next(e)) // fail open: any error lets the prompt through as typed
 
+  // Only notes what the session does, for asking about it; the call goes on untouched.
+  on('tool.call', async ($, e, next) => {
+    // A plugin's own call (a memory lookup at startup, say) isn't the session working.
+    if (!isSessionCall(next.origin)) return next(e)
+    const at = await $.clock.now()
+    const id = e.tool_use_id ?? `${e.tool}-${at}`
+    const step = { id, tool: e.tool, detail: detailOf(e as Record<string, unknown>), status: 'running' as const, isAgent: e.agentId !== undefined, at, endedAt: 0 }
+    await update($, peekAtom, p => ({ ...p, steps: addStep(p.steps, step) })).catch(() => {})
+    const ended = async (status: 'done' | 'failed') => {
+      const endedAt = await $.clock.now()
+      await update($, peekAtom, p => ({ ...p, steps: endStep(p.steps, id, status, endedAt) })).catch(() => {})
+    }
+    try {
+      const result = await next(e)
+      await ended(stepStatus(result))
+      return result
+    } catch (thrown) {
+      await ended('failed')
+      throw thrown
+    }
+  })
+
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      const startedAt = await $.clock.now()
+      await update($, peekAtom, p => ({ ...p, turnStartedAt: startedAt })).catch(() => {})
+    }
+    return next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      const endedAt = await $.clock.now()
+      await update($, peekAtom, p => ({ ...p, turnEndedAt: endedAt })).catch(() => {})
+    }
     const result = await next(e)
     const prompt = awaitingReview
     if (e.agentId === undefined) awaitingReview = null
     if (e.agentId === undefined && prompt !== null && e.reason === 'answer' && live.reviews) void reviewTurn($, prompt, e.answer).catch(() => {})
     return result
+  })
+
+  on('ui.render', { component: 'Placed' }, async ($, e, next) => {
+    if (e.props.plugin !== 'sidekick' || !e.props.id.startsWith('job-')) return next(e)
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const id = e.props.id.slice('job-'.length)
+    const entry = (await load($)).entries.find(x => x.id === id)
+    if (entry === undefined) return <Text dimColor>{'◆ sidekick job, no longer in the list'}</Text>
+    const isOpen = (await read($, openBoxes)).includes(id)
+    const outcome = entry.outcome
+    const color = entry.status === 'failed' || outcome?.status === 'stopped' ? COLORS.orange : outcome?.status === 'partial' ? COLORS.pink : entry.status === 'done' ? COLORS.green : COLORS.blue
+    const parts = outcome === null ? null : chatParts(outcome, entry.backend, Math.max(1, Math.round((entry.endedAt - (entry.startedAt || entry.createdAt)) / 1000)), entry.judgeSpend.usd + entry.workerSpend.usd, entry.dump)
+    const border = e.surface === 'terminal' ? { borderStyle: 'round', borderColor: color } : {}
+    const rule = (key: string) => <Box key={key} height={1} overflow="hidden"><Text color={COLORS.dim} wrap="wrap">{'─'.repeat(400)}</Text></Box>
+    const toggle = () => void update($, openBoxes, ids => (ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id]))
+    return (
+      <Box flexDirection="column" paddingX={1} {...border}>
+        <Box flexWrap="nowrap">
+          <Text bold color={color}>{`◆ sidekick · ${entry.kind === 'investigate' ? 'investigation' : 'chore'}`}</Text>
+          <Box flexGrow={1} />
+          {outcome === null ? null : <Button key="box-toggle" label={isOpen ? '▾ less' : '▸ more'} plain onPress={toggle} />}
+        </Box>
+        {rule('rule-asked')}
+        <Text color={COLORS.blue} wrap="wrap">{`❯ ${entry.prompt}`}</Text>
+        {entry.reason === '' ? null : <Text color={COLORS.purple} italic wrap="wrap">{`why: ${entry.reason}`}</Text>}
+        {rule('rule-result')}
+        {outcome === null || parts === null
+          ? <Text wrap="wrap">{`◷ ${entry.steps.at(-1) ?? 'starting…'}`}</Text>
+          : <Text bold color={color} wrap="wrap">{`${MARK[outcome.status]} ${parts.first}`}</Text>}
+        {parts?.next === undefined ? null : <Text color={COLORS.orange} wrap="wrap">{`→ Next: ${parts.next}`}</Text>}
+        {isOpen && outcome !== null ? [
+          rule('rule-full'),
+          <Text key="full-summary" wrap="wrap">{outcome.summary}</Text>,
+          ...(outcome.uncertain.length === 0 ? [] : [rule('rule-unsure'), <Text key="unsure-title" bold color={COLORS.pink}>{'Not sure about'}</Text>, ...outcome.uncertain.map((u, n) => <Text key={`unsure-${n}`} wrap="wrap">{`• ${u}`}</Text>)]),
+          ...(outcome.needsMain === '' ? [] : [rule('rule-main'), <Text key="main-title" bold color={COLORS.orange}>{outcome.status === 'done' ? 'Still open' : 'Why it stopped'}</Text>, <Text key="main-text" wrap="wrap">{outcome.needsMain}</Text>]),
+          ...(entry.steps.length === 0 ? [] : [rule('rule-steps'), <Text key="steps-title" bold color={COLORS.yellow}>{'What it ran'}</Text>, ...entry.steps.map((step, n) => <Text key={`step-${n}`} color={COLORS.green} wrap="wrap">{step}</Text>)]),
+          ...(entry.dump === '' ? [] : [rule('rule-record'), <Text key="record" color={COLORS.purple} wrap="wrap">{`Full record: ${entry.dump}`}</Text>]),
+        ] : null}
+        {parts === null ? null : rule('rule-run')}
+        {parts === null ? null : (
+          <Box flexWrap="nowrap">
+            <Text color={COLORS.dim}>{parts.run}</Text>
+            <Box flexGrow={1} />
+            <Button key="box-give" label="give to main" plain onPress={() => void giveToMain($, id)} />
+          </Box>
+        )}
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -1490,6 +1619,20 @@ export const register: Register = (on, options) => {
     }
 
     // ── the dashboard
+    const peek = await read($, peekAtom)
+    const peekSection = (
+      <Box key="sk-pane-peek" flexDirection="column" marginTop={1}>
+        <Box flexWrap={rich !== null ? 'wrap' : 'nowrap'}>
+          <Text bold dimColor>{`CLAUDE ${isGoing(peek) ? '· working' : '· idle'} `}</Text>
+          <Box flexGrow={1} />
+          <Button key="pane-peek" label={peek.isAsking ? 'asking…' : 'What is it doing?'} plain onPress={() => void askPeek($)} />
+        </Box>
+        {peek.isOpen && <Text wrap="wrap">{peek.isAsking && peek.summary === '' ? 'asking…' : peek.summary}</Text>}
+        {peek.isOpen && peek.steps.slice(-12).map(step => (
+          <Text key={`pane-step-${step.id}`} dimColor>{clip(stepLine(step, now), width - 2)}</Text>
+        ))}
+      </Box>
+    )
     // The Session tab counts the rows this session wrote, drafts and reviews with them, however long ago.
     const span =
       state.tab === 'session'
@@ -1596,6 +1739,7 @@ export const register: Register = (on, options) => {
             <Text dimColor>{`caching saved ${usd(Math.max(0, state.spend.savedUsd))}`}</Text>
           </Box>
 
+          {peekSection}
           {rule('h-now', 'NOW')}
           {running.length === 0 && queued.length === 0 && state.waiting.length === 0 && <Text dimColor>{'Nothing running'}</Text>}
           {running.map(entry => (
@@ -1707,6 +1851,11 @@ export const register: Register = (on, options) => {
             <Box key="sk-pane-caption" flexWrap="nowrap">
               <Text bold color={COLORS.yellow}>{name}</Text>
               <Text color={COLORS.purple}>{` ${note}`}</Text>
+              {name.length + note.length + 1 + '  ⌕ peek'.length <= factRoom + 8 && (
+                <Button key="pane-pet-peek" label="What is Claude doing?" plain onPress={() => void askPeek($)}>
+                  <Text color={COLORS.blue}>{'  ⌕ peek'}</Text>
+                </Button>
+              )}
             </Box>
             {factRoom >= 12 && facts.map(fact => (
               <Box key={`sk-fact-${fact.key}`} flexWrap="nowrap">
@@ -1749,7 +1898,8 @@ export const register: Register = (on, options) => {
           <Text bold>{usd(Math.max(0, state.spend.savedUsd))}</Text>
         </Box>
 
-        {rule('h-now', 'NOW')}
+        {peekSection}
+          {rule('h-now', 'NOW')}
         {running.length === 0 && queued.length === 0 && <Text dimColor>{'nothing running'}</Text>}
         {running.map(entry => (
           <Box key={`n-${entry.id}`} flexDirection="column">
@@ -1913,6 +2063,7 @@ export const register: Register = (on, options) => {
     // Says which pet is on for all the time it isn't out, and changes it; it gives way before the toggle's arrow does.
     const flagText = petFlag(state.settings.pet)
     const hasPetFlag = canHavePet && bareHead + flagText.length + 1 + ' ▾ '.length + 1 <= lineWidth
+    const peekText = ' ⌕ peek'
     const head = bareHead + (hasPetFlag ? flagText.length + 1 : 0)
     const partWidths = {
       counts: ' │ '.length + counts.reduce((n, c) => n + `${c.glyph} ${c.n} `.length, 0),
@@ -1926,6 +2077,8 @@ export const register: Register = (on, options) => {
     const order: (keyof typeof partWidths)[] = ['counts', 'saved', 'cost']
     let shown = isOn ? order : []
     while (shown.length > 0 && !fits(shown)) shown = shown.slice(0, -1)
+    // It gives way first of all; the pane keeps the same question.
+    const hasPeekChip = e.surface === 'terminal' && head + shown.reduce((n, k) => n + partWidths[k], 0) + peekText.length + toggleText.length + 1 <= lineWidth
     const modeChip =
       state.mode === 'auto' ? (
         <Text key="pill" bold backgroundColor={COLORS.green} color={COLORS.ink}>{' ● AUTO '}</Text>
@@ -1941,6 +2094,11 @@ export const register: Register = (on, options) => {
         {hasPetFlag && (
           <Button key="band-pet" label={flagText} plain onPress={() => void choosePet($, NEXT_PET[state.settings.pet])}>
             <Text dimColor={pet === null}>{flagText}</Text>
+          </Button>
+        )}
+        {hasPeekChip && (
+          <Button key="band-peek" label="What is Claude doing?" plain onPress={() => void askPeek($)}>
+            <Text color={COLORS.blue}>{peekText}</Text>
           </Button>
         )}
         {/* A cold judge can take seconds on its first call; say so, or the first message looks ignored. */}
@@ -1962,6 +2120,29 @@ export const register: Register = (on, options) => {
         </Button>
       </Box>
     )
+
+    const peek = await read($, peekAtom)
+    const peekWidth = cardWidth - 4
+    const peekCard = peek.isOpen ? (
+      <Box key="sk-peek" flexDirection="column" borderStyle="round" borderColor={COLORS.blue} paddingX={1}>
+        <Box flexWrap="nowrap">
+          <Text bold color={COLORS.blue}>{`⌕ Claude ${isGoing(peek) ? 'is working' : 'is idle'} `}</Text>
+          <Box flexGrow={1} />
+          <Button key="peek-again" label={peek.isAsking ? 'asking…' : 'again'} plain onPress={() => void askPeek($)} />
+          <Text dimColor>{' · '}</Text>
+          <Button key="peek-steps" label={peek.isSteps ? 'summary' : 'steps'} plain onPress={() => void update($, peekAtom, p => ({ ...p, isSteps: !p.isSteps }))} />
+          <Text dimColor>{' · '}</Text>
+          <Button key="peek-close" label="✕" plain onPress={() => void update($, peekAtom, p => ({ ...p, isOpen: false }))} />
+        </Box>
+        {peek.isSteps ? (
+          peek.steps.length === 0 ? <Text dimColor>{'No tool calls yet'}</Text> : peek.steps.slice(maxRows < 18 ? -3 : -8).map(step => (
+            <Text key={`peek-step-${step.id}`} color={step.status === 'running' ? COLORS.pink : step.status === 'failed' ? COLORS.orange : undefined} dimColor={step.status === 'done'}>{clip(stepLine(step, now), peekWidth)}</Text>
+          ))
+        ) : (
+          <Text wrap="wrap">{peek.summary === '' ? 'asking…' : clip(peek.summary, peekWidth * (maxRows < 18 ? 3 : 5))}</Text>
+        )}
+      </Box>
+    ) : null
 
     const suggestion = state.suggestions[0]
     const answerChips = (s: Suggestion) =>
@@ -2343,6 +2524,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column">
           <Box key="sk-pet" gap={1} flexWrap="nowrap">
             <Box flexDirection="column" flexGrow={1} justifyContent="flex-end">
+              {peekCard}
               {card}
               {folded}
             </Box>
@@ -2371,6 +2553,7 @@ export const register: Register = (on, options) => {
     }
     return (
       <Box flexDirection="column">
+        {peekCard}
         {card}
         {panel !== null && (
           <Box key="sk-panel-row" flexWrap="nowrap" alignItems="flex-end">

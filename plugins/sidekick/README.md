@@ -136,10 +136,21 @@ commit and push
 You'll see your message quoted with where it went, then the result a few seconds later:
 
 ```text
-⏺ Prompt dropped by a hook: ❯ commit and push → sidekick (haiku) · judged in 0.0s
-⏺ sidekick: ✓ Committed the README.md "Alerts" section as 79fc1cb on main and pushed it
-  to origin/main (b2776d3..79fc1cb). · haiku · 8s · ≈$0.0015
+╭───────────────────────────────────────────────────────────╮
+│ ◆ sidekick · chore                                 ▸ more │
+│ ───────────────────────────────────────────────────────── │
+│ ❯ commit and push                                         │
+│ why: commits and pushes the checked-out branch            │
+│ ───────────────────────────────────────────────────────── │
+│ ✓ Committed 79fc1cb on main and pushed it.                │
+│ ───────────────────────────────────────────────────────── │
+│ haiku · 8s · ≈$0.0015                        give to main │
+╰───────────────────────────────────────────────────────────╯
+⏺ Prompt dropped by a hook: → sidekick (haiku)
 ```
+
+Press `▸ more` for the full report, or `give to main` to hand it to Claude. Where a box can't be
+drawn, the same result comes as plain rows.
 
 ("Prompt dropped by a hook" is how Claude Code labels any message a mod takes. Here it means
 the sidekick took it.)
@@ -278,6 +289,9 @@ everything in the table above:
 | `X=rm; $X …`, `GIT_PAGER=…`, `git -c …`, `grm` / `gsed -i` | a command hidden in a variable, an option or a GNU alias |
 | `printenv`, bare `env`, `security find-…-password` | prints environment secrets or Keychain passwords |
 | `tmux send-keys`, `herdr pane run`, `make`, `diskutil erase…`, `shutdown`, an unknown tool | runs things the guard can't follow, or isn't known to be safe |
+| `herdr agent prompt`, `herdr pane run`, `--session`: every herdr command except `--version`, `--help`, `pane list`, `agent get`, and `pane read` / `agent read` with `--lines` up to 200, which only an investigation may run | drives another session, or reads without a limit; chores get no herdr at all |
+| `ps -E`, `ps eww`, `ps auxe` | prints each process's environment, secrets included (`ps aux` stays, and the record redacts what it recognises) |
+| `git grep`, `git diff`, `git show`, `git log -p` with no paths, in a repository that tracks a credentials file | prints that file; name the paths after `--` |
 | git anything but reads | an investigation doesn't move a repo |
 | another Claude session's files under `~/.claude/projects/` | private, and stale |
 
@@ -301,9 +315,9 @@ resolve. A command the guard can't parse, or a guard that fails, refuses.
 can't see inside your project's own scripts, so those are your maintainers' call, and the worker is
 told to use the read-only or restart ones. The file and process rows hold for chores too.
 
-**What comes back.** The chat line, pane, band and notification as for a chore, plus
-`→ main: <what's still open>` when there is something. Claude's note ends with the path of a **full
-record**: every command the worker ran and its output (each cut to 4 KB), the report and the
+**What comes back.** The box, pane, band and notification as for a chore, plus
+`→ Next: <what's still open>` when there is something. Claude's note ends with the path of a **full
+record**: every command the worker ran and its output (each cut to 20 KB, large output included), the report and the
 cost. Credentials that show up in output are redacted: API keys (Anthropic, OpenAI, AWS, Google),
 Slack and GitHub tokens, JWTs, `Bearer` headers, `password=` / `token:` values and passwords in
 URLs. Records live in `~/.claude/sidekick/investigations/` (or under `CLAUDE_CONFIG_DIR`),
@@ -737,10 +751,15 @@ and rendered to SVG.
 
 ---
 
+## Asking what Claude is doing
+
+`⌕ peek` on the band (and `⌕ peek` beside the pet and *What is it doing?* in the pane) answers what the main session is doing, mid-turn too: a short summary from a cheap model, and the steps as they happen, running calls included. It only reads and tells. The model call has no tools, nothing goes to the session, and nothing can act on the answer. The steps come from the session's own tool calls, with no call behind them.
+
 ## Changelog
 
 | Version | |
 |---|---|
+| **0.9.0** | Ask what Claude is doing mid-turn (`⌕ peek`): read only, never an action. Results in a box in the chat with dividers, colours, expand and give to main; a short headline on screen and the full report for main. Investigations can read other herdr panes' status and screens, with a line limit; chores get no herdr. Guard refuses `ps` environment dumps, readers fed by pipes and loops, and git reads of tracked credentials. Records keep large output. |
 | **0.8.0** | A specific reason for every routing decision, in chat and the pane, and recent review outcomes on the dashboard. The worker's whole answer is kept and clipped only for display. Facts beside the pet. Guard hardened against flag, path, expansion and option spellings, recursive reads and more credential files. Jobs can't start twice or stick after a reload; held prompts survive races; history is per session and counts warm-ups and drafts. |
 | **0.7.0** | Reviews: after Claude finishes a message the judge left with it, a cheap call asks whether the sidekick could have done it. Yes, No, Ignore or Adjust on the card teaches it, with guidance the worker follows on jobs like it, and refines what it already knows. `/sidekick teach <n> <guidance>`. |
 | **0.6.1** | With the panel open and nothing to do, the pet plays beside it. The pane's pet wanders now and then. A finished job's outcome, or the judge's answer when it leaves a message with Claude, stays above the prompt for 15 seconds. The PET chips share the MODE row when they fit. The pets are now Mochi the quokka and Tater the capybara, and a pet you chose under its old name stays chosen. Above the prompt the pet only comes out while the sidekick thinks or works, on the right and without taking a row; the Sidekick pane keeps it animated whenever it's on, a 🐾 button on the sidekick's line shows and changes the pet, the panel shows the version, and hopping, hauling and sweeping now walk up and down. |
