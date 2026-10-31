@@ -274,13 +274,33 @@ export function parseStreamLine(line: string): StreamEvent {
 const strings = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').slice(0, 20) : []
 
+/**
+ * The most of an answer the outcome keeps. Generous: the answer is the result of some jobs, and the
+ * session's state holds 60 outcomes (60 x 8,000 characters is under half a megabyte at the worst). Past it
+ * the text says it was cut.
+ */
+export const SUMMARY_LIMIT = 8_000
+
+const bounded = (text: string): string => (text.length <= SUMMARY_LIMIT ? text : `${text.slice(0, SUMMARY_LIMIT)}\n[cut: ${text.length - SUMMARY_LIMIT} more chars]`)
+
+/**
+ * An answer for a place with little room: the start of it, then a visible mark with how much is left
+ * out and where the whole is (the record when the job wrote one, else the pane's job view).
+ */
+export function shortAnswer(summary: string, limit: number, dumpPath = ''): string {
+  if (summary.length <= limit) return summary
+  const where = dumpPath !== '' ? `the record ${dumpPath} and the sidekick pane` : 'the sidekick pane (/sidekick, open the job)'
+  return `${summary.slice(0, Math.max(1, limit - 1)).trimEnd()}… [${summary.length - limit + 1} more chars: full answer in ${where}]`
+}
+
 const STATUSES: readonly Outcome['status'][] = ['done', 'partial', 'stopped', 'failed']
 
 /** The worker's final reply, validated. A reply that isn't the JSON asked for still says what it said. */
 export function parseOutcome(text: string, isError: boolean): Outcome {
   const raw = firstJson(text)
   if (raw === null || typeof raw !== 'object') {
-    const said = text.trim().split('\n')[0]?.slice(0, 200) ?? ''
+    // Prose is the answer, every line of it.
+    const said = bounded(text.trim())
     return {
       status: isError ? 'failed' : 'partial',
       summary: said === '' ? 'The worker gave no report.' : said,
@@ -295,7 +315,7 @@ export function parseOutcome(text: string, isError: boolean): Outcome {
   const status = isError ? 'failed' : (STATUSES.find(s => s === obj.status) ?? 'partial')
   return {
     status,
-    summary: typeof obj.summary === 'string' && obj.summary.trim() !== '' ? obj.summary.trim().slice(0, 400) : 'No summary given.',
+    summary: typeof obj.summary === 'string' && obj.summary.trim() !== '' ? bounded(obj.summary.trim()) : 'No summary given.',
     commands: strings(obj.commands),
     shas: strings(obj.shas).map(sha => sha.slice(0, 12)),
     changed: strings(obj.changed),
@@ -307,14 +327,16 @@ export function parseOutcome(text: string, isError: boolean): Outcome {
 const MARK: Record<Outcome['status'], string> = { done: '✓', partial: '◐', stopped: '■', failed: '✗' }
 
 /** The line shown in the transcript where a reply would have been. */
-export function chatLine(outcome: Outcome, backend: string, seconds: number, costUsd = 0): string {
+export function chatLine(outcome: Outcome, backend: string, seconds: number, costUsd = 0, dumpPath = ''): string {
   const handBack = outcome.status === 'done' ? '' : ' (pane → give to main)'
   const tail = outcome.needsMain !== '' ? ` → main: ${outcome.needsMain}${handBack}` : outcome.status === 'done' ? '' : ' · see the sidekick pane'
   const cost = costUsd > 0 ? ` · ≈${usd(costUsd)}` : ''
-  return `${MARK[outcome.status]} ${outcome.summary} · ${backend} · ${seconds}s${cost}${tail}`
+  return `${MARK[outcome.status]} ${shortAnswer(outcome.summary, CHAT_LIMIT, dumpPath)} · ${backend} · ${seconds}s${cost}${tail}`
 }
 
 const HANDOFF_LIMIT = 700
+/** How much of an answer the transcript's chat line shows. */
+const CHAT_LIMIT = 400
 
 /** The note the main session reads with its next prompt, so it knows what the sidekick did. */
 export function handoffNote(prompt: string, outcome: Outcome, backend: string, dumpPath = ''): string {
@@ -332,7 +354,11 @@ export function handoffNote(prompt: string, outcome: Outcome, backend: string, d
   ].join(' ')
   const body = parts.join(' ')
   const room = HANDOFF_LIMIT - tail.length - 1
-  return `${body.length > room ? `${body.slice(0, room - 1)}…` : body} ${tail}`
+  if (body.length <= room) return `${body} ${tail}`
+  // Said, not silent: the answer is longer than a note carries, and the main session is told where it is.
+  const where = dumpPath !== '' ? 'the record' : "the sidekick pane's job view"
+  const mark = `… [shortened: ${body.length - room} chars left out; full answer in ${where}]`
+  return `${body.slice(0, Math.max(0, room - mark.length))}${mark} ${tail}`
 }
 
 /**

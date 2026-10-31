@@ -2199,3 +2199,35 @@ test('a judge reply that lands just before the deadline is recorded once, though
   const recorded = storedRows(seen).reduce((n, r) => n + r.judgeUsd + r.workerUsd, 0)
   expect(Math.abs(recorded - (await state($)).spend.usd)).toBeLessThan(1e-12)
 })
+
+// ── trk-17a: the whole answer
+
+const LONG_ANSWER = `${Array.from({ length: 3 }, (_, i) => `- bullet ${i + 1}: ${'detail '.repeat(60)}`).join('\n')}\nEND-OF-ANSWER`
+const LONG_DONE = JSON.stringify({ status: 'done', summary: LONG_ANSWER, commands: [], shas: [], changed: [], uncertain: [], needsMain: '' })
+
+test('a worker answer over 400 characters is whole in the job view and the record; the chat line says it is shortened', async ($, on) => {
+  const seen = world(on, { judge: INVESTIGATE, worker: LONG_DONE })
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  await withInstructions($ as never)
+  await $.prompt.submit({ text: 'acme-bot stopped replying, summarize why in three bullets', ...TYPED })
+  const s = await until($, x => x.entries[0]?.status === 'done')
+  expect(s.entries[0]?.outcome?.summary).toBe(LONG_ANSWER)
+  expect(seen.written[0]?.text).toContain('END-OF-ANSWER')
+  const chat = seen.logs.find(line => line.startsWith('✓'))!
+  expect(chat).not.toContain('END-OF-ANSWER')
+  expect(chat).toContain(s.entries[0]!.dump)
+  const ui = await $.ui.mount({
+    plugin: 'sidekick',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'sidekick',
+    props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
+  } as never)
+  await openJob(ui, s.entries[0]?.id)
+  expect(await ui.find({ type: 'Text', text: /END-OF-ANSWER/ })).toBeDefined()
+  await ui.unmount()
+  // The main session's note says it was shortened, and points to the record.
+  expect(seen.appended.at(-1)).toContain('[shortened')
+  expect(seen.appended.at(-1)).toContain('full answer in the record')
+})

@@ -4,7 +4,7 @@ import { JUDGE_SYSTEM, canStart, holdsMain, judgeSystem, lockKeys, parseJudgment
 import { guidanceFor, learnSuggestion, needsNoReview, parseReview, reviewPrompt, toolUsesSince } from './lib/review'
 import { capEntries, migrate, toTaught } from './lib/state'
 import { EMPTY } from './register'
-import { workerInput, INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPrompt, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
+import { SUMMARY_LIMIT, workerInput, INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPrompt, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
 import { COLORS, barCells, bigText, bigWidth, dayLevels, spaced, tileMoney } from './lib/draw'
 import { appendRow, weekStart, bestDay, historyKey, isExpired, isHistoryKey, markGiven, mergeHistory, perDay, agoText, savedFor, startOfDay, streak, toRows, totals, trackRecord } from './lib/history'
 import type { HistoryRow } from './lib/history'
@@ -814,4 +814,35 @@ test('how long ago reads in the largest unit that fits', async () => {
   expect(agoText(120_000)).toBe('2m ago')
   expect(agoText(2 * 60 * 60_000)).toBe('2h ago')
   expect(agoText(3 * 24 * 60 * 60_000)).toBe('3d ago')
+})
+
+test('an answer over 400 characters is kept whole in the outcome, up to a safety bound that says it cut', async () => {
+  const answer = `${'- a long first bullet. '.repeat(30)}\n- the last bullet, END-OF-ANSWER`
+  const outcome = parseOutcome(JSON.stringify({ status: 'done', summary: answer }), false)
+  expect(outcome.summary).toBe(answer)
+  expect(outcome.summary.length).toBeGreaterThan(400)
+  // Prose with no JSON is the answer too, every line of it.
+  expect(parseOutcome(answer, false).summary).toBe(answer)
+  const huge = parseOutcome(JSON.stringify({ status: 'done', summary: 'z'.repeat(SUMMARY_LIMIT + 500) }), false)
+  expect(huge.summary.length).toBeLessThan(SUMMARY_LIMIT + 100)
+  expect(huge.summary).toContain('[cut: 500 more chars]')
+})
+
+test('the chat line and the handoff note say when they show less than the answer, and where the rest is', async () => {
+  const answer = `${'word '.repeat(150)}END-OF-ANSWER`
+  const outcome = parseOutcome(JSON.stringify({ status: 'done', summary: answer }), false)
+  const chat = chatLine(outcome, 'haiku', 5)
+  expect(chat).not.toContain('END-OF-ANSWER')
+  expect(chat).toContain('… [')
+  expect(chat).toContain('more chars')
+  expect(chat).toContain('sidekick pane')
+  expect(chatLine(outcome, 'haiku', 5, 0, '/home/u/r.md')).toContain('/home/u/r.md')
+  const note = handoffNote('summarize it', outcome, 'haiku', '')
+  expect(note).toContain('[shortened')
+  expect(note).toContain('sidekick pane')
+  expect(handoffNote('summarize it', outcome, 'haiku', '/home/u/r.md')).toContain('full answer in the record')
+  // A short answer carries no mark.
+  const short = parseOutcome('{"status":"done","summary":"Committed abc1234"}', false)
+  expect(handoffNote('push', short, 'haiku')).not.toContain('shortened')
+  expect(chatLine(short, 'haiku', 1)).toBe('✓ Committed abc1234 · haiku · 1s')
 })

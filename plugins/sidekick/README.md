@@ -305,6 +305,12 @@ URLs. Records live in `~/.claude/sidekick/investigations/` (or under `CLAUDE_CON
 outside any repository, and the newest 50 are kept. The pane's **`record`** button copies the
 path.
 
+**The whole answer.** When the answer is the result ("summarize X in three bullets"), the worker's
+text is kept whole in the job and in the record, up to 8,000 characters (past that it says how much
+was cut). Places with little room (the chat line, the notification, the band's card, Claude's note)
+show the start with a visible `… [N more chars: full answer in …]` mark that names where the rest
+is: the pane's job view, and the record for an investigation.
+
 **Cost.** A real healthcheck of about two dozen launchd jobs and their containers took 12 commands, 30 s and
 about **$0.01**. Investigations hold no git or bd lock, so **you can keep talking to Claude while
 one runs**. Two investigations never run at once.

@@ -21,6 +21,7 @@ import {
   handoffNote,
   parseOutcome,
   parseStreamEvents,
+  shortAnswer,
   splitLines,
   workerArgv,
   workerInput,
@@ -594,9 +595,9 @@ async function finish($: EngineInterface, id: string, outcome: Outcome, calls: r
   }))
   const seconds = Math.max(1, Math.round((now - (entry.startedAt || entry.createdAt)) / 1000))
   const after = (await load($)).entries.find(x => x.id === id)
-  $.ui.log(chatLine(outcome, entry.backend, seconds, (after?.judgeSpend.usd ?? 0) + (after?.workerSpend.usd ?? 0)))
+  $.ui.log(chatLine(outcome, entry.backend, seconds, (after?.judgeSpend.usd ?? 0) + (after?.workerSpend.usd ?? 0), entry.dump))
   await deliverNote($, handoffNote(entry.prompt, outcome, entry.backend, entry.dump))
-  await tell($, status === 'done' ? `✓ ${outcome.summary}` : `⚠ ${outcome.summary} — open /sidekick to hand it to main`)
+  await tell($, status === 'done' ? `✓ ${shortAnswer(outcome.summary, 200, entry.dump)}` : `⚠ ${shortAnswer(outcome.summary, 200, entry.dump)} — open /sidekick to hand it to main`)
   await pump($)
 }
 
