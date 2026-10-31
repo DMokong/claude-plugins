@@ -74,11 +74,13 @@ export function judgeSystem(taught: readonly Taught[]): string {
   const list = (verdict: Taught['verdict']) => recent.filter(t => t.verdict === verdict).map(t => `- ${t.text}`)
   const chores = list('mechanical')
   const looks = list('investigate')
+  const kept = list('needs-main')
   return [
     JUDGE_SYSTEM,
     'The developer has corrected you on these before: each was sent to the main session and they said the sidekick should have taken it. Treat messages like them the same way (the safety rules above still apply).',
     ...(chores.length > 0 ? [`Each was a mechanical chore:\n${chores.join('\n')}`] : []),
     ...(looks.length > 0 ? [`Each was an investigation:\n${looks.join('\n')}`] : []),
+    ...(kept.length > 0 ? [`The developer said these stay with the main session; answer needs-main for messages like them:\n${kept.join('\n')}`] : []),
   ].join('\n\n')
 }
 

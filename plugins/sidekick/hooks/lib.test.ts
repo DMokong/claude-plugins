@@ -1,9 +1,10 @@
 import { test, expect } from 'claude-code/testing'
 
 import { JUDGE_SYSTEM, canStart, holdsMain, judgeSystem, lockKeys, parseJudgment, precheck, resourcesOf } from './lib/judge'
+import { guidanceFor, learnSuggestion, needsNoReview, parseReview, reviewPrompt, toolUsesSince } from './lib/review'
 import { migrate, toTaught } from './lib/state'
 import { EMPTY } from './register'
-import { INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPrompt, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
+import { workerInput, INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPrompt, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
 import { COLORS, barCells, bigText, bigWidth, dayLevels, spaced, tileMoney } from './lib/draw'
 import { appendRow, weekStart, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals } from './lib/history'
 import type { HistoryRow } from './lib/history'
@@ -476,7 +477,7 @@ test("SAVED is one main-model turn the sidekick took, less what it spent", async
 
 test('settings: the plugin options are the defaults, and only changed fields are stored', async () => {
   const defaults = defaultsFrom({ judgeModel: 'haiku', workerModel: '', maxConcurrent: '9' })
-  expect(defaults).toEqual({ judgeModel: 'haiku', workerModel: 'haiku', investigations: true, draftJudging: true, notifications: true, maxConcurrent: 4, pet: 'off' })
+  expect(defaults).toEqual({ judgeModel: 'haiku', workerModel: 'haiku', investigations: true, draftJudging: true, reviews: true, notifications: true, maxConcurrent: 4, pet: 'off' })
   const live = effective(defaults, { draftJudging: false, judgeModel: 3, maxConcurrent: 2 })
   expect(live.draftJudging).toBe(false)
   expect(live.judgeModel).toBe('haiku')
@@ -689,4 +690,72 @@ test('pastimes go through everything at a real clock time, and never repeat back
     }
     expect(seen.size).toBe(name === 'mochi' ? 7 : 12)
   }
+})
+
+const reviewReply = (over: object = {}) => JSON.stringify({ could: true, confidence: 0.9, kind: 'chore', reason: 'routine', guidance: 'run git log first', refines: null, ...over })
+
+test('a review speaks only when it is sure and has guidance to give', () => {
+  expect(parseReview(reviewReply(), 'a', 'tag it', [])).toEqual({ id: 'a', prompt: 'tag it', verdict: 'mechanical', reason: 'routine', guidance: 'run git log first', refines: null })
+  expect(parseReview(reviewReply({ could: false }), 'a', 'x', [])).toBeNull()
+  expect(parseReview(reviewReply({ confidence: 0.5 }), 'a', 'x', [])).toBeNull()
+  expect(parseReview(reviewReply({ guidance: ' ' }), 'a', 'x', [])).toBeNull()
+  expect(parseReview('no idea', 'a', 'x', [])).toBeNull()
+  // It can only refine what exists, and never an entry that stays with Claude.
+  const known = [{ text: 'tag a release', verdict: 'mechanical' as const }, { text: 'design it', verdict: 'needs-main' as const }]
+  expect(parseReview(reviewReply({ refines: 1 }), 'a', 'x', known)?.refines).toBe('tag a release')
+  expect(parseReview(reviewReply({ refines: 2 }), 'a', 'x', known)?.refines).toBeNull()
+  expect(parseReview(reviewReply({ refines: 9 }), 'a', 'x', known)?.refines).toBeNull()
+})
+
+test('a yes adds an entry, or improves the one it refines and keeps the new message as an example', () => {
+  const s = { id: 'a', prompt: 'tag the new release', verdict: 'mechanical' as const, reason: '', guidance: 'better', refines: null }
+  expect(learnSuggestion([], s)).toEqual([{ text: 'tag the new release', verdict: 'mechanical', guidance: 'better' }])
+  const old = [{ text: 'tag a release', verdict: 'mechanical' as const, guidance: 'old' }]
+  expect(learnSuggestion(old, { ...s, refines: 'tag a release' })).toEqual([{ text: 'tag a release', verdict: 'mechanical', guidance: 'better', examples: ['tag the new release'] }])
+})
+
+test('guidance goes to jobs like the one it was learned from, and no others', () => {
+  const list = [
+    { text: 'tag a release', verdict: 'mechanical' as const, guidance: 'tags', examples: ['cut a new version tag'] },
+    { text: 'restart the slack bot', verdict: 'investigate' as const, guidance: 'bots' },
+    { text: 'design the cache', verdict: 'needs-main' as const },
+  ]
+  expect(guidanceFor(list, 'tag the release')).toBe('tags')
+  expect(guidanceFor(list, 'cut new version tag')).toBe('tags')
+  expect(guidanceFor(list, 'please restart slack bot')).toBe('bots')
+  expect(guidanceFor(list, 'design the cache')).toBe('')
+  expect(guidanceFor(list, 'update the readme')).toBe('')
+})
+
+test('turns plainly beyond the worker cost no model call', () => {
+  const bash = { tool: 'Bash', input: { command: 'git log' } }
+  expect(needsNoReview([bash])).toBeNull()
+  expect(needsNoReview([])).not.toBeNull()
+  expect(needsNoReview([bash, { tool: 'Edit', input: {} }])).not.toBeNull()
+  expect(needsNoReview(Array.from({ length: 26 }, () => bash))).not.toBeNull()
+})
+
+test('the review sees the work since the message, and what is already learned', () => {
+  const messages = [
+    { role: 'user', text: 'earlier', toolUses: [] },
+    { role: 'assistant', text: '', toolUses: [{ tool: 'Read', input: { file_path: '/old' } }] },
+    { role: 'user', text: 'tag it', toolUses: [] },
+    { role: 'assistant', text: '', toolUses: [{ tool: 'Bash', input: { command: 'git tag v1' } }] },
+  ]
+  const uses = toolUsesSince(messages, 'tag it')!
+  expect(uses).toEqual([{ tool: 'Bash', input: { command: 'git tag v1' } }])
+  expect(toolUsesSince(messages, 'not said')).toBeNull()
+  const prompt = reviewPrompt('tag it', uses, 'Tagged.', [{ text: 'push', verdict: 'mechanical', guidance: 'pull first' }])
+  expect(prompt).toContain('Bash: git tag v1')
+  expect(prompt).toContain('1. push | guidance: pull first')
+})
+
+test('learned entries keep their guidance through a reload, and a stays-with-Claude verdict', () => {
+  expect(toTaught([{ text: 'a', verdict: 'mechanical', guidance: 'g', examples: ['b'] }, { text: 'c', verdict: 'needs-main' }])).toEqual([
+    { text: 'a', verdict: 'mechanical', guidance: 'g', examples: ['b'] },
+    { text: 'c', verdict: 'needs-main' },
+  ])
+  expect(judgeSystem([{ text: 'design the cache', verdict: 'needs-main' }])).toContain('stay with the main session')
+  expect(workerInput('t', 'p', 'pull first')).toContain('<notes>pull first</notes>')
+  expect(workerInput('t', 'p')).not.toContain('<notes>')
 })

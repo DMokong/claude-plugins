@@ -19,6 +19,7 @@ export function migrate(raw: Partial<SidekickState> | undefined, empty: Sidekick
     tick: typeof state.tick === 'number' ? state.tick : 0,
     isWarming: state.isWarming === true,
     learned: toTaught(state.learned),
+    suggestions: Array.isArray(state.suggestions) ? state.suggestions : [],
     instructions: Array.isArray(state.instructions) ? state.instructions : null,
     settings: { ...empty.settings, ...(state.settings ?? {}), pet: toPetChoice(state.settings?.pet, empty.settings.pet) },
     panelOpen: state.panelOpen === true,
@@ -39,7 +40,13 @@ export function toTaught(raw: unknown): Taught[] {
   for (const item of raw) {
     if (typeof item === 'string') out.push({ text: item, verdict: 'mechanical' })
     else if (item !== null && typeof item === 'object' && typeof (item as Taught).text === 'string') {
-      out.push({ text: (item as Taught).text, verdict: (item as Taught).verdict === 'investigate' ? 'investigate' : 'mechanical' })
+      const { text, verdict, guidance, examples } = item as Taught
+      out.push({
+        text,
+        verdict: verdict === 'investigate' || verdict === 'needs-main' ? verdict : 'mechanical',
+        ...(typeof guidance === 'string' ? { guidance } : {}),
+        ...(Array.isArray(examples) ? { examples } : {}),
+      })
     }
   }
   return out

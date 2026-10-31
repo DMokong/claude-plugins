@@ -24,6 +24,7 @@ export function defaultsFrom(options: Readonly<Record<string, unknown>>): Settin
     workerModel: model(options.workerModel),
     investigations: true,
     draftJudging: true,
+    reviews: true,
     notifications: true,
     maxConcurrent: Math.min(4, Math.max(1, Number(options.maxConcurrent) || 1)),
     pet: 'off',
