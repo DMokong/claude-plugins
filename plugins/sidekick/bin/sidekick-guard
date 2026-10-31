@@ -5,87 +5,206 @@ usage: sidekick-guard [chore|investigate]   (the hook's JSON call on stdin; no a
 
 It refuses, in every profile:
 - git commands that can lose work (force-push, reset --hard, clean, ...);
-- any read of a credentials file (.env, .mcp.json, keys) and of another Claude session's files;
+- any read of a credentials file (.env, .mcp.json, keys) and of another Claude session's files,
+  however the shell is made to spell the name (globs, braces, variables, $'..', case);
 - outside git, anything that deletes or overwrites files, changes or removes containers, jobs or
   data, kills processes, writes to an API, installs, runs as root, or runs inline code the guard
   can't see into. Restarts in place (launchctl kickstart, docker restart/start) are allowed.
 In an investigation the guard works the other way round: only commands it knows how to read with
 (and the restarts in place, and the project's own scripts, run by path) get through. Anything else is
-refused, git is reads only, and a command it can't parse is refused.
+refused, git is reads only, a command it can't parse is refused, and so is a file argument that is
+only known after the shell expands it.
 
 The worker's --disallowedTools prefix rules catch the common spellings; this catches the rest (a flag
-after other arguments, `git -C dir ...`, a command chained after `&&`, hidden in `bash -c` or
+after other arguments, `git -C dir ...`, a command chained after `&&`, hidden in `bash -lc` or
 `$(...)`). Exit 2 blocks the call and shows stderr to the worker; any other exit lets it through.
+
+How it reads a command line: the shell's own passes are done first, in the shell's order. Quoting
+decides what stays literal (`'.e*'` is a regex, `.e*` is a glob), then braces, variables and `~` are
+filled in, and the result is judged: a command by its lower-cased basename, behind any wrapper; a
+word that is a pattern by whether it could be the name of a secret.
 """
+import fnmatch
+import glob
+import itertools
 import json
 import os
 import re
 import shlex
 import sys
+import time
+from functools import lru_cache
 
-GLOBAL_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
+# --- the options of the commands below -----------------------------------------------------------
 
 
-def git_args(words):
-    """The subcommand and its arguments of a git invocation, or None if it isn't one."""
-    if not words or words[0] != "git":
-        return None
+def long_in(arg, names, least=2):
+    """Whether `arg` is `--name` or `--name=value` for one of `names`, or an abbreviation of one.
+
+    getopt_long takes any prefix that is unique, so a prefix of a dangerous option counts as it.
+    """
+    if not arg.startswith("--") or len(arg) < 2 + least:
+        return False
+    given = arg[2:].split("=", 1)[0]
+    return len(given) >= least and any(n.startswith(given) for n in names)
+
+
+def shorts(arg, valued=""):
+    """The letters of a bundle of short options (`-sXDELETE`) as (letter, value) pairs.
+
+    A letter in `valued` takes the rest of the word as its value ('' if the value is the next word)
+    and ends the bundle; the others have no value (None).
+    """
+    if len(arg) < 2 or arg[0] != "-" or arg[1] == "-":
+        return []
+    out = []
+    for n, ch in enumerate(arg[1:], 1):
+        if ch in valued:
+            out.append((ch, arg[n + 1:]))
+            break
+        out.append((ch, None))
+    return out
+
+
+def letters_of(args):
+    """Every short-option letter used in `args` (crude: attached values count as letters too)."""
+    return set("".join(a[1:] for a in args if a.startswith("-") and not a.startswith("--") and len(a) > 1))
+
+
+def positionals(args, valued=()):
+    """The words that are not options, skipping the value of the options in `valued`."""
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a in valued:
+            i += 2
+            continue
+        if not a.startswith("-") or a == "-":
+            out.append(a)
+        i += 1
+    return out
+
+
+# --- git -------------------------------------------------------------------------------------------
+
+GLOBAL_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix", "--attr-source"}
+
+
+def git_dir(words, cwd):
+    """Where `git -C a -C b ...` runs."""
+    here = cwd or ""
     i = 1
     while i < len(words) and words[i].startswith("-"):
-        i += 2 if words[i] in GLOBAL_WITH_VALUE else 1
-    return words[i:] if i < len(words) else None
+        w = words[i]
+        if w == "-C" and i + 1 < len(words):
+            here = os.path.join(here, os.path.expanduser(words[i + 1]))
+            i += 1
+        elif w.startswith("-C") and len(w) > 2:
+            here = os.path.join(here, os.path.expanduser(w[2:]))
+        i += 2 if w in GLOBAL_WITH_VALUE and w != "-C" else 1
+    return here
 
 
-GIT_RUNS_COMMANDS = ("--upload-pack", "--receive-pack", "--exec", "-u", "--config")
+def git_command(words):
+    """(why refused, the subcommand and its arguments) for a git invocation, options skipped with their values."""
+    i = 1
+    while i < len(words) and words[i].startswith("-"):
+        w = words[i]
+        if w.startswith("-c") or w.startswith(("--config-env", "--exec-path=")):
+            return "git -c can make git run another program", None
+        i += 2 if w in GLOBAL_WITH_VALUE else 1
+    return None, (words[i:] if i < len(words) else None)
 
 
-def global_refusal(words):
-    """git options before the subcommand that can make git run another program."""
-    for w in words[1:]:
-        if w == "-c" or w.startswith(("-c", "--config-env", "--exec-path=")) and w not in ("-C",):
-            return "git -c can make git run another program"
-        if not w.startswith("-"):
-            break
-    return None
+# Options that make git run another program, by the subcommands that take them.
+GIT_RUNS_COMMANDS = {
+    "fetch": ("--upload-pack", "--receive-pack", "--exec", "--config"),
+    "pull": ("--upload-pack", "--receive-pack", "--exec", "--config"),
+    "push": ("--upload-pack", "--receive-pack", "--exec", "--config"),
+    "clone": ("--upload-pack", "--receive-pack", "--exec", "--config", "-u", "-c"),
+    "ls-remote": ("--upload-pack", "--receive-pack", "--exec", "--config", "-u"),
+    "archive": ("--upload-pack", "--receive-pack", "--exec", "--config"),
+    "submodule": ("--upload-pack", "--receive-pack", "--exec", "--config"),
+}
 
 
-def refusal(args):
+def refusal(args, cwd=None):
     sub, rest = args[0], args[1:]
     flags = set(rest)
-    if any(a.startswith(GIT_RUNS_COMMANDS) for a in rest) and sub in ("fetch", "pull", "push", "clone", "ls-remote", "archive", "submodule"):
+    letters = letters_of(rest)
+    is_long = lambda *names: any(long_in(a, names) for a in rest)
+    if any(a.startswith(GIT_RUNS_COMMANDS.get(sub, ("\0",))) for a in rest):
         return "an option that makes git run another program"
+    if sub == "grep" and ("O" in letters or is_long("open-files-in-pager")):
+        return "git grep -O runs a program on the matches"
+    if sub in ("log", "diff", "show", "whatchanged", "shortlog") and is_long("output"):
+        return "git --output writes a file"
     if sub == "config" and not (flags & {"--get", "--get-all", "--get-regexp", "--list", "-l", "--show-origin"}) and rest[:1] not in (["get"], ["list"]):
         return "git config changes what git runs"
     if sub == "push":
-        if any(a in ("-f", "--force", "--mirror", "-d", "--delete", "--prune") or a.startswith("--force") for a in rest):
+        if letters & set("fd") or is_long("force", "force-with-lease", "force-if-includes", "mirror", "delete", "prune"):
             return "force or deleting push"
         if any(a.startswith("+") or a.startswith(":") for a in rest):
             return "force refspec or remote delete"
-    if sub == "reset" and ("--hard" in flags or "--merge" in flags or "--keep" in flags):
+    if sub in ("fetch", "pull") and (any(a.startswith("+") for a in rest) or (sub == "fetch" and ("f" in letters or is_long("force")))):
+        return "force fetch overwrites local branches"
+    if sub == "reset" and is_long("hard", "merge", "keep"):
         return "reset that discards changes"
     if sub == "clean":
         return "git clean deletes untracked files"
-    if sub == "branch" and ("-D" in flags or ("--delete" in flags and ("--force" in flags or "-f" in flags))):
-        return "force-deleting a branch"
-    if sub in ("checkout", "switch") and (flags & {"-f", "--force", "--discard-changes", "--", "."}):
+    if sub == "branch":
+        forcing = "f" in letters or is_long("force")
+        if "D" in letters or "M" in letters or forcing:
+            return "force-deleting, moving or overwriting a branch"
+    if sub in ("checkout", "switch") and (flags & {"--", "."} or "f" in letters or is_long("force", "discard-changes")):
         return "checkout over uncommitted changes"
-    if sub == "restore" and not (flags & {"--staged", "-S"} and not flags & {"--worktree", "-W"}):
-        return "restore discards working-tree changes"
+    if sub == "checkout":
+        if "p" in letters or is_long("patch", "ours", "theirs", "conflict"):
+            return "checkout of paths over uncommitted changes"
+        positional = positionals(rest, {"--conflict", "-U", "--unified", "--pathspec-from-file"})
+        if letters & set("bB") or is_long("orphan"):
+            positional = positional[1:]  # the new branch's name; what is left is its start point
+        elif len(positional) == 1 and positional[0] != "-" and (has_glob(positional[0]) or os.path.exists(os.path.join(cwd or "", positional[0]))):
+            return "checkout of a path over uncommitted changes"
+        if len(positional) >= 2:
+            return "checkout of a tree-ish and a path over uncommitted changes"
+    if sub == "read-tree" and ("u" in letters or is_long("reset")):
+        return "read-tree overwrites the working tree"
+    if sub == "checkout-index" and ("f" in letters or is_long("force")):
+        return "checkout-index overwrites files"
+    if sub == "apply" and ("R" in letters or is_long("reverse")) and not is_long("check", "stat", "numstat", "summary"):
+        return "git apply -R undoes changes in the working tree"
+    if sub in ("rm", "mv") and ("f" in letters or is_long("force")):
+        return f"git {sub} -f overwrites or deletes changed files"
+    if sub == "tag" and ("d" in letters or "f" in letters or is_long("delete", "force")):
+        return "deleting or moving a tag"
+    if sub == "prune" and "n" not in letters and not is_long("dry-run"):
+        return "git prune deletes unreachable commits"
+    if sub == "submodule" and ("f" in letters or is_long("force")):
+        return "submodule update over uncommitted changes"
+    if sub == "worktree" and rest[:1] == ["remove"] and ("f" in letters or is_long("force")):
+        return "removing a worktree with changes in it"
+    if sub == "restore":
+        staged_only = ("S" in letters or is_long("staged")) and not ("W" in letters or is_long("worktree"))
+        if not staged_only:
+            return "restore discards working-tree changes"
     if sub == "stash" and rest[:1] in (["drop"], ["clear"]):
         return "dropping stashed work"
     if sub in ("filter-branch", "filter-repo"):
         return "history rewrite"
     if sub == "reflog" and rest[:1] in (["expire"], ["delete"]):
         return "expiring the reflog"
-    if sub == "update-ref" and "-d" in flags:
+    if sub == "update-ref" and ("d" in letters or is_long("delete")):
         return "deleting a ref"
-    if sub == "gc" and any(a.startswith("--prune") for a in rest):
+    if sub == "gc" and is_long("prune"):
         return "pruning objects"
     return None
 
 
 # What an investigation may do with git: look.
-GIT_READS = {"status", "log", "diff", "show", "rev-parse", "blame", "describe", "ls-files", "shortlog", "cat-file", "rev-list", "grep", "show-ref", "for-each-ref", "ls-remote"}
+GIT_READS = {"status", "log", "diff", "show", "rev-parse", "blame", "describe", "ls-files", "shortlog", "cat-file", "rev-list", "grep", "show-ref", "for-each-ref", "ls-remote", "merge-base", "ls-tree", "name-rev"}
+# Where `git show $rev` has to keep working: an option there can at worst name a file for --output.
+GIT_REVISION_READS = GIT_READS - {"grep", "ls-remote"}
 
 
 def git_read_refusal(args):
@@ -103,38 +222,571 @@ def git_read_refusal(args):
     return f"git {sub} changes the repository; an investigation only reads git"
 
 
-SECRET_NAMES = {".env", ".mcp.json", ".netrc", ".pgpass", "id_rsa", "id_ed25519", "id_ecdsa"}
+# --- what a name or a path can be --------------------------------------------------------------------
+
+SECRET_NAMES = {
+    ".env", ".mcp.json", ".netrc", ".pgpass", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", ".npmrc", ".git-credentials",
+    ".pypirc", ".dockercfg", ".vault-token", ".my.cnf", ".s3cfg", ".boto", ".credentials.json",
+}
+# A name that is only a credentials file inside a particular folder: (folder, name).
+SECRET_PAIRS = {
+    (".aws", "credentials"), (".docker", "config.json"), (".kube", "config"), ("gh", "hosts.yml"), (".cargo", "credentials"),
+    (".cargo", "credentials.toml"), ("gcloud", "application_default_credentials.json"), ("gcloud", "credentials.db"),
+    ("gcloud", "access_tokens.db"),
+}
 SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
 # A template beside the real file holds placeholders, not secrets.
 TEMPLATE_ENDINGS = ("example", "sample", "template", "dist")
+HOME = os.path.expanduser("~")
+STORE = [c.lower() for c in os.path.join(HOME, ".claude", "projects").split(os.sep) if c]
+
+
+def secret_name(name):
+    """Whether one file name is a credentials file. The disk may not tell `.ENV` from `.env`, so nor do we."""
+    n = name.strip().strip("'\"").lower()
+    if n in SECRET_NAMES or n.endswith(SECRET_SUFFIXES):
+        return True
+    return n.startswith(".env.") and not n.endswith(TEMPLATE_ENDINGS)
+
+
+def secret_pair(folder, name):
+    return (folder.strip().lower(), name.strip().lower()) in SECRET_PAIRS
+
+
+def pieces_of(path):
+    """The paths a word can hold: `HEAD:.env`, `<.env`, `--file=.env`, `-f.env`, `@.env`, `:(glob).env`."""
+    for part in re.split(r"[:<>=@,]", path or ""):
+        part = part.strip().strip("'\"")
+        yield part
+        short = re.match(r"-[A-Za-z]+", part)
+        if short and len(part) > short.end():
+            yield part[short.end():]
 
 
 def is_secret(path):
-    """Whether a path names a credentials file. `HEAD:.env` and `<.env` count too."""
-    for part in re.split(r"[:<>=]", path or ""):
-        base = os.path.basename(part.strip().strip("'\"").rstrip("/"))
-        if base in SECRET_NAMES or base.endswith(SECRET_SUFFIXES):
-            return True
-        if base.startswith(".env.") and not base.endswith(TEMPLATE_ENDINGS):
+    """Whether a path names a credentials file, spelled out."""
+    for part in pieces_of(path):
+        part = re.sub(r"^\([^)]*\)", "", part).rstrip("/")
+        if secret_name(os.path.basename(part)) or secret_pair(os.path.basename(os.path.dirname(part)), os.path.basename(part)):
             return True
     return False
 
 
-HOME = os.path.expanduser("~")
+# --- the shell's own passes: quoting, braces, variables, globs --------------------------------------
+
+# Inside the guard a character the shell would treat as syntax but which was quoted is swapped for a
+# private one, so what is left of `*?[]{}$,~` after lexing is exactly what the shell acts on.
+SPECIAL = "*?[]{}$`,~"
+LIT = {c: chr(0xE000 + n) for n, c in enumerate(SPECIAL)}
+DQ = chr(0xE0F0)  # a $ inside double quotes: it expands, but the result is not globbed
+VARW = chr(0xE0F1)  # whatever a name the guard can't resolve may turn out to be
+SP = chr(0xE0F5)  # a space that came out of an unquoted variable: the shell splits the word there
+NL = chr(0xE0F3)  # a newline inside quotes: it belongs to the word, it does not end the command
+QUOTED = {**LIT, "\n": NL}
+UNMAP = {**{v: k for k, v in LIT.items()}, DQ: "$", NL: "\n", SP: " "}
+_TO_PLAIN = str.maketrans({**UNMAP, VARW: "$"})
+_TO_TEXT = str.maketrans(UNMAP)
+_TO_ALT = str.maketrans({**{k: v for k, v in UNMAP.items() if k != SP}, VARW: "$"})  # a word's alternatives keep where it splits
+
+
+def unprotect(s):
+    return s.translate(_TO_PLAIN)
+
+
+def unlit(s):
+    """The characters of a word, an unknown part left as the VARW mark."""
+    return s.translate(_TO_TEXT)
+
+
+def literal(s):
+    return "".join(LIT.get(c, c) for c in s)
+
+
+ANSI_ESCAPE = re.compile(r"\\(x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|[0-7]{1,3}|.)", re.S)
+ANSI_SIMPLE = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+
+
+def ansi_decode(raw):
+    """What `$'...'` makes of the text between its quotes."""
+    def one(m):
+        s = m.group(1)
+        try:
+            if s[0] == "x":
+                return chr(int(s[1:], 16))
+            if s[0] in "uU":
+                return chr(int(s[1:], 16))
+            if s[0] in "01234567":
+                return chr(int(s, 8) & 0xFF)
+        except ValueError:
+            return ""
+        return ANSI_SIMPLE.get(s, "\\" + s)
+    return ANSI_ESCAPE.sub(one, raw).replace("\0", "")
+
+
+def protect(text):
+    """(the command line with what the shell would not act on swapped for private characters, whether
+    it holds an unquoted extended glob such as `.@(env)` or `*(N)`)
+
+    Also what the lexer can't do: `$'..'` decoded, a comment dropped up to its line's end, and a
+    backslash-newline joined, so a command can't hide behind either.
+    """
+    out, i, n, quote, extglob = [], 0, len(text), None, False
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if quote == "'":
+            if c == "'":
+                quote = None
+                out.append(c)
+            else:
+                out.append(QUOTED.get(c, c))
+        elif quote == '"':
+            if c == '"':
+                quote = None
+                out.append(c)
+            elif c == "\\" and nxt:
+                if nxt == "\n":
+                    pass
+                elif nxt in "$`":
+                    out.append(LIT[nxt])
+                elif nxt in '"\\':
+                    out.append(c + nxt)
+                else:
+                    out.append(c + LIT.get(nxt, nxt))
+                i += 1
+            elif c == "$" and nxt == "{":
+                end = text.find("}", i)
+                end = n - 1 if end < 0 else end
+                out.append(DQ + text[i + 1:end + 1])
+                i = end
+            elif c == "$":
+                out.append(DQ)
+            elif c == "`":
+                out.append(c)
+            else:
+                out.append(QUOTED.get(c, c))
+        else:
+            if c == "\\" and nxt:
+                if nxt == "\n":
+                    pass
+                elif nxt in SPECIAL:
+                    out.append(LIT[nxt])
+                else:
+                    out.append(c + nxt)
+                i += 1
+            elif c == "'":
+                quote = "'"
+                out.append(c)
+            elif c == '"':
+                quote = '"'
+                out.append(c)
+            elif c == "$" and nxt == "'":
+                j, raw = i + 2, []
+                while j < n and text[j] != "'":
+                    if text[j] == "\\" and j + 1 < n:
+                        raw.append(text[j:j + 2])
+                        j += 2
+                    else:
+                        raw.append(text[j])
+                        j += 1
+                body = ansi_decode("".join(raw))
+                out.append("'" + "".join("'\\''" if ch == "'" else QUOTED.get(ch, ch) for ch in body) + "'")
+                i = j
+            elif c == "$" and nxt == '"':
+                quote = '"'
+                out.append('"')
+                i += 1
+            elif c == "$" and nxt == "{":
+                end = text.find("}", i)
+                end = n - 1 if end < 0 else end
+                out.append(c + text[i + 1:end + 1])
+                i = end
+            elif c == "#" and (i == 0 or text[i - 1] in " \t\n;&|()<>"):
+                while i + 1 < n and text[i + 1] != "\n":
+                    i += 1
+            else:
+                extglob = extglob or (c in "@+!?*" and nxt == "(")
+                out.append(c)
+        i += 1
+    return "".join(out), extglob
+
+
+def has_glob(s):
+    """Whether a word still holds a glob character the shell will act on."""
+    return "*" in s or "?" in s or bool(re.search(r"\[\]?[^\]]+\]", s))
+
+
+def brace_expand(s, cap=256):
+    """`a{b,c}d` -> abd acd; `{1..3}` -> a word that could be anything. A `${` is not a brace."""
+    i = 0
+    while i < len(s):
+        if s[i] == "{" and (i == 0 or s[i - 1] not in ("$", DQ)):
+            depth, j, last, parts = 0, i, i + 1, []
+            while j < len(s):
+                ch = s[j]
+                if ch == "{" and (j == i or s[j - 1] not in ("$", DQ)):
+                    depth += 1
+                elif ch == "}" and depth > 0:
+                    depth -= 1
+                    if depth == 0:
+                        break
+                elif ch == "," and depth == 1:
+                    parts.append(s[last:j])
+                    last = j + 1
+                j += 1
+            if j < len(s) and parts:
+                parts.append(s[last:j])
+                found = []
+                for p in parts:
+                    found.extend(brace_expand(s[:i] + p + s[j + 1:], cap))
+                    if len(found) > cap:
+                        return [s[:i] + VARW + s[j + 1:]]
+                return found
+            if j < len(s) and re.fullmatch(r"[^.{}]+\.\.[^.{}]+(\.\.[^.{}]+)?", s[i + 1:j]):
+                return brace_expand(s[:i] + VARW + s[j + 1:], cap)
+        i += 1
+    return [s]
+
+
+AMBIENT = ("HOME", "TMPDIR", "USER", "LOGNAME")
+
+
+class State:
+    """What a command line has set so far: variables (every value any of them was given) and the directory."""
+
+    def __init__(self, cwd, session):
+        self.env, self.cwd, self.session = {}, cwd, session
+
+    def values(self, name):
+        found = list(self.env.get(name, []))
+        if name == "HOME":
+            found.append(HOME)
+        elif name in AMBIENT and os.environ.get(name):
+            found.append(os.environ[name])
+        return found
+
+
+def substitute(s, state, depth=0):
+    """Every string the variables of `s` can turn it into, and whether some part is unknown (VARW)."""
+    unknown = False
+    if "`" in s:
+        s = re.sub(r"`[^`]*`", VARW, s).replace("`", VARW)
+        unknown = True
+    outs, pos = [""], 0
+    while True:
+        j = next((k for k in range(pos, len(s)) if s[k] in ("$", DQ)), -1)
+        if j < 0:
+            break
+        marker, rest = s[j], s[j + 1:]
+        wrap = literal if marker == DQ else (lambda v: re.sub(r"[ \t]", SP, v))
+        if rest.startswith("{"):
+            e = rest.find("}")
+            body, end = (rest[1:], len(s)) if e < 0 else (rest[1:e], j + 2 + e)
+            m = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-=])(.*))?", body, re.S)
+            if not m:
+                alts, unk = [VARW], True
+            else:
+                values = state.values(m.group(1))
+                alts = [wrap(v) for v in values]
+                unk = any(VARW in v for v in values)
+                if m.group(2) and depth < 3:
+                    more, more_unk = substitute(re.sub("[\"']", "", m.group(3) or ""), state, depth + 1)
+                    alts += more
+                    unk = unk or more_unk
+                if not values:
+                    alts.append(VARW)
+                    unk = True
+        elif rest[:1].isalpha() or rest[:1] == "_":
+            name = re.match(r"[A-Za-z_][A-Za-z0-9_]*", rest).group()
+            end = j + 1 + len(name)
+            values = state.values(name)
+            alts = [wrap(v) for v in values] or [VARW]
+            unk = not values or any(VARW in v for v in values)
+        elif rest.startswith("("):
+            depth_p, k = 0, j + 1
+            while k < len(s):
+                depth_p += (s[k] == "(") - (s[k] == ")")
+                k += 1
+                if depth_p == 0:
+                    break
+            alts, unk, end = [VARW], True, k
+        else:
+            alts, unk, end = [VARW], True, j + 1 + (1 if rest[:1] and rest[0] in "0123456789@*#?$!-" else 0)
+        outs = [o + s[pos:j] + a for o in outs for a in alts][:256]
+        unknown = unknown or unk
+        pos = end
+    return [o + s[pos:] for o in outs], unknown
+
+
+def expand(word, state):
+    """Every word the shell can make of one active word, and whether some part of it stays unknown."""
+    if word.startswith("~") and (len(word) == 1 or word[1] == "/"):
+        word = literal(HOME) + word[1:]
+    found, unknown = [], False
+    for b in brace_expand(word):
+        outs, unk = substitute(b, state)
+        found.extend(outs)
+        unknown = unknown or unk
+    return found[:256], unknown
+
+
+# --- glob patterns against secret names -----------------------------------------------------------
+
+
+def parse_pattern(s):
+    """The elements of one path component: ('lit', c) ('any',) ('star',) ('var',) ('cls', negate, ranges)."""
+    elems, i = [], 0
+    while i < len(s):
+        c = s[i]
+        if c == "*":
+            elems.append(("star",))
+        elif c == "?":
+            elems.append(("any",))
+        elif c == VARW:
+            elems.append(("var",))
+        elif c == "[":
+            m = re.match(r"\[([!^]?)(\]?(?:\[:[a-z]+:\]|[^\]])*)\]", s[i:])
+            if m:
+                body = m.group(2).lower()
+                if "[:" in body:
+                    elems.append(("cls", True, ()))  # [[:alpha:]]: could be anything
+                    i += m.end()
+                    continue
+                ranges, k = [], 0
+                while k < len(body):
+                    if k + 2 < len(body) and body[k + 1] == "-":
+                        ranges.append((body[k], body[k + 2]))
+                        k += 3
+                    else:
+                        ranges.append((body[k], body[k]))
+                        k += 1
+                elems.append(("cls", bool(m.group(1)), tuple(ranges)))
+                i += m.end()
+                continue
+            elems.append(("lit", "["))
+        else:
+            elems.append(("lit", unlit(c).lower()))
+        i += 1
+    return tuple(elems)
+
+
+def cls_has(e, ch):
+    inside = any(lo <= ch <= hi for lo, hi in e[2])
+    return inside != e[1]
+
+
+def glob_fullmatch(elems, s):
+    """Whether the pattern matches the whole name, a leading dot only by a dot, a class or an unknown."""
+    n, m = len(elems), len(s)
+
+    @lru_cache(None)
+    def go(i, j):
+        if i == n:
+            return j == m
+        e = elems[i]
+        if e[0] == "star":
+            return go(i + 1, j) or (j < m and not (j == 0 and s[0] == ".") and go(i, j + 1))
+        if e[0] == "var":
+            return go(i + 1, j) or (j < m and go(i, j + 1))
+        if j >= m:
+            return False
+        if e[0] == "any":
+            return not (j == 0 and s[j] == ".") and go(i + 1, j + 1)
+        if e[0] == "lit":
+            return e[1] == s[j] and go(i + 1, j + 1)
+        return cls_has(e, s[j]) and go(i + 1, j + 1)
+
+    return go(0, 0)
+
+
+def prefix_compat(elems, target):
+    """Whether some name that the pattern matches starts with `target`, the pattern itself naming at least three of its characters.
+
+    `.env.*` and `.env.l*` do; `$name.log` could be `.env.log` only if the unknown `$name` were `.env`.
+    """
+    n, m = len(elems), len(target)
+
+    @lru_cache(None)
+    def go(i, j, named):
+        if j == m:
+            return named >= 3
+        if i == n:
+            return False
+        e = elems[i]
+        if e[0] in ("star", "var"):
+            # A glob star can't take a leading dot; an unknown can.
+            reach = 0 if (e[0] == "star" and j == 0) else m - j
+            return any(go(i + 1, j + k, named) for k in range(0, reach + 1))
+        if e[0] == "any":
+            return not (j == 0 and target[j] == ".") and go(i + 1, j + 1, named + 1)
+        if e[0] == "lit":
+            return e[1] == target[j] and go(i + 1, j + 1, named + 1)
+        return cls_has(e, target[j]) and go(i + 1, j + 1, named + 1)
+
+    return go(0, 0, 0)
+
+
+def suffix_compat(elems, suffix):
+    """Whether some name that the pattern matches ends with `suffix`, the pattern itself naming at least two of its characters.
+
+    `README*` could be `README.pem`, but the pattern says nothing about the key; `*.p*` and `server.k*` do.
+    """
+    rev, want = elems[::-1], suffix[::-1]
+    n, m = len(rev), len(want)
+
+    @lru_cache(None)
+    def go(i, j, named):
+        if j == m:
+            return named >= 2
+        if i == n:
+            return False
+        e = rev[i]
+        if e[0] in ("star", "var"):
+            return any(go(i + 1, j + k, named) for k in range(0, m - j + 1))
+        if e[0] == "any":
+            return go(i + 1, j + 1, named + 1)
+        if e[0] == "lit":
+            return e[1] == want[j] and go(i + 1, j + 1, named + 1)
+        return cls_has(e, want[j]) and go(i + 1, j + 1, named + 1)
+
+    return go(0, 0, 0)
+
+
+def pattern_hits_secret(elems):
+    """Whether a pattern for a file name could be the name of a credentials file."""
+    named = sum(1 for e in elems if e[0] == "lit")
+    if named == 0:
+        return False
+    for secret in SECRET_NAMES:
+        # A pattern that opens with the dot (or a class that could be one) says enough in one more
+        # character; any other needs two of the name's own, so `$v` + "v" is not `.env`.
+        opens_with_dot = elems[0][0] == "cls" or elems[0] == ("lit", ".")
+        if (named >= 2 or (opens_with_dot and secret.startswith("."))) and glob_fullmatch(elems, secret):
+            return True
+    if prefix_compat(elems, ".env."):
+        tail = ""
+        for e in reversed(elems):
+            if e[0] != "lit":
+                break
+            tail = e[1] + tail
+        if not tail.endswith(TEMPLATE_ENDINGS):
+            return True
+    return any(suffix_compat(elems, s) for s in SECRET_SUFFIXES)
+
+
+def store_refusal(p, state):
+    """Why a path (maybe a pattern) reaches into another session's files, or None."""
+    q = p
+    if not os.path.isabs(unlit(q)):
+        if not state.cwd:
+            return None
+        q = state.cwd + "/" + q
+    comps = [c for c in os.path.normpath(q).split("/") if c]
+    if len(comps) < len(STORE):
+        return None
+    for comp, want in zip(comps, STORE):
+        if has_glob(comp) or VARW in comp:
+            if not glob_fullmatch(parse_pattern(comp), want):
+                return None
+        elif unlit(comp).lower() != want:
+            return None
+    here = "/" + "/".join(unlit(c) for c in comps)
+    if state.session and f"/{state.session}/tool-results" in here:
+        return None
+    return f"another Claude session's files: {unprotect(p)}"
 
 
 def is_other_session(path, session):
     """Whether a path is inside Claude's session store, other than this worker's own saved output."""
     if not isinstance(path, str) or path == "":
         return False
-    full = os.path.normpath(os.path.expanduser(path.replace("$HOME", HOME).strip("'\"")))
-    store = os.path.join(HOME, ".claude", "projects")
-    if full != store and not full.startswith(store + os.sep):
-        return False
-    return not (session and f"{os.sep}{session}{os.sep}tool-results" in full)
+    path = path.replace("${HOME}", HOME).replace("$HOME", HOME).strip("'\"")
+    if path.startswith("~"):
+        path = HOME + path[1:]
+    return store_refusal(literal(path), State(None, session)) is not None
 
 
-# --- outside git -------------------------------------------------------------------------------
+def real_secret(full):
+    """The credentials file that a path resolves to through links, if it does."""
+    try:
+        if not os.path.lexists(full):
+            return None
+        real = os.path.realpath(full)
+    except (OSError, ValueError):
+        return None
+    if real != os.path.normpath(full) and is_secret(real):
+        return real
+    return None
+
+
+def path_refusal(p, state):
+    parts = p.rstrip("/").split("/")
+    base_name = parts[-1]
+    folder = unlit(parts[-2]) if len(parts) > 1 else os.path.basename(state.cwd or "")
+    patterned = has_glob(base_name) or VARW in base_name
+    if patterned:
+        elems = parse_pattern(base_name)
+        if pattern_hits_secret(elems) or (folder and VARW not in folder and not has_glob(folder) and any(
+                folder.lower() == d and glob_fullmatch(elems, n) for d, n in SECRET_PAIRS)):
+            return f"a credentials file: {unprotect(p)}"
+    elif secret_name(unlit(base_name)) or secret_pair(folder, unlit(base_name)):
+        return f"a credentials file: {unprotect(p)}"
+    elif VARW not in p:
+        here = os.path.expanduser(unlit(p))
+        if not os.path.isabs(here) and state.cwd:
+            here = os.path.join(state.cwd, here)
+        linked = real_secret(here)
+        if linked:
+            return f"a credentials file: {unprotect(p)} (a link to {linked})"
+    if has_glob(p) and VARW not in p and sum(1 for c in p.split("/") if has_glob(c)) <= 3:
+        # The shell reads the disk: so does the guard, for what only the directory can tell. (Not for
+        # a pattern that would walk the whole disk; its file name was judged above.)
+        mask = "".join(("[" + UNMAP[ch] + "]" if ch in UNMAP and UNMAP[ch] in "*?[" else UNMAP.get(ch, ch)) for ch in p)
+        pattern = os.path.expanduser(mask)
+        if not os.path.isabs(pattern) and state.cwd:
+            pattern = os.path.join(glob.escape(state.cwd), pattern)
+        try:
+            for hit in itertools.islice(glob.iglob(pattern), 1000):
+                if is_secret(hit) or real_secret(hit):
+                    return f"a credentials file: {unprotect(p)} (matches {os.path.basename(hit)})"
+        except (OSError, re.error):
+            pass
+    return store_refusal(p, state)
+
+
+POSIX_CLASS_BRACKET = re.compile(r"\[[!^]?(?:[^\]\[]|\[:[a-z]+:\])*\[:[a-z]+:\](?:[^\]\[]|\[:[a-z]+:\])*\]")
+
+
+def reference_refusal(word, state):
+    """Why an active word (or any of the words it can become) names a credentials file or another session's files."""
+    variants, _ = expand(word, state)
+    for v in variants:
+        # A bracket holding a POSIX class (`[[:alpha:]_]`) could be any character; and its colons are not a separator.
+        v = POSIX_CLASS_BRACKET.sub(VARW, v)
+        for piece in re.split("[:<>=@," + SP + "]", v):
+            piece = piece.strip().strip("'\"")
+            cands = [piece]
+            short = re.match(r"-[A-Za-z]+", piece)
+            if short and len(piece) > short.end():
+                cands.append(piece[short.end():])
+            for c in cands:
+                c = re.sub(r"^\([^)]*\)", "", c)
+                if c:
+                    why = path_refusal(c, state)
+                    if why:
+                        return why
+    return None
+
+
+def script_refusal(program):
+    """A credentials file named inside a sed or awk program (`r .env`, `getline < ".env"`)."""
+    for tok in re.split(r"""[\s'";(){}<>|,=:]+""", program):
+        if is_secret(tok):
+            return f"a credentials file: {tok}"
+    return None
+
+
+# --- outside git -------------------------------------------------------------------------------------
 
 ALWAYS_REFUSED = {
     "rm": "deletes files", "rmdir": "deletes directories", "unlink": "deletes files", "shred": "destroys files",
@@ -142,14 +794,14 @@ ALWAYS_REFUSED = {
     "install": "writes files", "touch": "writes files", "chmod": "changes files", "chown": "changes files",
     "chflags": "changes files", "rsync": "writes files", "unzip": "writes files",
     "kill": "kills processes (restart through the job manager)", "pkill": "kills processes", "killall": "kills processes",
-    "sudo": "runs as root", "doas": "runs as root", "su": "runs as root",
+    "sudo": "runs as root", "doas": "runs as root", "su": "runs as root", "pkexec": "runs as root",
     "osascript": "runs inline code the guard can't see into",
     "dropdb": "drops a database", "dropuser": "drops a user", "pg_restore": "overwrites a database",
     "mysqladmin": "administers a database", "npx": "downloads and runs code", "bunx": "downloads and runs code",
     "pnpx": "downloads and runs code", "parallel": "runs commands the guard can't see",
     "trash": "deletes files", "srm": "deletes files", "patch": "edits files", "zip": "writes files",
     "ditto": "copies files", "split": "writes files", "csplit": "writes files",
-"shutdown": "stops the machine", "reboot": "stops the machine", "halt": "stops the machine",
+    "shutdown": "stops the machine", "reboot": "stops the machine", "halt": "stops the machine",
     "at": "schedules commands", "batch": "schedules commands", "nvram": "changes firmware settings",
     "tmux": "runs commands in other terminals", "screen": "runs commands in other terminals",
     "herdr": "runs commands in other terminals", "vim": "edits files", "vi": "edits files", "nvim": "edits files",
@@ -157,17 +809,38 @@ ALWAYS_REFUSED = {
     "coproc": "runs a command in the background the guard can't follow",
     "claude": "starts another agent", "codex": "starts another agent", "open": "launches apps",
     "ssh": "reaches another machine", "scp": "copies to or from another machine", "sftp": "reaches another machine",
+    "flock": "runs a command the guard can't follow", "chroot": "runs a command the guard can't follow",
+    "script": "runs a command the guard can't follow", "sandbox-exec": "runs a command the guard can't follow",
+    "zmodload": "loads code into the shell", "emulate": "runs commands under another shell mode the guard can't follow",
 }
-WRAPPERS = {"env", "nohup", "time", "nice", "command", "exec", "caffeinate"}
-SHELLS = {"bash", "sh", "zsh", "dash", "fish"}
-INTERPRETERS = {"python", "python3", "node", "perl", "ruby", "php", "deno", "lua", "Rscript"}
-INLINE_FLAGS = {"-c", "-e", "-E", "--eval", "-p", "--print", "-r", "-", "-i", "-pi", "-ne", "-pe", "-ie"}
+# Programs that run the command after their own options. Each option here takes a value.
+WRAPPERS = {
+    "env": {"-u", "-C", "-P", "--unset", "--chdir"}, "nohup": set(), "time": {"-f", "-o", "--format", "--output"},
+    "nice": {"-n", "--adjustment"}, "command": set(), "exec": {"-a"}, "caffeinate": {"-t", "-w"}, "builtin": set(),
+    "setsid": set(), "stdbuf": {"-i", "-o", "-e"}, "ionice": {"-c", "-n", "-p", "-t"}, "arch": set(), "xcrun": {"--sdk", "-sdk"},
+    "unbuffer": set(), "taskpolicy": {"-c", "-g", "-d", "-p"}, "chronic": set(), "noglob": set(), "nocorrect": set(),
+    "timeout": {"-k", "-s", "--kill-after", "--signal"}, "gtimeout": {"-k", "-s", "--kill-after", "--signal"},
+}
+TAKES_A_DURATION = {"timeout", "gtimeout"}
+SHELLS = {"bash", "sh", "zsh", "dash", "fish", "ksh", "csh", "tcsh", "ash", "mksh"}
+INTERPRETERS = {"python", "pypy", "node", "nodejs", "perl", "ruby", "php", "deno", "lua", "rscript", "julia", "irb", "ipython", "tclsh", "expect"}
+# The letters of a bundle (`-pe`) that make an interpreter run the next word as code; the ones that
+# take the rest of the word as a value (so the scan stops there); the ones that edit files in place.
+INLINE_LETTERS = {"python": "c", "pypy": "c", "perl": "eE", "ruby": "e", "node": "epr", "nodejs": "epr", "php": "r", "lua": "e", "rscript": "e", "julia": "eE", "irb": "e", "expect": "c"}
+STOP_LETTERS = {"python": "WXQm", "pypy": "WXQm", "perl": "IMmFCi0x", "ruby": "IrKCxl0", "php": "dn"}
+IN_PLACE_LETTERS = {"perl": "i", "ruby": "i"}
+INLINE_LONG = ("--eval", "--print", "--require", "--import", "--loader", "--experimental-loader", "--execute", "--command")
+PYTHON_MODULES = {"json.tool", "unittest", "pytest", "py_compile"}
+DENO_CODE = {"eval", "repl", "install", "uninstall", "upgrade", "add", "remove", "publish", "init", "create"}
 INSTALLERS = {"npm", "pnpm", "yarn", "bun", "pip", "pip3", "pipx", "gem", "cargo", "uv", "go"}
 INSTALL_WORDS = {
     "install", "i", "add", "remove", "rm", "uninstall", "un", "upgrade", "update", "up", "ci", "link",
     "unlink", "prune", "dedupe", "publish", "reinstall", "cleanup", "autoremove", "get", "sync", "x", "dlx",
-    "create", "init",
+    "create", "init", "exec", "version", "pack", "config", "set", "rebuild", "rb", "download", "wheel", "login",
+    "logout", "adduser", "deprecate", "unpublish", "owner", "dist-tag",
 }
+# The subcommand after which the rest are the script's own arguments, or a read.
+INSTALLER_READS = {"run", "run-script", "test", "t", "ls", "list", "view", "info", "outdated", "why", "explain", "start", "show", "freeze", "check", "search", "help"}
 DOCKER_READS = {"ps", "logs", "inspect", "stats", "top", "images", "version", "info", "events", "port", "diff", "history", "restart", "start", "exec"}
 DOCKER_GROUP_READS = {
     "container": {"ls", "list", "ps", "inspect", "logs", "top", "stats", "port", "diff", "restart", "start", "exec"},
@@ -179,43 +852,107 @@ DOCKER_GROUP_READS = {
     "context": {"ls", "list", "show", "inspect"},
 }
 DOCKER_GLOBAL_WITH_VALUE = {"--context", "-c", "-H", "--host", "--config", "-l", "--log-level"}
-DOCKER_EXEC_WITH_VALUE = {"-e", "--env", "-u", "--user", "-w", "--workdir", "--env-file", "--detach-keys"}
+DOCKER_EXEC_WITH_VALUE = {"--env", "--user", "--workdir", "--env-file", "--detach-keys", "--index"}
 COMPOSE_WITH_VALUE = {"-f", "--file", "-p", "--project-name", "--project-directory", "--profile", "--env-file"}
 LAUNCHCTL_READS = {"list", "print", "print-disabled", "blame", "kickstart", "error", "help", "version", "managerpid", "manageruid", "managername", "hostinfo", "resolveport", "dumpstate"}
 BREW_READS = {"list", "ls", "info", "config", "doctor", "--prefix", "--version", "--cellar", "outdated", "deps", "leaves", "search", "desc", "home", "uses", "--cache", "--repository"}
 SQL_CLIENTS = {"psql", "mysql", "sqlite3", "duckdb", "mariadb"}
-SQL_WRITES = re.compile(r"\b(drop|truncate|delete|update|insert|alter|create|grant|revoke|vacuum|reindex|replace|merge|copy|attach|detach)\b", re.I)
+SQL_WRITES = re.compile(
+    r"\b(drop|truncate|delete|update|insert|alter|create|grant|revoke|vacuum|reindex|replace|merge|copy|attach|detach|call|do|exec|execute|prepare"
+    r"|lock|rename|refresh|cluster|load|import|source|outfile|dumpfile|setval|nextval|set_config|pg_terminate_backend|pg_cancel_backend"
+    r"|pg_reload_conf|lo_import|lo_export|lo_unlink)\b", re.I)
+SQL_SAFE_META = re.compile(r"\\(d[a-zA-Z]*\+?|l\+?|conninfo|timing|x)(\s|$)")
+SQLITE_SAFE_DOT = {".tables", ".schema", ".headers", ".mode", ".databases", ".indexes", ".help", ".timer", ".width", ".dbinfo", ".fullschema", ".show", ".header"}
 REDIS_READS = {
     "ping", "info", "get", "mget", "scan", "ttl", "pttl", "type", "exists", "dbsize", "llen", "lrange", "lindex",
     "hgetall", "hget", "hmget", "hkeys", "hlen", "smembers", "scard", "sismember", "zrange", "zcard", "zscore",
     "xlen", "xrange", "xinfo", "keys", "strlen", "client", "memory", "slowlog", "latency", "role", "time", "lastsave",
 }
-REDIS_WITH_VALUE = {"-h", "-p", "-a", "-n", "-u", "-s", "--user", "--pass", "-c"}
+REDIS_SUBREADS = {
+    "slowlog": {"get", "len", "help"}, "latency": {"latest", "history", "graph", "doctor", "help", "histogram"},
+    "memory": {"usage", "stats", "doctor", "malloc-stats", "help"},
+}
+REDIS_WITH_VALUE = {"-h", "-p", "-a", "-n", "-u", "-s", "--user", "--pass", "-r", "-i", "-d"}
+REDIS_WRITING = ("--rdb", "--functions-rdb", "--pipe", "--eval", "--bigkeys-write")
+TAR_LONG_OPS = {"extract": "x", "get": "x", "create": "c", "append": "r", "update": "u", "delete": "D", "catenate": "A", "concatenate": "A"}
 
 
 def base(word):
-    return os.path.basename(word)
+    """A command's name: no directory, and no case (the disk may not tell RM from rm)."""
+    return os.path.basename(word).lower()
+
+
+def interpreter_key(name):
+    """`python3.12` -> python."""
+    return re.sub(r"[0-9.]+$", "", name)
+
+
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
+
+
+class Word(str):
+    """A word of a command line, with what the shell will do to it that the text no longer shows."""
+    glob = False  # an unquoted glob character: the shell picks the real name
+    unknown = False  # a variable or substitution the guard could not resolve
+    alts = ()  # every plain text it can become once variables are filled in (where it splits marked SP)
+    hazard = False  # an expansion with no default where an option could be: `$FLAGS`, `--$mode`
+    subst = False  # it is, or holds, a command substitution
 
 
 def strip_wrappers(words):
-    """`env FOO=1 nohup timeout 5 cmd ...` -> `cmd ...`."""
+    """`env FOO=1 nohup timeout 5 cmd ...` -> (`env FOO=1 nohup timeout 5`, `cmd ...`)."""
     i = 0
     while i < len(words):
         w = words[i]
-        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w):
+        if ASSIGNMENT.match(w):
             i += 1
-        elif base(w) in WRAPPERS:
-            i += 1
-            while i < len(words) and words[i].startswith("-"):
-                i += 1
-        elif base(w) in ("timeout", "gtimeout"):
-            i += 1
-            while i < len(words) and words[i].startswith("-"):
-                i += 1
-            i += 1  # the duration
-        else:
+            continue
+        name = base(w)
+        if name not in WRAPPERS:
             break
-    return words[i:]
+        valued = WRAPPERS[name]
+        i += 1
+        while i < len(words) and words[i].startswith("-") and words[i] != "-":
+            o = words[i]
+            if name == "env" and (o == "-S" or o == "--split-string" or o.startswith("--split-string=") or (o.startswith("-S") and not o.startswith("--"))):
+                value = o.split("=", 1)[1] if o.startswith("--split-string=") else (o[2:] if len(o) > 2 and not o.startswith("--") else (words[i + 1] if i + 1 < len(words) else ""))
+                used = i + (1 if (o.startswith("--split-string=") or (len(o) > 2 and not o.startswith("--"))) else 2)
+                try:
+                    spliced = shlex.split(value)
+                except ValueError:
+                    spliced = value.split()
+                prefix, rest = strip_wrappers(spliced + list(words[used:]))
+                return list(words[:used]) + prefix, rest
+            i += 2 if o in valued else 1
+            if o == "--":
+                break
+        if name in TAKES_A_DURATION:
+            i += 1
+    return list(words[:i]), list(words[i:])
+
+
+def texts(words):
+    """Every command line the words can make when joined (each word's variables filled in every way it can be)."""
+    combos = [[]]
+    for w in words:
+        alts = getattr(w, "alts", None) or [str(w)]
+        combos = [c + [a.replace(SP, " ")] for c in combos for a in alts][:64]
+    return [" ".join(c) for c in combos]
+
+
+def first_refusal(again, lines):
+    for line in lines:
+        why = again(line)
+        if why:
+            return why
+    return None
+
+
+def dangerous_assignment(words):
+    for w in words:
+        if DANGEROUS_ASSIGNMENTS.match(w):
+            return f"setting {w.split('=')[0]} can make a program run another one"
+    return None
 
 
 def first_positional(args, with_value=()):
@@ -254,88 +991,422 @@ def docker_refusal(args, check):
         return f"docker {sub} changes or removes containers or data"
     if sub == "exec":
         j = 0
-        while j < len(rest) and rest[j].startswith("-"):
-            j += 2 if rest[j] in DOCKER_EXEC_WITH_VALUE else 1
+        while j < len(rest) and rest[j].startswith("-") and rest[j] != "--":
+            a = rest[j]
+            if a.startswith("--"):
+                j += 2 if a in DOCKER_EXEC_WITH_VALUE else 1
+            else:
+                j += 2 if any(v == "" for _, v in shorts(a, "euw")) else 1
+        if j < len(rest) and rest[j] == "--":
+            j += 1
         inner = rest[j + 1:]  # past the container (or compose service)
         return check(inner) if inner else None
     return None
 
 
+def sql_text_refusal(name, sql):
+    if SQL_WRITES.search(sql):
+        return f"{name} query changes data"
+    for meta in re.findall(r"\\\S*", sql):
+        if not SQL_SAFE_META.match(meta + " "):
+            return f"{name} query runs a meta-command the guard can't check"
+    for line in sql.splitlines():
+        line = line.strip()
+        if line.startswith(".") and line.split()[0] not in SQLITE_SAFE_DOT:
+            return f"{name} dot-command can run programs or write files"
+    return None
+
+
 def sql_refusal(name, args):
-    if any(a in ("-l", "--list", "--version", "-V") for a in args):
-        return None
-    inline = []
-    for flag in ("-c", "--command", "-e", "--execute", "-cmd"):
-        inline += [args[k + 1] for k, a in enumerate(args) if a == flag and k + 1 < len(args)]
-    inline += [a.split("=", 1)[1] for a in args if a.startswith("--command=")]
-    if name in ("sqlite3", "duckdb"):
-        positional = [a for a in args if not a.startswith("-")]
+    inline, files, listing = [], False, False
+    if name in ("psql", "mysql", "mariadb"):
+        valued = "cdfhLopPRTUvF" if name == "psql" else "ehuPDSp"
+        inline_letter, file_letters = ("c", "fLo") if name == "psql" else ("e", "")
+        inline_long = ("command",) if name == "psql" else ("execute", "init-command")
+        file_long = ("file", "output", "log-file") if name == "psql" else ()
+        i = 0
+        while i < len(args):
+            a = args[i]
+            i += 1
+            if a.startswith("--"):
+                given, eq, val = a[2:].partition("=")
+                if given in ("list", "version"):
+                    listing = True
+                elif given and any(n.startswith(given) for n in inline_long):
+                    inline.append(val if eq else (args[i] if i < len(args) else ""))
+                    i += 0 if eq else 1
+                elif given and any(n.startswith(given) for n in file_long):
+                    files = True
+            elif a.startswith("-") and len(a) > 1:
+                for ch, val in shorts(a, valued):
+                    if ch in ("l", "V"):
+                        listing = True
+                    if ch == inline_letter:
+                        inline.append(val if val else (args[i] if i < len(args) else ""))
+                        i += 0 if val else 1
+                    elif ch in file_letters:
+                        files = True
+                        i += 0 if val else 1
+                    elif val == "":
+                        i += 1
+    else:
+        positional = []
+        i = 0
+        while i < len(args):
+            a = args[i]
+            i += 1
+            if a in ("-cmd", "-c", "-s") and name == "duckdb" or a == "-cmd":
+                inline.append(args[i] if i < len(args) else "")
+                i += 1
+            elif a in ("-init", "-f") and (name == "duckdb" or a == "-init"):
+                files = True
+            elif a in ("-version", "-help", "--version", "--help"):
+                listing = True
+            elif a in ("-separator", "-newline", "-nullvalue", "-cmd", "-vfs"):
+                i += 1
+            elif not a.startswith("-"):
+                positional.append(a)
         inline += positional[1:]
-    if not inline:
-        return f"{name} without an inline query reads its SQL from somewhere the guard can't check"
+    if files:
+        return f"{name} reads SQL from a file the guard can't check"
     for sql in inline:
-        if SQL_WRITES.search(sql):
-            return f"{name} query changes data"
+        why = sql_text_refusal(name, sql)
+        if why:
+            return why
+    if not inline and not listing:
+        return f"{name} without an inline query reads its SQL from somewhere the guard can't check"
     return None
 
 
 def redis_refusal(args):
+    if any(a.startswith(REDIS_WRITING) for a in args):
+        return "redis-cli option that writes a file or reads commands the guard can't see"
     k = first_positional(args, REDIS_WITH_VALUE)
     if k is None:
         return "redis-cli without a command reads it from somewhere the guard can't check"
     command = args[k].lower()
     if command not in REDIS_READS:
         return f"redis-cli {args[k]} changes data"
-    if command == "client" and [a.lower() for a in args[k + 1:k + 2]] not in ([], ["list"], ["info"]):
+    sub = [a.lower() for a in args[k + 1:k + 2]]
+    if command == "client" and sub not in ([], ["list"], ["info"]):
         return "redis-cli client changes connections"
+    if command in REDIS_SUBREADS and (not sub or sub[0] not in REDIS_SUBREADS[command]):
+        return f"redis-cli {command} {sub[0] if sub else ''} changes the server".replace("  ", " ")
     return None
+
+
+CURL_VALUED = "AbcCdDeEFHKmoPQrtTuUwxXyYz"
+# Options that send data, upload, write a file of their own or read options the guard can't see.
+CURL_ALWAYS = ["data", "data-ascii", "data-binary", "data-raw", "data-urlencode", "json", "form", "form-string", "upload-file", "mail-from", "mail-rcpt", "remote-name", "remote-name-all", "remote-header-name", "config"]
+# Options that write to the file they are given: fine to /dev/null or to the screen.
+CURL_TO_FILE = {"output": "o", "dump-header": "D", "cookie-jar": "c", "trace": "", "trace-ascii": "", "stderr": "", "libcurl": "", "etag-save": "", "hsts": "", "alt-svc": ""}
+CURL_EXACT_OTHER = {"cookie"}
+HARMLESS_TARGETS = ("-", "/dev/null", "/dev/stdout", "/dev/stderr")
 
 
 def curl_refusal(args):
-    for k, a in enumerate(args):
-        if a in ("-X", "--request") and k + 1 < len(args) and args[k + 1].upper() not in ("GET", "HEAD"):
-            return "curl writes to an API"
-        if re.match(r"^-X(?!GET$|HEAD$)\S+$", a):
-            return "curl writes to an API"
-        if a.startswith(("--data", "--form", "--json", "--upload-file", "--post")) or a in ("-d", "-F", "-T"):
-            return "curl writes to an API"
-        if a in ("-o", "--output") and k + 1 < len(args) and args[k + 1] != "/dev/null":
-            return "curl writes a file"
-        if a.startswith("--output=") and a != "--output=/dev/null":
-            return "curl writes a file"
-        if a in ("-K", "--config") or a.startswith("--config="):
-            return "curl -K reads options the guard can't see"
-        if a in ("-O", "--remote-name", "--remote-name-all", "-J"):
-            return "curl writes a file"
-        # Short flags bunched together: -sd, -sO.
-        if re.match(r"^-[a-zA-Z]+$", a) and len(a) > 2 and re.search(r"[dFTO]", a[1:]):
-            return "curl writes to an API or a file"
+    # -G / --get appends -d and --data* to the URL as a query: a read.
+    query = any(a == "--get" or (a.startswith("--ge") and "get".startswith(a[2:])) for a in args if a.startswith("--")) or any(
+        letter == "G" for a in args for letter, _ in shorts(a, CURL_VALUED))
+    i = 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
+            break
+        nxt = args[i] if i < len(args) else ""
+        if a.startswith("--"):
+            given, eq, val = a[2:].partition("=")
+            if given in CURL_EXACT_OTHER:
+                i += 0 if eq else 1
+            elif query and long_in(a, ["data", "data-ascii", "data-binary", "data-raw", "data-urlencode"]):
+                i += 0 if eq else 1
+            elif long_in(a, CURL_ALWAYS):
+                return "curl writes to an API or a file"
+            elif long_in(a, ["request"]) and given != "request-target":
+                v = val if eq else nxt
+                i += 0 if eq else 1
+                if v.upper() not in ("GET", "HEAD"):
+                    return "curl writes to an API"
+            elif long_in(a, list(CURL_TO_FILE)):
+                v = val if eq else nxt
+                i += 0 if eq else 1
+                if v not in HARMLESS_TARGETS:
+                    return "curl writes a file"
+            elif long_in(a, ["write-out"]):
+                v = val if eq else nxt
+                i += 0 if eq else 1
+                if "%output" in v or v.startswith("@"):
+                    return "curl -w can write a file"
+        elif a.startswith("-") and len(a) > 1:
+            for ch, val in shorts(a, CURL_VALUED):
+                if ch == "d" and query:
+                    i += 0 if val else 1
+                    continue
+                if ch in "dFTOJK":
+                    return "curl writes to an API or a file" if ch != "K" else "curl -K reads options the guard can't see"
+                if val == "" and ch in CURL_VALUED:
+                    i += 1
+                if ch == "X":
+                    v = val or nxt
+                    if v.upper() not in ("GET", "HEAD"):
+                        return "curl writes to an API"
+                elif ch in "oDc":
+                    if (val or nxt) not in HARMLESS_TARGETS:
+                        return "curl writes a file"
+                elif ch == "w":
+                    v = val or nxt
+                    if "%output" in v or v.startswith("@"):
+                        return "curl -w can write a file"
     return None
 
 
+WGET_WRITES = ["post-data", "post-file", "method", "body-data", "body-file", "output-file", "append-output", "save-cookies", "background", "warc-file"]
+WGET_VALUED = "OoaPeiUtTQwlIRXBAD"
+
+
 def wget_refusal(args):
-    if any(a.startswith(("--post", "--method", "--body")) for a in args):
-        return "wget writes to an API"
-    to_stdout = any(a in ("-O-", "--output-document=-") for a in args) or any(
-        a in ("-O", "--output-document") and k + 1 < len(args) and args[k + 1] in ("-", "/dev/null") for k, a in enumerate(args)
-    )
+    to_stdout, i = False, 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
+            break
+        nxt = args[i] if i < len(args) else ""
+        if a.startswith("--"):
+            given, eq, val = a[2:].partition("=")
+            if given and "output-document".startswith(given) and not any(n.startswith(given) for n in WGET_WRITES):
+                v = val if eq else nxt
+                i += 0 if eq else 1
+                to_stdout = v in ("-", "/dev/null")
+            elif long_in(a, WGET_WRITES):
+                return "wget writes to an API or a file"
+        elif a.startswith("-") and len(a) > 1:
+            for ch, val in shorts(a, WGET_VALUED):
+                if ch in "oab":
+                    return "wget writes a log file or runs in the background"
+                if ch == "O":
+                    to_stdout = (val or nxt) in ("-", "/dev/null")
+                if val == "" and ch in WGET_VALUED:
+                    i += 1
     return None if to_stdout else "wget writes a file"
 
 
-def simple_refusal(words, profile, check):
-    """Why one simple command (no pipes or chains left in it) is refused, or None."""
-    for w in words:
-        if DANGEROUS_ASSIGNMENTS.match(w):
-            return f"setting {w.split('=')[0]} can make a program run another one"
-        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w):
+def tar_refusal(args):
+    ops = set()
+    for k, a in enumerate(args):
+        if a.startswith("--"):
+            given = a[2:].split("=", 1)[0]
+            if len(given) >= 2:
+                ops |= {op for name, op in TAR_LONG_OPS.items() if name.startswith(given)}
+        elif a.startswith("-") and len(a) > 1:
+            ops |= set(a[1:]) & set("xcruA")
+        elif k == 0:
+            ops |= set(a) & set("xcruA")
+    if ops:
+        return "tar extracts or writes files"
+    return None
+
+
+def shell_refusal(name, args, again):
+    """A shell's command line is a program: the string after -c is checked as one.
+
+    -c may be anywhere in a bundle of flags (-lc, -euxo pipefail -c, -l -c); -o and -O in a bundle
+    take the next word, so the scan must step over it to reach the -c behind it.
+    """
+    i, has_c, stdin, fish_init = 0, False, False, []
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            i += 1
             break
+        if a == "-":
+            stdin = True
+            i += 1
+            continue
+        if not a.startswith(("-", "+")):
+            break
+        if a.startswith("--"):
+            given, eq, val = a[2:].partition("=")
+            if given in ("rcfile", "init-file"):
+                i += 1 if eq else 2
+                continue
+            if given == "command":  # fish
+                if eq:
+                    fish_init.append(val)
+                else:
+                    has_c = True
+            elif given == "init-command":
+                fish_init.append(val if eq else (args[i + 1] if i + 1 < len(args) else ""))
+                i += 0 if eq else 1
+            i += 1
+            continue
+        step, k = 1, 1
+        while k < len(a):
+            ch = a[k]
+            if ch == "c":
+                has_c = True
+            elif ch == "s":
+                stdin = True
+            elif ch in "oO":
+                step = 2
+            elif ch == "C" and name == "fish":
+                fish_init.append(a[k + 1:] or (args[i + 1] if i + 1 < len(args) else ""))
+                step = 1 if a[k + 1:] else 2
+                break
+            k += 1
+        i += step
+    for init in fish_init:
+        why = again(init)
+        if why:
+            return why
+    if has_c:
+        if i >= len(args):
+            return "a shell with no command"
+        for t in texts([args[i]]):
+            why = again(t)
+            if why:
+                return why
+        return None
+    if stdin or i >= len(args):
+        return "a shell reading commands the guard can't see"
+    return None  # a script: the project's own, its maintainers' choice
+
+
+def interpreter_refusal(key, args):
+    inline_letters = INLINE_LETTERS.get(key, "ce")
+    stop = STOP_LETTERS.get(key, "")
+    place = IN_PLACE_LETTERS.get(key, "")
+    message = f"{key} running inline code the guard can't see into"
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "-":
+            return message
+        if a == "--":
+            i += 1
+            break
+        if not a.startswith("-"):
+            break
+        if a.startswith("--"):
+            if a.startswith(INLINE_LONG):
+                return message
+            i += 1
+            continue
+        for n, ch in enumerate(a[1:], 1):
+            if ch in place:
+                return f"{key} -{ch} edits files in place"
+            if ch in inline_letters:
+                return message
+            if ch == "m" and key in ("python", "pypy"):
+                module = a[n + 1:] or (args[i + 1] if i + 1 < len(args) else "")
+                return None if module in PYTHON_MODULES else f"{key} -m runs a module the guard can't see into"
+            if ch in stop:
+                break
+        i += 2 if a in ("-W", "-X", "-Q") else 1
+    if i >= len(args):
+        return message
+    if key == "deno" and args[i] in DENO_CODE:
+        return f"deno {args[i]} runs code or changes installs"
+    return None
+
+
+def sed_refusal(args):
+    programs, explicit, i = [], False, 0
+    positional = []
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
+            positional += args[i:]
+            break
+        if a.startswith("--"):
+            given, eq, val = a[2:].partition("=")
+            if long_in(a, ["file"]):
+                return "sed -f runs a script the guard can't see"
+            if long_in(a, ["in-place"]):
+                return "sed -i edits files in place"
+            if long_in(a, ["expression"]):
+                programs.append(val if eq else (args[i] if i < len(args) else ""))
+                i += 0 if eq else 1
+                explicit = True
+        elif a.startswith("-") and len(a) > 1:
+            for ch, val in shorts(a, "efl"):
+                if ch == "f":
+                    return "sed -f runs a script the guard can't see"
+                if ch == "i":
+                    return "sed -i edits files in place"
+                if ch == "e":
+                    programs.append(val or (args[i] if i < len(args) else ""))
+                    i += 0 if val else 1
+                    explicit = True
+                elif ch == "l" and not val:
+                    i += 1
+        else:
+            positional.append(a)
+    if not explicit and positional:
+        programs.append(positional[0])
+    for program in programs:
+        if re.search(r"(^|[;{}\n]|^\s*[0-9$,/]*[^/]*)\s*[wWe](\s|$)", program) or re.search(r"/[gpIiMm0-9]*[we](\s|$|;)", program):
+            return "sed script writes files or runs commands"
+        why = script_refusal(program)
+        if why:
+            return why
+    return None
+
+
+def awk_refusal(args):
+    programs, i, explicit = [], 0, False
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
+            break
+        if not a.startswith("-") or a == "-":
+            i -= 1
+            break
+        if a.startswith("--"):
+            if long_in(a, ["file", "include", "load", "exec"]):
+                return "awk --file runs a program the guard can't see"
+            if long_in(a, ["source"]):
+                programs.append(a.split("=", 1)[1] if "=" in a else (args[i] if i < len(args) else ""))
+                i += 0 if "=" in a else 1
+                explicit = True
+            continue
+        for ch, val in shorts(a, "FveW"):
+            if ch in "fiEl":
+                return "awk -f runs a program the guard can't see"
+            if ch == "e":
+                programs.append(val or (args[i] if i < len(args) else ""))
+                i += 0 if val else 1
+                explicit = True
+            elif ch in "Fv" and not val:
+                i += 1
+            elif ch == "W":
+                i += 0 if val else 1
+    if not explicit and i < len(args):
+        programs.append(args[i])
+    for program in programs:
+        if "inplace" in program or re.search(r"system\s*\(|\|\s*getline|(print|printf)[^;}]*(>|\|)|fflush|close\s*\(", program):
+            return "awk program runs commands or writes files"
+        why = script_refusal(program)
+        if why:
+            return why
+    return None
+
+
+def simple_refusal(words, profile, check, again):
+    """Why one simple command (no pipes or chains left in it) is refused, or None."""
     first = base(words[0])
-    words = strip_wrappers(words)
+    prefix, words = strip_wrappers(words)
+    why = dangerous_assignment(prefix)
+    if why:
+        return why
     if not words:
         if first == "env" and profile == "investigate":
             return "env prints environment variables, secrets included"
         return None
-    if "$" in words[0] or "`" in words[0]:
+    if "$" in words[0] or "`" in words[0] or getattr(words[0], "glob", False) or words[0].startswith("="):
         return "a command name the guard can't see until the shell expands it"
     path, args = words[0], words[1:]
     name = base(path)
@@ -346,43 +1417,45 @@ def simple_refusal(words, profile, check):
     if name in ("for", "select", "case", "function", "in", "esac", "done", "fi", "}", "]]", "[["):
         return None
     if name in ("do", "then", "else", "elif", "while", "until", "if", "!", "{"):
-        return simple_refusal(args, profile, check) if args else None
+        return check(args) if args else None
     if name in ("export", "local", "readonly", "declare", "typeset") and [a for a in args if not a.startswith("-")]:
-        for a in args:
-            if DANGEROUS_ASSIGNMENTS.match(a):
-                return f"setting {a.split('=')[0]} can make a program run another one"
-        return None
+        return dangerous_assignment(args)
     if name in ("source", "."):
-        return None if args else "source with nothing to read"
+        if not args:
+            return "source with nothing to read"
+        if args[0] in ("-", "/dev/stdin") or args[0].startswith(("/dev/fd/", "/proc/")):
+            return "source reading commands the guard can't see"
+        return None
     if name in ("busybox", "toybox") and args:
-        return simple_refusal(args, profile, check)
+        return check(args)
+    if name == "repeat" and len(args) >= 2:  # zsh: repeat 3 cmd ...
+        return check(args[1:])
+    if name in ("setopt", "unsetopt") and args or name == "shopt" and any(letter in "su" for a in args for letter, _ in shorts(a)):
+        return "changing the shell's options changes how it expands words"
     if name in ALWAYS_REFUSED:
         return f"{name} {ALWAYS_REFUSED[name]}"
     if name == "eval":
-        return check_text(" ".join(args), profile)
+        return first_refusal(again, texts(args))
+    if name == "trap":
+        return first_refusal(again, texts(args[:1])) if args and not args[0].startswith("-") else None
     if name == "watch":
+        # -d takes no separate value; and watch runs what is left through `sh -c`, as one string.
         j = 0
         while j < len(args) and args[j].startswith("-"):
-            j += 2 if args[j] in ("-n", "--interval", "-d") and not args[j].startswith("--differences") else 1
-        return check(args[j:]) if j < len(args) else None
+            j += 2 if args[j] in ("-n", "--interval") else 1
+        return first_refusal(again, texts(args[j:])) if j < len(args) else None
     if name in SHELLS:
-        if "-c" in args:
-            k = args.index("-c")
-            return check_text(args[k + 1], profile) if k + 1 < len(args) else "a shell with no command"
-        if first_positional(args) is None:
-            return "a shell reading commands the guard can't see"
-        return None  # a script: the project's own, its maintainers' choice
-    if name in INTERPRETERS:
-        if any(a in INLINE_FLAGS or re.match(r"^-[a-zA-Z]*[ce]$", a) for a in args) or first_positional(args) is None:
-            return f"{name} running inline code the guard can't see into"
-        return None
+        return shell_refusal(name, args, again)
+    key = interpreter_key(name)
+    if key in INTERPRETERS:
+        return interpreter_refusal(key, args)
     if name == "xargs":
         j = 0
         while j < len(args) and args[j].startswith("-"):
-            j += 2 if args[j] in ("-I", "-n", "-P", "-L", "-s", "-E", "-d", "-J", "-R", "-S") else 1
+            j += 2 if args[j] in ("-I", "-n", "-P", "-L", "-s", "-E", "-d", "-J", "-R", "-S", "-a", "--arg-file", "--delimiter", "--max-args", "--max-procs", "--max-lines", "--max-chars", "--eof") else 1
         return check(args[j:]) if j < len(args) else None
     if name == "find":
-        if any(a in ("-delete", "-fprint", "-fprintf", "-fls") for a in args):
+        if any(a in ("-delete", "-fprint", "-fprint0", "-fprintf", "-fls") for a in args):
             return "find -delete removes files"
         for k, a in enumerate(args):
             if a in ("-exec", "-execdir", "-ok", "-okdir"):
@@ -395,27 +1468,40 @@ def simple_refusal(words, profile, check):
                 if why:
                     return why
         return None
-    if name == "sed" and any(a.startswith(("-i", "--in-place")) or re.match(r"^-[a-zA-Z]*i", a) for a in args):
-        return "sed -i edits files in place"
+    if name == "sed":
+        return sed_refusal(args)
+    if name in ("awk", "gawk", "nawk", "mawk"):
+        return awk_refusal(args)
+    if name == "rg" and any(a.startswith(("--pre", "--hostname-bin")) for a in args):
+        return "rg --pre runs a program on every file"
     if name == "uniq" and len([a for a in args if not a.startswith("-")]) > 1:
         return "uniq writes its second file"
     if name == "tee" and any(not a.startswith("-") and a != "/dev/null" for a in args):
         return "tee writes a file"
     if name == "dd" and any(a.startswith("of=") for a in args):
         return "dd writes a file"
-    if name == "sort" and any(a == "-o" or a.startswith("--output") for a in args):
+    if name == "sort" and any(letter == "o" for a in args for letter, _ in shorts(a, "ktTS")) or name == "sort" and any(long_in(a, ["output", "compress-program"]) for a in args):
         return "sort -o writes a file"
+    if name == "xxd" and len(positionals(args, {"-c", "-g", "-l", "-s", "-o"})) > 1:
+        return "xxd writes its second file"
+    if name == "base64" and any(letter == "o" for a in args for letter, _ in shorts(a, "io")):
+        return "base64 -o writes a file"
+    if name == "tree" and any(letter == "o" for a in args for letter, _ in shorts(a, "LPIoHT")):
+        return "tree -o writes a file"
+    if name == "yq" and (any(letter == "i" for a in args for letter, _ in shorts(a, "Iopf")) or any(long_in(a, ["inplace"]) for a in args)):
+        return "yq -i edits files in place"
     if name in ("tar", "bsdtar", "gtar"):
-        first = args[0] if args else ""
-        if "--extract" in args or "--get" in args or (re.match(r"^-?[a-zA-Z]*x", first) and not first.startswith("--")):
-            return "tar extracts files"
-        return None
-    if name in ("gzip", "gunzip", "bzip2", "bunzip2", "xz", "unxz", "zstd") and not any(a in ("-c", "-l", "-t", "--stdout", "--list", "--test") for a in args):
-        return f"{name} replaces files"
-    if name == "curl":
-        return curl_refusal(args)
-    if name == "wget":
-        return wget_refusal(args)
+        return tar_refusal(args)
+    if name in ("gzip", "gunzip", "bzip2", "bunzip2", "xz", "unxz", "zstd"):
+        # -c (to the screen), -l (list) and -t (test) leave the file alone, bundled or not; -o names a file.
+        reads_only = any(letter in "clt" for a in args for letter, _ in shorts(a)) or any(long_in(a, ["stdout", "list", "test"]) for a in args)
+        if not reads_only or any(letter == "o" for a in args for letter, _ in shorts(a)) or any(long_in(a, ["output"]) for a in args):
+            return f"{name} replaces files"
+    if name in ("curl", "wget"):
+        why = hazard_refusal(name, args)
+        if why:
+            return why
+        return curl_refusal(args) if name == "curl" else wget_refusal(args)
     if name == "docker":
         return docker_refusal(args, check)
     if name == "docker-compose":
@@ -435,15 +1521,25 @@ def simple_refusal(words, profile, check):
             return None if action in ("list", "info", "restart", "start") else f"brew services {action} changes services"
         return None if sub in BREW_READS or sub == "" else f"brew {sub} changes installed software"
     if name in INSTALLERS:
-        k = first_positional(args)
-        if k is not None and args[k] in INSTALL_WORDS:
-            return f"{name} {args[k]} changes installed software"
+        for a in args:
+            if a == "--":
+                break
+            if a.startswith("-"):
+                continue
+            if a in INSTALL_WORDS:
+                return f"{name} {a} changes installed software"
+            if a in INSTALLER_READS:
+                break
+        if "audit" in args and "fix" in args:
+            return f"{name} audit fix changes installed software"
+        if name == "yarn" and not [a for a in args if not a.startswith("-")] and not any(a in ("--version", "-v", "--help", "-h") for a in args):
+            return "yarn without a command installs"
         return None
     if name == "crontab" and args != ["-l"]:
         return "crontab changes scheduled jobs"
     if name == "defaults" and args[:1] not in (["read"], ["read-type"], ["domains"], ["find"], ["export"]):
         return "defaults changes settings"
-    if name == "xattr" and any(a in ("-w", "-d", "-c", "-r") for a in args):
+    if name == "xattr" and any(letter in "wdcr" for a in args for letter, _ in shorts(a)):
         return "xattr changes files"
     if name in SQL_CLIENTS:
         return sql_refusal(name, args)
@@ -451,7 +1547,7 @@ def simple_refusal(words, profile, check):
         return redis_refusal(args)
     if profile == "investigate":
         # Run by path from outside the system's folders: the project's own script.
-        if "/" in path and not path.startswith(SYSTEM_BIN):
+        if "/" in path and not path.lower().startswith(SYSTEM_BIN):
             return None
         return investigate_refusal(name, args, words)
     return None
@@ -483,40 +1579,12 @@ ENV_DUMPERS = {"env", "set", "export", "declare", "typeset", "compgen"}
 DANGEROUS_ASSIGNMENTS = re.compile(r"^(GIT_[A-Z_]+|PAGER|MANPAGER|EDITOR|VISUAL|LD_[A-Z_]+|DYLD_[A-Z_]+|PROMPT_COMMAND|BASH_ENV|ENV|SHELLOPTS|IFS|PATH|PERL5OPT|PYTHONSTARTUP|NODE_OPTIONS)=")
 
 
-def awk_refusal(args):
-    for a in args:
-        if a.startswith("-") and a not in ("-F", "-v"):
-            if a == "-f":
-                return "awk -f runs a program the guard can't see"
-            continue
-        if re.search(r"system\s*\(|\|\s*getline|(print|printf)[^;}]*(>|\|)|fflush|close\s*\(", a):
-            return "awk program runs commands or writes files"
-    return None
-
-
-def sed_refusal(args):
-    if any(a in ("-f", "--file") or a.startswith("--file=") for a in args):
-        return "sed -f runs a script the guard can't see"
-    for a in args:
-        if a.startswith("-"):
-            continue
-        if re.search(r"(^|[;{}\n]|^\s*[0-9$,/]*[^/]*)\s*[wWe](\s|$)", a) or re.search(r"/[gpIiMm0-9]*[we](\s|$|;)", a):
-            return "sed script writes files or runs commands"
-    return None
-
-
 def investigate_refusal(name, args, words):
     """The investigation's own rules: readers with a write mode, and anything not known as a reader."""
     if name in SECRET_DUMPERS:
         return f"{name} {SECRET_DUMPERS[name]}"
     if name in ENV_DUMPERS and not [a for a in args if not a.startswith("-")]:
         return f"{name} prints environment variables, secrets included"
-    if name in ("awk", "gawk", "nawk"):
-        return awk_refusal(args)
-    if name == "sed":
-        return sed_refusal(args)
-    if name == "rg" and any(a.startswith("--pre") for a in args):
-        return "rg --pre runs a program on every file"
     if name == "log" and args[:1] not in (["show"], ["stream"], ["stats"], ["help"]):
         return "log changes the system log"
     if name == "sysctl" and any(a == "-w" or "=" in a for a in args):
@@ -537,7 +1605,7 @@ def investigate_refusal(name, args, words):
         return "plutil writes property lists"
     if name == "csrutil" and args[:1] != ["status"]:
         return "csrutil changes system protection"
-    if name == "nc" and "-z" not in args:
+    if name == "nc" and ("-z" not in args or any(a in ("-e", "-c", "-X") for a in args)):
         return "nc can open a connection that sends data"
     if name == "top" and "-l" not in args:
         return "top needs -l (it never ends otherwise)"
@@ -559,14 +1627,247 @@ def investigate_refusal(name, args, words):
         sub = args[k] if k is not None else ""
         if sub not in ("run", "test", "ls", "list", "view", "info", "outdated", "why", "explain", "--version", "-v", ""):
             return f"{name} {sub} changes installed software or runs unknown code"
-    if name not in READERS:
+    if name not in READERS and interpreter_key(name) not in INTERPRETERS:
         return f"{name} is not a command an investigation is known to use safely"
     return None
 
 
+# Commands that put the contents of the files they are given in front of the worker.
+CONTENT_READERS = {
+    "cat", "head", "tail", "tac", "nl", "rev", "fold", "cut", "paste", "join", "comm", "sort", "uniq", "grep", "egrep",
+    "fgrep", "zgrep", "rg", "ag", "awk", "gawk", "nawk", "sed", "jq", "yq", "column", "xxd", "od", "strings", "base64",
+    "diff", "cmp", "zcat", "gzcat", "bzcat", "xzcat", "less", "source", ".", "plutil", "hexdump", "bat",
+} | SHELLS
+
+
+def unknown_refusal(words):
+    """An investigation fails closed: a file argument that is only known after the shell expands it."""
+    while words and words[0] in KEYWORDS:
+        words = words[1:]
+    _, words = strip_wrappers(words)
+    if len(words) < 2:
+        return None
+    name = base(words[0])
+    if name.startswith("g") and name[1:] in G_TOOLS:
+        name = name[1:]
+    args = words[1:]
+    if name == "git":
+        if any(getattr(a, "unknown", False) and ":" in re.sub(r"\$\{[^}]*\}", "", a) for a in args):
+            return "a git path only known after the shell expands it"
+        return None
+    if name in CONTENT_READERS or interpreter_key(name) in INTERPRETERS:
+        for a in args:
+            if getattr(a, "unknown", False) and not a.startswith("-"):
+                return f"{name} reads a file only known after the shell expands it: {a}"
+    return None
+
+
+# A reader that is handed the output of a command substitution reads a file the guard can't name.
+SUBST_READERS = CONTENT_READERS - SHELLS - {"source", "."}
+
+
+def subst_refusal(words):
+    _, words = strip_wrappers(words)
+    if len(words) < 2:
+        return None
+    name = base(words[0])
+    if name.startswith("g") and name[1:] in G_TOOLS:
+        name = name[1:]
+    if name in SUBST_READERS:
+        for a in words[1:]:
+            if getattr(a, "subst", False) and not a.startswith("-"):
+                return f"{name} reads a file named by a command substitution, which the guard can't see: {a}"
+    return None
+
+
+def hazard_refusal(name, args):
+    """git and curl: an expansion with no default where an option could be might be anything, --force included."""
+    for a in args:
+        if getattr(a, "hazard", False):
+            return f'{name} given an option only known after the shell expands it: {a} (quote it, "{a}", if it is one value)'
+    return None
+
+
+# --- reads that sweep a tree ------------------------------------------------------------------------
+
+WALK_LIMIT = 20000  # files and folders looked at before the guard gives up
+WALK_SECONDS = 1.5
+WALK_SKIPS = {".git", "node_modules"}
+# What ripgrep's --type means, for the types that matter; any other type is taken to be everything.
+TYPE_SUFFIXES = {
+    "py": (".py", ".pyi"), "js": (".js", ".mjs", ".cjs", ".jsx"), "ts": (".ts", ".tsx", ".mts", ".cts"), "json": (".json", ".jsonl"),
+    "md": (".md", ".markdown"), "markdown": (".md", ".markdown"), "yaml": (".yaml", ".yml"), "toml": (".toml",), "rust": (".rs",),
+    "go": (".go",), "java": (".java",), "sh": (".sh", ".bash", ".zsh"), "html": (".html", ".htm"), "css": (".css",),
+    "c": (".c", ".h"), "cpp": (".cpp", ".cc", ".hpp", ".h"), "rb": (".rb",), "ruby": (".rb",), "php": (".php",), "swift": (".swift",),
+}
+
+
+def secret_under(root, cwd, hidden=True, follow=False, named=None, skip_dirs=()):
+    """(a credentials file under `root` that a sweep would read, or None; True if the walk was cut short).
+
+    `hidden` is whether the sweep reads dot files; `named` is its filter on a file's name, if it has one.
+    """
+    root = os.path.join(cwd or "", os.path.expanduser(root))
+    if not os.path.isdir(root):
+        return None, False
+    seen, deadline = 0, time.monotonic() + WALK_SECONDS
+    for here, dirs, files in os.walk(root, followlinks=follow):
+        dirs[:] = [d for d in dirs if d not in WALK_SKIPS and not any(fnmatch.fnmatch(d, g) for g in skip_dirs)
+                   and (hidden or not d.startswith("."))]
+        seen += len(dirs) + len(files)
+        if seen > WALK_LIMIT or time.monotonic() > deadline:
+            return None, True
+        for name in files:
+            if not hidden and name.startswith("."):
+                continue
+            path = os.path.join(here, name)
+            if (secret_name(name) or secret_pair(os.path.basename(here), name) or real_secret(path)) and (named is None or named(name)):
+                return path, False
+    return None, False
+
+
+def name_filter(includes=(), excludes=(), suffixes=None, ignore_case=False):
+    """A sweep's filter on file names, or None when it reads every file."""
+    if not includes and not excludes and suffixes is None:
+        return None
+    fold = (lambda x: x.lower()) if ignore_case else (lambda x: x)
+
+    def keeps(name):
+        n = fold(name)
+        if includes and not any(fnmatch.fnmatch(n, fold(g)) for g in includes):
+            return False
+        if any(fnmatch.fnmatch(n, fold(g)) for g in excludes):
+            return False
+        return suffixes is None or n.endswith(suffixes)
+
+    return keeps
+
+
+GREP_VALUED = {"-e", "-f", "-m", "-A", "-B", "-C", "-d", "-D", "--include", "--exclude", "--exclude-dir", "--exclude-from", "--include-dir",
+               "--max-count", "--regexp", "--file", "--label", "--directories", "--devices", "--context", "--binary-files"}
+RG_VALUED = {"-e", "-f", "-g", "--glob", "--iglob", "-t", "--type", "-T", "--type-not", "-m", "--max-count", "-A", "-B", "-C", "--context", "-j",
+             "--threads", "-M", "--max-columns", "--max-depth", "-d", "--pre", "--sort", "--sortr", "-E", "--encoding", "--ignore-file", "--type-add",
+             "--colors", "--max-filesize", "--path-separator", "-r", "--replace", "--regexp", "--file", "--hostname-bin", "--pre-glob"}
+
+
+def option_values(args, names):
+    """The values given to the options in `names`, in either spelling (`--include=x`, `--include x`)."""
+    found = []
+    for k, a in enumerate(args):
+        for n in names:
+            if a == n and k + 1 < len(args):
+                found.append(args[k + 1])
+            elif n.startswith("--") and a.startswith(n + "="):
+                found.append(a.split("=", 1)[1])
+            elif not n.startswith("--") and a.startswith(n) and len(a) > len(n) and not a.startswith("--"):
+                found.append(a[len(n):])
+    return found
+
+
+def find_scope(args):
+    """(where a `find` starts, the filter its -name tests put on a file's name) for the arguments after `find`."""
+    starts = []
+    for a in args:
+        if a.startswith("-") or a in ("(", ")", "!", "\\("):
+            break
+        starts.append(a)
+    names, simple = [], True
+    k = 0
+    while k < len(args):
+        a = args[k]
+        if a in ("-name", "-iname") and k + 1 < len(args):
+            names.append((args[k + 1], a == "-iname"))
+            k += 1
+        elif a in ("-o", "-or", "-not", "!", "(", ")", "\\(", "\\)", "-path", "-ipath", "-wholename", "-regex", "-iregex"):
+            simple = False
+        k += 1
+    if names and simple:
+        def keeps(name):
+            return all(fnmatch.fnmatch(name.lower() if ci else name, pat.lower() if ci else pat) for pat, ci in names)
+        return starts or ["."], keeps
+    return starts or ["."], None
+
+
+def sweep_refusal(label, roots, cwd, **how):
+    for root in roots:
+        hit, cut_short = secret_under(root, cwd, **how)
+        if hit:
+            return f"{label} would read {hit}, a credentials file (name the files you mean, or exclude it)"
+        if cut_short:
+            return f"{label} sweeps {root}, which is too big for the guard to check for credentials files (name the files you mean)"
+    return None
+
+
+def recursive_refusal(words, state, before=None, profile="chore"):
+    """A search or a `find ... -exec` that sweeps a tree: refused if the tree holds a credentials file it would read.
+
+    `before` is the command piped into this one, if any: `find . | xargs cat` reads what find lists.
+    """
+    _, words = strip_wrappers(words)
+    if not words:
+        return None
+    name = base(words[0])
+    if name.startswith("g") and name[1:] in G_TOOLS:
+        name = name[1:]
+    args = [str(a) for a in words[1:]]
+    cwd = state.cwd
+    if name in ("grep", "egrep", "fgrep", "zgrep", "zegrep", "zfgrep"):
+        letters = {l for a in args for l, _ in shorts(a, "efmABCdD")}
+        dirs = option_values(args, ["-d", "--directories"])
+        if not (letters & set("rR") or any(long_in(a, ["recursive", "dereference-recursive"]) for a in args) or "recurse" in dirs):
+            return None
+        pos = positionals(args, GREP_VALUED)
+        if not ("e" in letters or "f" in letters or any(long_in(a, ["regexp", "file"]) for a in args)):
+            pos = pos[1:]
+        keep = name_filter(option_values(args, ["--include"]), option_values(args, ["--exclude"]))
+        return sweep_refusal(name + " -r", pos or ["."], cwd, follow="R" in letters or any(long_in(a, ["dereference-recursive"]) for a in args),
+                             named=keep, skip_dirs=option_values(args, ["--exclude-dir"]))
+    if name in ("rg", "ag", "ack"):
+        if "--files" in args or "--type-list" in args or "-l" in args and name == "ag" and False:
+            return None
+        letters = {l for a in args for l, _ in shorts(a, "efgtTmACjMdEr")}
+        hidden = "--hidden" in args or "u" in letters or any(a.startswith("--no-ignore") or a == "--unrestricted" for a in args) or ("." in letters and name == "rg")
+        if name == "ag":
+            hidden = hidden or "--hidden" in args or "a" in letters
+        globs = option_values(args, ["-g", "--glob"] if name == "rg" else ["-G"])
+        types = option_values(args, ["-t", "--type"])
+        suffixes = None
+        if len(types) == 1 and types[0] in TYPE_SUFFIXES and name == "rg":
+            suffixes = TYPE_SUFFIXES[types[0]]
+        keep = name_filter([g for g in globs if not g.startswith("!")], [g[1:] for g in globs if g.startswith("!")], suffixes)
+        pos = positionals(args, RG_VALUED)
+        if not ("e" in letters or "f" in letters or any(long_in(a, ["regexp", "file"]) for a in args)):
+            pos = pos[1:]
+        return sweep_refusal(name, pos or ["."], cwd, hidden=hidden, named=keep)
+    if name == "find":
+        reader = None
+        for k, a in enumerate(args):
+            if a in ("-exec", "-execdir", "-ok", "-okdir") and k + 1 < len(args):
+                inner = base(args[k + 1])
+                if inner in CONTENT_READERS or interpreter_key(inner) in INTERPRETERS:
+                    reader = inner
+        if reader:
+            roots, keep = find_scope(args)
+            return sweep_refusal(f"find -exec {reader}", roots, cwd, named=keep)
+        return None
+    if name == "xargs" and before:
+        _, previous = strip_wrappers(before)
+        if previous and base(previous[0]) == "find":
+            inner = [a for a in args if not a.startswith("-")]
+            if any(base(a) in CONTENT_READERS or interpreter_key(base(a)) in INTERPRETERS for a in inner):
+                roots, keep = find_scope([str(a) for a in previous[1:]])
+                return sweep_refusal("find | xargs", roots, cwd, named=keep)
+        elif profile == "investigate" and any(base(a) in SUBST_READERS for a in args if not a.startswith("-")):
+            return "xargs hands a reader names that arrive on stdin, which the guard can't see"
+    return None
+
+
+# --- a whole command line ----------------------------------------------------------------------------
+
 # Pieces a command line is cut into: chains, pipes, subshells.
 CUTS = {"|", "||", "&&", ";", "&", "(", ")", "|&", ";;", "{", "}", "<(", ">(", "$("}
 SAFE_REDIRECT_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr"}
+KEYWORDS = {"do", "then", "else", "elif", "while", "until", "if", "!", "{"}
 
 
 def inner_commands(text):
@@ -592,71 +1893,262 @@ def inner_commands(text):
 def tokens(text):
     lexer = shlex.shlex(text.replace("\n", " ; "), posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
-    return list(lexer)
+    lexer.commenters = ""  # protect() has dropped the real comments
+    return [piece for token in lexer for piece in operators(token)]
 
 
-def check_text(text, profile, session=""):
-    """Why a whole command line is refused, or None."""
+OPERATORS = ("<<<", "&>>", "<<-", "&&", "||", ";;", "|&", "<(", ">(", "<<", ">>", "&>", ">&", "<&", ">|", "<>")
+
+
+def operators(token):
+    """The lexer joins neighbouring operator characters (`);` `)&&(`); the shell sees each operator on its own."""
+    if len(token) < 2 or any(c not in "();<>|&" for c in token):
+        return [token]
+    out, i = [], 0
+    while i < len(token):
+        for op in OPERATORS:
+            if token.startswith(op, i):
+                out.append(op)
+                i += len(op)
+                break
+        else:
+            out.append(token[i])
+            i += 1
+    return out
+
+
+def make_word(variant, unknown, alts, raw="", following=""):
+    w = Word(unprotect(variant))
+    w.glob = has_glob(variant)
+    w.unknown = unknown
+    w.alts = alts
+    has_default = bool(re.search(r"\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=]", raw))
+    w.hazard = unknown and not has_default and (raw.startswith("$") or raw.startswith("-") or raw in (DQ + "@", DQ + "*") or bool(re.fullmatch(DQ + r"\{[A-Za-z_][A-Za-z0-9_]*\[[@*]\]\}", raw)))
+    w.subst = "`" in raw or bool(re.search("[$" + DQ + r"]\(", raw)) or (raw.endswith("$") and following == "(")
+    return w
+
+
+def alternatives(words, cap=64):
+    """Every command a simple command can become when its expansions are filled in each way they can be.
+
+    [] when no word changes. An unquoted expansion that holds a space becomes two words, an empty one none.
+    """
+    if not any(len(getattr(w, "alts", ())) > 1 or (getattr(w, "alts", ()) and w.alts[0] != str(w)) for w in words):
+        return []
+    combos = [[]]
+    for w in words:
+        alts = getattr(w, "alts", None) or [str(w)]
+        grown = []
+        for c in combos:
+            for alt in alts:
+                made = []
+                for part in (alt.split(SP) if SP in alt else [alt]):
+                    if part == "":
+                        continue
+                    word = Word(part)
+                    word.glob = w.glob
+                    made.append(word)
+                grown.append(c + made)
+        combos = grown[:cap]
+    return combos
+
+
+def learn(words, raws, state):
+    """What a finished simple command leaves behind: variables, and where the next one runs."""
+    while words and words[0] in KEYWORDS:
+        words, raws = words[1:], raws[1:]
+    if not words:
+        return
+    name = base(words[0])
+    assignments = raws if all(ASSIGNMENT.match(unprotect(r)) for r in raws) else (
+        raws[1:] if name in ("export", "local", "readonly", "declare", "typeset") else [])
+    for raw in assignments:
+        m = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\+?=(.*)$", raw, re.S)
+        if m:
+            value = m.group(2)
+            if value == "~" or value.startswith("~/"):
+                value = literal(HOME) + value[1:]
+            outs, _ = substitute(value, state)
+            state.env.setdefault(m.group(1), []).extend(unlit(o) for o in outs)
+    if name in ("for", "select") and len(words) >= 3 and words[2] == "in":
+        values = state.env.setdefault(words[1], [])
+        for raw in raws[3:]:
+            variants, _ = expand(raw, state)
+            values.extend(unlit(v) for v in variants)
+    if name in ("cd", "pushd"):
+        target = next((r for r in raws[1:] if not unprotect(r).startswith("-")), None)
+        if target is None:
+            state.cwd = HOME
+            return
+        variants, unknown = expand(target, state)
+        if unknown or len(variants) != 1 or has_glob(variants[0]):
+            state.cwd = None
+        else:
+            here = unlit(variants[0])
+            state.cwd = os.path.normpath(os.path.join(state.cwd, here)) if state.cwd or os.path.isabs(here) else None
+
+
+def check_text(text, profile, session="", cwd=None, env=None):
+    """Why a whole command line is refused, or None.
+
+    `env` is what the shell around it has set: a command line run by `bash -c`, `eval` or `watch`
+    sees those variables too.
+    """
+    cwd = cwd or os.getcwd()
     for inner in inner_commands(text):
-        why = check_text(inner, profile, session)
+        why = check_text(inner, profile, session, cwd, env)
         if why:
             return why
+    protected, extglob = protect(text)
+    if extglob:
+        return "an extended glob (@(..), +(..), !(..), *(..)) the guard can't expand"
     try:
-        words = tokens(text)
+        raw = tokens(protected)
     except ValueError:
         if profile == "investigate":
             return "a command the guard can't parse"
-        words = text.split()
-    for word in words:
-        if is_secret(word):
-            return f"a credentials file: {word}"
-        if is_other_session(word, session):
-            return f"another Claude session's files: {word}"
+        raw = protected.split()
+    state = State(cwd, session)
+    state.env = {k: list(v) for k, v in (env or {}).items()}
+
+    def again(line):
+        return check_text(line, profile, session, state.cwd, state.env)
 
     def check(simple):
         if not simple:
             return None
-        if simple and base(simple[0]) == "git":
-            why = global_refusal(simple)
+        prefix, words = strip_wrappers(simple)
+        why = dangerous_assignment(prefix)
+        if why:
+            return why
+        if words and base(words[0]) == "git":
+            why, args = git_command(words)
             if why:
                 return why
-        args = git_args(simple)
-        if args:
-            return refusal(args) or (git_read_refusal(args) if profile == "investigate" else None)
-        return simple_refusal(simple, profile, check)
+            if args and args[0] not in GIT_REVISION_READS:
+                why = hazard_refusal("git", words[1:])
+                if why:
+                    return why
+            if args:
+                return refusal(args, git_dir(words, state.cwd)) or (git_read_refusal(args) if profile == "investigate" else None)
+            return None
+        return simple_refusal(simple, profile, check, again)
 
-    simple = []
+    simple, simple_raw = [], []
+
+    piped = []  # the command whose output is piped into the next one
+
+    def finish(cut=""):
+        nonlocal simple, simple_raw, piped
+        words, raws = simple, simple_raw
+        before, piped = piped, (words if cut in ("|", "|&") else [])
+        simple, simple_raw = [], []
+        why = check(words)
+        if not why:
+            for other in alternatives(words):
+                why = check(other)
+                if why:
+                    break
+        if not why:
+            why = recursive_refusal(words, state, before, profile)
+        if not why:
+            why = subst_refusal(words)
+        if not why and profile == "investigate":
+            why = unknown_refusal(words)
+        if why:
+            return why
+        learn(words, raws, state)
+        return None
+
+    def reads(word):
+        return reference_refusal(word, state)
+
     k = 0
-    while k < len(words):
-        w = words[k]
+    while k < len(raw):
+        rw = raw[k]
+        w = unprotect(rw)
+        following = raw[k + 1] if k + 1 < len(raw) else ""
         if w in CUTS:
-            why = check(simple)
+            why = finish(w)
             if why:
                 return why
-            simple = []
         elif ">" in w and set(w) <= set("<>&|0123456789"):
             # A redirection: fine to a file descriptor or /dev/null, refused to anything else.
-            target = words[k + 1] if k + 1 < len(words) else ""
+            target = unprotect(following)
             if target == "(":
                 k += 1  # `>(cmd)`: a command, checked as one
                 continue
+            why = reads(following)
+            if why:
+                return why
             if not (w.endswith("&") and re.match(r"^-?\d*$", target)) and target not in SAFE_REDIRECT_TARGETS:
                 return f"redirection writes a file: {target}"
             k += 2
             continue
         elif "<" in w and set(w) <= set("<&0123456789"):
             # Input from a file or here-string: reading is fine. `<(cmd)` is a command; check it.
-            k += 1 if k + 1 < len(words) and words[k + 1] == "(" else 2
+            if following != "(":
+                why = reads(following)
+                if why:
+                    return why
+                if profile == "chore" and ("`" in following or re.search("[$" + DQ + r"]\(", following) or following == "$"):
+                    return "a redirect from a file named by a command substitution, which the guard can't see"
+            k += 1 if following == "(" else 2
             continue
         else:
-            simple.append(w)
+            why = reads(rw)
+            if why:
+                return why
+            variants, unknown = expand(rw, state)
+            alts = [v.translate(_TO_ALT) for v in variants]
+            simple_raw.append(rw)
+            braced = brace_expand(rw)
+            simple.extend(make_word(v, unknown, alts if len(braced) == 1 else (), rw, following) for v in braced)
         k += 1
-    return check(simple)
+    return finish()
 
 
 def refuse(why):
     sys.stderr.write(f"sidekick guard: refused ({why}). Stop and report that the main session should handle this.\n")
     return 2
+
+
+def tool_refusal(tool, given, session, cwd):
+    """The file tools: a path is a name, a Glob pattern or a Grep glob is a pattern."""
+    state = State(cwd, session)
+    for key in ("file_path", "path"):
+        value = given.get(key)
+        if isinstance(value, str) and value:
+            if is_secret(value):
+                return f"reading a credentials file: {value}"
+            if is_other_session(value, session):
+                return f"another Claude session's files: {value}"
+            here = os.path.join(cwd or "", os.path.expanduser(value))
+            if real_secret(here):
+                return f"reading a credentials file: {value} (a link to {real_secret(here)})"
+    if tool == "Grep":
+        # Claude Code's Grep runs ripgrep with --hidden: a directory is searched dot files and all.
+        words = [w for g in str(given.get("glob") or "").split() for w in brace_expand(g)]
+        kind = given.get("type")
+        keep = name_filter([w for w in words if not w.startswith("!")], [w[1:] for w in words if w.startswith("!")],
+                           TYPE_SUFFIXES.get(kind) if isinstance(kind, str) else None)
+        why = sweep_refusal("Grep", [given.get("path") or "."], cwd, named=keep)
+        if why:
+            return why
+    patterns = [given.get("glob")] if tool == "Grep" else [given.get("pattern")] if tool == "Glob" else []
+    for value in patterns:
+        if not isinstance(value, str) or not value:
+            continue
+        if is_secret(value):
+            return f"reading a credentials file: {value}"
+        candidates = [value]
+        if tool == "Glob" and isinstance(given.get("path"), str) and not os.path.isabs(value) and not value.startswith("~"):
+            candidates.append(os.path.join(given["path"], value))
+        for c in candidates:
+            why = reference_refusal(c.replace("${HOME}", HOME).replace("$HOME", HOME), state)
+            if why:
+                return why
+    return None
 
 
 def main():
@@ -668,14 +2160,14 @@ def main():
     tool = event.get("tool_name") or "Bash"
     session = event.get("session_id") or ""
     given = event.get("tool_input") or {}
-    if tool in ("Read", "Grep", "Glob"):
-        for key in ("file_path", "path", "glob"):
-            if is_secret(given.get(key)):
-                return refuse(f"reading a credentials file: {given.get(key)}")
-            if key != "glob" and is_other_session(given.get(key), session):
-                return refuse(f"another Claude session's files: {given.get(key)}")
-        return 0
-    why = check_text(given.get("command") or "", profile, session)
+    cwd = event.get("cwd") or os.getcwd()
+    try:
+        if tool in ("Read", "Grep", "Glob"):
+            why = tool_refusal(tool, given, session, cwd)
+        else:
+            why = check_text(given.get("command") or "", profile, session, cwd)
+    except Exception as error:  # any exit but 2 lets the call through, so a guard that breaks must refuse
+        why = f"the guard could not check this call ({type(error).__name__})"
     return refuse(why) if why else 0
 
 

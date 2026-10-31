@@ -1,12 +1,12 @@
 import { test, expect } from 'claude-code/testing'
 
 import { JUDGE_SYSTEM, canStart, holdsMain, judgeSystem, lockKeys, parseJudgment, precheck, resourcesOf } from './lib/judge'
-import { guidanceFor, learnSuggestion, needsNoReview, parseReview, reviewPrompt, toolUsesSince } from './lib/review'
-import { migrate, toTaught } from './lib/state'
+import { guidanceFor, learnSuggestion, needsNoReview, parseReview, reviewOutcome, reviewPrompt, toolUsesSince } from './lib/review'
+import { capEntries, migrate, toTaught } from './lib/state'
 import { EMPTY } from './register'
-import { workerInput, INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPrompt, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
+import { SUMMARY_LIMIT, workerInput, INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPrompt, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
 import { COLORS, barCells, bigText, bigWidth, dayLevels, spaced, tileMoney } from './lib/draw'
-import { appendRow, weekStart, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals } from './lib/history'
+import { appendRow, weekStart, bestDay, historyKey, isExpired, isHistoryKey, markGiven, mergeHistory, perDay, agoText, savedFor, startOfDay, streak, toRows, totals, trackRecord } from './lib/history'
 import type { HistoryRow } from './lib/history'
 import { PET_COLUMNS, SHEETS, encodeFrame, moodOf, newWalker, pastimeOf, petFrame, petPose } from './lib/pets'
 import { JUDGE_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
@@ -122,7 +122,7 @@ test('the worker runs lean, locked down and guarded', async () => {
   expect(argv[argv.indexOf('--settings') + 1]).toContain('/p/bin/sidekick-guard')
   // The guard sees reads too, so a credentials file never enters the worker's context.
   const settings = JSON.parse(argv[argv.indexOf('--settings') + 1] ?? '{}')
-  expect(settings.hooks.PreToolUse[0].matcher).toBe('Bash|Read|Grep')
+  expect(settings.hooks.PreToolUse[0].matcher).toBe('Bash|Read|Glob|Grep')
   expect(settings.autoMemoryEnabled).toBe(false)
   for (const rule of ['Read(**/.env)', 'Read(**/.mcp.json)']) expect(argv).toContain(rule)
   expect(argv[argv.indexOf('--append-system-prompt') + 1]).toBe(WORKER_SYSTEM)
@@ -357,6 +357,48 @@ test("state an older version wrote is upgraded, so new fields are never undefine
   expect(state.entries[0]?.workerSpend.cacheRead).toBe(0)
   expect(state.entries[0]?.prompt).toBe('git status')
   expect(migrate(undefined, EMPTY)).toEqual(EMPTY)
+  // Sessions had no identity before: state without one gains the empty one, and keeps one it has.
+  expect(state.session).toBe('')
+  expect(migrate({ session: 's-1' } as never, EMPTY).session).toBe('s-1')
+  expect(migrate({ session: 7 } as never, EMPTY).session).toBe('')
+})
+
+test('the entry list keeps its newest, and never drops one that is still judging, queued or running', async () => {
+  const entry = (id: string, status: string) => migrate({ entries: [{ id, status }] } as never, EMPTY).entries[0]!
+  const newestFirst = [entry('a', 'done'), entry('b', 'running'), entry('c', 'passed'), entry('d', 'queued'), entry('e', 'failed'), entry('f', 'judging'), entry('g', 'stopped')]
+  expect(capEntries(newestFirst, 10).map(x => x.id)).toEqual(['a', 'b', 'c', 'd', 'e', 'f', 'g'])
+  // Over by three: the oldest finished ones go; the active ones stay wherever they stand.
+  expect(capEntries(newestFirst, 4).map(x => x.id)).toEqual(['b', 'd', 'f', 'a'].sort((p, q) => 'abcdefg'.indexOf(p) - 'abcdefg'.indexOf(q)))
+  // More active than the cap: all of them are kept, the cap yields.
+  const busy = ['a', 'b', 'c'].map(id => entry(id, 'running'))
+  expect(capEntries([...busy, entry('z', 'done')], 2).map(x => x.id)).toEqual(['a', 'b', 'c'])
+})
+
+test("each session keeps its own history key; the merge counts a job once and keeps every session's drafts", async () => {
+  expect(historyKey('s-1')).toBe('history:s-1')
+  expect(isHistoryKey('history')).toBe(true)
+  expect(isHistoryKey('history:s-1')).toBe(true)
+  expect(isHistoryKey('history-old')).toBe(false)
+  expect(isHistoryKey('settings')).toBe(false)
+  const row = (id: string, at: number, kind: HistoryRow['kind'] = 'chore'): HistoryRow => ({ at, kind, status: 'done', ms: 1, judgeUsd: 0.1, workerUsd: 0, savedUsd: 0, id })
+  // A job copied from the shared key into a session's own is the same job; two drafts on a day are two sessions'.
+  const merged = mergeHistory([[row('a', 30), row('draft', 20, 'draft')], [row('a', 30), row('b', 10), row('draft', 20, 'draft')]])
+  expect(merged.map(r => `${r.id}@${r.at}`)).toEqual(['b@10', 'draft@20', 'draft@20', 'a@30'])
+  // Same id at another time is another job.
+  expect(mergeHistory([[row('a', 1)], [row('a', 2)]]).length).toBe(2)
+})
+
+test('a session key is only deleted when every row in it is long out of date', async () => {
+  const now = 100 * 24 * 60 * 60 * 1000
+  const old = { at: now - 100 * 24 * 60 * 60 * 1000 }
+  expect(isExpired([old, old], now)).toBe(true)
+  // Past the 35 days shown is not yet gone: age only suggests a session is over.
+  expect(isExpired([{ at: now - 40 * 24 * 60 * 60 * 1000 }], now)).toBe(false)
+  expect(isExpired([old, { at: now - 1000 }], now)).toBe(false)
+  // Unreadable or empty-of-evidence stays: a failed read must never delete someone's rows.
+  expect(isExpired(undefined, now)).toBe(false)
+  expect(isExpired('rows', now)).toBe(false)
+  expect(isExpired([old, { kind: 'future-shape' }], now)).toBe(false)
 })
 
 test('stored corrections upgrade from bare strings; junk is dropped', async () => {
@@ -758,4 +800,99 @@ test('learned entries keep their guidance through a reload, and a stays-with-Cla
   expect(judgeSystem([{ text: 'design the cache', verdict: 'needs-main' }])).toContain('stay with the main session')
   expect(workerInput('t', 'p', 'pull first')).toContain('<notes>pull first</notes>')
   expect(workerInput('t', 'p')).not.toContain('<notes>')
+})
+
+test('the track record counts jobs only, and averages the finished ones', async () => {
+  const row = (kind: HistoryRow['kind'], status: HistoryRow['status'], ms: number, at = 100): HistoryRow => ({ at, kind, status, ms, judgeUsd: 0, workerUsd: 0, savedUsd: 0, id: `${kind}${status}${ms}` })
+  const rows = [row('chore', 'done', 4000), row('investigate', 'partial', 8000), row('chore', 'failed', 90_000), row('to-claude', 'passed', 500), row('chore', 'done', 1000, 1)]
+  expect(trackRecord(rows, 50)).toEqual({ tried: 3, finished: 2, avgMs: 6000 })
+  expect(trackRecord([], 0)).toEqual({ tried: 0, finished: 0, avgMs: 0 })
+})
+
+test('how long ago reads in the largest unit that fits', async () => {
+  expect(agoText(59_000)).toBe('just now')
+  expect(agoText(120_000)).toBe('2m ago')
+  expect(agoText(2 * 60 * 60_000)).toBe('2h ago')
+  expect(agoText(3 * 24 * 60 * 60_000)).toBe('3d ago')
+})
+
+test('an answer over 400 characters is kept whole in the outcome, up to a safety bound that says it cut', async () => {
+  const answer = `${'- a long first bullet. '.repeat(30)}\n- the last bullet, END-OF-ANSWER`
+  const outcome = parseOutcome(JSON.stringify({ status: 'done', summary: answer }), false)
+  expect(outcome.summary).toBe(answer)
+  expect(outcome.summary.length).toBeGreaterThan(400)
+  // Prose with no JSON is the answer too, every line of it.
+  expect(parseOutcome(answer, false).summary).toBe(answer)
+  const huge = parseOutcome(JSON.stringify({ status: 'done', summary: 'z'.repeat(SUMMARY_LIMIT + 500) }), false)
+  expect(huge.summary.length).toBeLessThan(SUMMARY_LIMIT + 100)
+  expect(huge.summary).toContain('[cut: 500 more chars]')
+})
+
+test('the chat line and the handoff note say when they show less than the answer, and where the rest is', async () => {
+  const answer = `${'word '.repeat(150)}END-OF-ANSWER`
+  const outcome = parseOutcome(JSON.stringify({ status: 'done', summary: answer }), false)
+  const chat = chatLine(outcome, 'haiku', 5)
+  expect(chat).not.toContain('END-OF-ANSWER')
+  expect(chat).toContain('… [')
+  expect(chat).toContain('more chars')
+  expect(chat).toContain('sidekick pane')
+  expect(chatLine(outcome, 'haiku', 5, 0, '/home/u/r.md')).toContain('/home/u/r.md')
+  const note = handoffNote('summarize it', outcome, 'haiku', '')
+  expect(note).toContain('[shortened')
+  expect(note).toContain('sidekick pane')
+  expect(handoffNote('summarize it', outcome, 'haiku', '/home/u/r.md')).toContain('full answer in the record')
+  // A short answer carries no mark.
+  const short = parseOutcome('{"status":"done","summary":"Committed abc1234"}', false)
+  expect(handoffNote('push', short, 'haiku')).not.toContain('shortened')
+  expect(chatLine(short, 'haiku', 1)).toBe('✓ Committed abc1234 · haiku · 1s')
+})
+
+// ── trk-547: every routing decision has a specific reason
+
+test("the judge's reason follows its verdict, and a bare verdict word still works", async () => {
+  expect(parseJudgment('mechanical: commits and pushes the checked-out branch', 'commit and push')).toEqual({
+    verdict: 'mechanical',
+    task: 'commit and push',
+    resources: ['git'],
+    reason: 'commits and pushes the checked-out branch',
+  })
+  expect(parseJudgment('needs-main — renames a function, which is a code change\nsecond line', 'x').reason).toBe('renames a function, which is a code change second line')
+  expect(parseJudgment('Investigate: acme-bot is a service on this machine.', 'x').reason).toBe('acme-bot is a service on this machine.')
+  expect(parseJudgment('unclear: depends on an earlier message', 'x')).toMatchObject({ verdict: 'unclear', reason: 'judge unsure: depends on an earlier message' })
+  // A bare word keeps its canned reason; so do the strictness and the fail-open of before.
+  expect(parseJudgment('needs-main', 'x').reason).toBe('needs the main session')
+  expect(parseJudgment('sure: mechanical', 'x')).toMatchObject({ verdict: 'unclear', reason: 'judge unsure ("sure: mechanical")' })
+  expect(parseJudgment('', 'x')).toMatchObject({ verdict: 'unclear', reason: 'judge unsure' })
+  // A long reason is cut with a mark; control characters never reach a line.
+  const long = parseJudgment(`mechanical: ${'a'.repeat(300)}`, 'x').reason
+  expect(long.length).toBe(120)
+  expect(long.endsWith('…')).toBe(true)
+  expect(parseJudgment('mechanical: a\u0007b', 'x').reason).toBe('a b')
+  expect(JUDGE_SYSTEM).toContain('<verdict>: <reason>')
+})
+
+test('each precheck rejection says why in a line of its own', async () => {
+  const why = (text: string, attached = false) => {
+    const pre = precheck(text, attached)
+    return pre.isJudged ? '' : pre.why
+  }
+  expect(why('why does the stage-2 doc mention codex twice?')).toBe('asks for reasoning, which stays with Claude')
+  expect(why('commit this', true)).toContain('attachment')
+  expect(why('x'.repeat(201))).toBe('201 characters: longer than a quick chore (200)')
+  expect(why('line one\nline two')).toBe('several lines: not a quick chore')
+  expect(why('commit what we just discussed')).toContain('refers to the conversation')
+  expect(why('   ')).toBe('empty message')
+})
+
+test('a review says no, low confidence, failed or yes, each with its detail', async () => {
+  const yes = reviewOutcome(JSON.stringify({ could: true, confidence: 0.9, kind: 'chore', reason: 'routine', guidance: 'g' }), 'a', 'tag it', [])
+  expect(yes.kind).toBe('suggest')
+  expect(reviewOutcome(JSON.stringify({ could: false, confidence: 0.9, reason: 'needed the earlier plan' }), 'a', 'x', [])).toEqual({ kind: 'no', reason: 'needed the earlier plan' })
+  expect(reviewOutcome(JSON.stringify({ could: false }), 'a', 'x', [])).toEqual({ kind: 'no', reason: 'no reason given' })
+  expect(reviewOutcome(JSON.stringify({ could: true, confidence: 0.55, reason: 'maybe', guidance: 'g' }), 'a', 'x', [])).toEqual({ kind: 'low', confidence: 0.55, reason: 'maybe' })
+  expect(reviewOutcome('not json', 'a', 'x', [])).toEqual({ kind: 'failed', why: 'the reply was not readable' })
+  expect(reviewOutcome(JSON.stringify({ could: true, confidence: 0.9 }), 'a', 'x', [])).toEqual({ kind: 'failed', why: 'it gave no guidance' })
+  // The old reading is unchanged: a suggestion only for a yes.
+  expect(parseReview(JSON.stringify({ could: false, reason: 'r' }), 'a', 'x', [])).toBeNull()
+  expect(parseReview(JSON.stringify({ could: true, confidence: 0.5, guidance: 'g' }), 'a', 'x', [])).toBeNull()
 })

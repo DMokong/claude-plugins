@@ -173,10 +173,15 @@ flowchart TD
    "why…" or "how does…" questions (unless they're about something running: *"why did the
    nightly job fail?"* goes to the judge), and anything you type while Claude is mid-reply go straight to
    Claude. They never wait on a model.
-2. **Judge (Haiku, one word).** For everything else, a small model answers `mechanical`,
-   `investigate`, `needs-main` or `unclear`. It starts judging your **draft** as soon as you pause typing, so the
+2. **Judge (Haiku, a verdict and a reason).** For everything else, a small model answers `mechanical`,
+   `investigate`, `needs-main` or `unclear`, with a reason of a few words (`needs-main: renames a symbol, a code change`). It starts judging your **draft** as soon as you pause typing, so the
    verdict is usually ready when you press Enter. A submit never waits more than 5 s. A slow or
-   failed judge sends the message to Claude.
+   failed judge sends the message to Claude. A bare verdict word still routes; anything unreadable is `unclear`.
+
+   **Every decision shows its reason**, in the chat line, in the pane (the job's details, and under
+   **RECENT**) and on the band's card, for the sidekick and for Claude alike. A message the precheck
+   keeps from the judge says which rule (`asks for reasoning, which stays with Claude`, `201 characters:
+   longer than a quick chore (200)`, ...). Asking for the reason adds about 20 output tokens to each call.
 3. **Worker (Haiku, separate session).** A headless `claude -p` session runs in your repo with a
    lean setup: no MCP servers, skills, hooks or plugins, and only Bash/Read/Glob/Grep, limited to
    `git`, `bd` and a few read-only helpers. It does get **the instruction files your main session
@@ -204,7 +209,7 @@ is allowed. A bad commit can be reverted, so pushing is fine.
 | rebase **unpushed** commits | `checkout --` / `restore` over uncommitted changes |
 | `bd` create / update / comment / close / list | `stash drop / clear`, `filter-branch`, reflog expiry, `update-ref -d`, `gc --prune` |
 | `cd`, `head`, `tail`, `wc`, `ls`, `cat` (read-only helpers) | writing files by redirect (`> file`), `Edit`/`Write`, any other program |
-| templates like `.env.example` | **reading credentials**: `.env`, `.env.*`, `.mcp.json`, `.netrc`, `.pgpass`, SSH keys, `*.pem`/`*.key`, by any tool (Bash, Read, Grep) |
+| templates like `.env.example` | **reading credentials**: `.env`, `.env.*`, `.mcp.json`, `.netrc`, `.pgpass`, `.npmrc`, `.git-credentials`, `~/.aws/credentials`, SSH keys, `*.pem`/`*.key`, by any tool (Bash, Read, Grep), a link to one, or a search that sweeps a folder holding one |
 
 The blocks are enforced in two layers: Claude Code's own permission rules (`dontAsk` mode with an
 allowlist), and a PreToolUse guard (`bin/sidekick-guard`) that also catches a flag placed after
@@ -276,8 +281,23 @@ everything in the table above:
 | git anything but reads | an investigation doesn't move a repo |
 | another Claude session's files under `~/.claude/projects/` | private, and stale |
 
-The guard looks inside `bash -c '…'`, `$(…)`, `<(…)`, backticks, `xargs`, `find -exec`, `watch`,
-`eval`, loops and `docker exec`, and refuses a command it can't parse. **A script is the deliberate gap:** the guard
+The guard reads a command the way the shell will run it, not the way it was typed. It looks inside
+`bash -c '…'` (however the flags are bundled: `-lc`, `-euxo pipefail -c`), `$(…)`, `<(…)`, backticks, `xargs`,
+`find -exec`, `watch`, `eval`, `trap`, loops and `docker exec`; it judges every command by its name without the
+folder or the case (`/usr/bin/git`, `env git`, `nice -n 5 git`); and it fills in quotes, `$'…'`, braces, `~`,
+globs and variables first, so `cat .e*`, `cat .{env,x}` and `f=.env; cat $f` are refused like `cat .env`. A
+variable that holds an option (`git reset ${FLAGS:---hard}`) is judged as every value it can take, and one the
+guard can't know where git or curl expect an option is refused: quote it (`"$branch"`) if it is a single value.
+Options are read in all their spellings (`--request=DELETE`, `-XDELETE`, `-sXDELETE`, an abbreviated `--req`).
+
+Credentials include `.env*`, `.mcp.json`, `.netrc`, `.pgpass`, `.npmrc`, `.git-credentials`, `.pypirc`, SSH
+keys, `*.pem`/`*.key`, and `~/.aws/credentials`, `~/.docker/config.json`, `~/.kube/config` and the like. A link to one
+is judged by what it points at. A search that sweeps a folder (`grep -r`, `rg`, `find -exec cat`, the Grep tool,
+which reads hidden files) is refused if that folder holds one, so `grep -r foo src/` still works. A command
+substitution handed to a reader (`cat $(…)`) is refused, and in an investigation so is any file name the guard can't
+resolve. A command the guard can't parse, or a guard that fails, refuses.
+
+**A script is the deliberate gap:** the guard
 can't see inside your project's own scripts, so those are your maintainers' call, and the worker is
 told to use the read-only or restart ones. The file and process rows hold for chores too.
 
@@ -289,6 +309,12 @@ Slack and GitHub tokens, JWTs, `Bearer` headers, `password=` / `token:` values a
 URLs. Records live in `~/.claude/sidekick/investigations/` (or under `CLAUDE_CONFIG_DIR`),
 outside any repository, and the newest 50 are kept. The pane's **`record`** button copies the
 path.
+
+**The whole answer.** When the answer is the result ("summarize X in three bullets"), the worker's
+text is kept whole in the job and in the record, up to 8,000 characters (past that it says how much
+was cut). Places with little room (the chat line, the notification, the band's card, Claude's note)
+show the start with a visible `… [N more chars: full answer in …]` mark that names where the rest
+is: the pane's job view, and the record for an investigation.
 
 **Cost.** A real healthcheck of about two dozen launchd jobs and their containers took 12 commands, 30 s and
 about **$0.01**. Investigations hold no git or bd lock, so **you can keep talking to Claude while
@@ -339,7 +365,7 @@ starting to type: it never stands between you and the prompt.
 
 When the judge leaves a message with Claude and Claude finishes it, the sidekick reviews the job: given only what the worker would have, could it have done this? Turns that used no tools, more than 25 tools, or tools the worker lacks are settled without spending a call. Long or multi-line messages are never reviewed, since they never reach the judge.
 
-If the answer is a confident yes, a card above the prompt recommends it:
+Every review leaves a line under **RECENT REVIEWS** in the dashboard, so a no is not silent: `no` with its reason, `low confidence` with its number (under 0.7 asks nothing), `failed` with why the call or its reply could not be used, or `asked you`. Only a confident yes gets a card above the prompt:
 
 - **Yes** adds it to the learned list, with guidance drawn from what Claude did. The judge sends messages like it to the sidekick, and the worker is told that guidance on jobs like it.
 - **No** teaches the judge that this kind stays with Claude.
@@ -595,6 +621,12 @@ These options are the **defaults**. A change in the [control panel](#the-band-an
 All calls go through your own Claude Code login. The sidekick sends nothing anywhere else.
 "Should've been sidekick" corrections are stored locally in the mod's store.
 
+The history behind the dashboard is kept there too, 35 days, one key per session (`history:<session>`).
+A session writes only its own key, so two sessions at once cannot overwrite each other's rows; the
+dashboard merges them all. The Session tab is the rows under this session's key, which survives a
+reload. A session's key is deleted only once everything in it is over 90 days old and a second read agrees. Sessions still running a version before this one write the older shared `history` key, which
+is read but never written; they can still lose each other's rows.
+
 ---
 
 ## Limits
@@ -709,6 +741,7 @@ and rendered to SVG.
 
 | Version | |
 |---|---|
+| **0.8.0** | A specific reason for every routing decision, in chat and the pane, and recent review outcomes on the dashboard. The worker's whole answer is kept and clipped only for display. Facts beside the pet. Guard hardened against flag, path, expansion and option spellings, recursive reads and more credential files. Jobs can't start twice or stick after a reload; held prompts survive races; history is per session and counts warm-ups and drafts. |
 | **0.7.0** | Reviews: after Claude finishes a message the judge left with it, a cheap call asks whether the sidekick could have done it. Yes, No, Ignore or Adjust on the card teaches it, with guidance the worker follows on jobs like it, and refines what it already knows. `/sidekick teach <n> <guidance>`. |
 | **0.6.1** | With the panel open and nothing to do, the pet plays beside it. The pane's pet wanders now and then. A finished job's outcome, or the judge's answer when it leaves a message with Claude, stays above the prompt for 15 seconds. The PET chips share the MODE row when they fit. The pets are now Mochi the quokka and Tater the capybara, and a pet you chose under its old name stays chosen. Above the prompt the pet only comes out while the sidekick thinks or works, on the right and without taking a row; the Sidekick pane keeps it animated whenever it's on, a 🐾 button on the sidekick's line shows and changes the pet, the panel shows the version, and hopping, hauling and sweeping now walk up and down. |
 | **0.6.0** | Pets: Kiki the quokka or Ibara the capybara above the prompt, off by default, chosen in the panel's PET row or with `/sidekick pet`. They follow the sidekick's work, in the terminal only. |

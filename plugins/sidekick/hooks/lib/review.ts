@@ -66,22 +66,41 @@ export function reviewPrompt(prompt: string, uses: readonly ToolUse[], answer: s
   ].join('\n')
 }
 
-/** A reply as a suggestion for the person, or null when it isn't worth asking them. */
-export function parseReview(reply: string, id: string, prompt: string, learned: readonly Taught[]): Suggestion | null {
+/** How a review's reply came out: worth asking the person, or which of three ways it was not. */
+export type ReviewResult =
+  | { kind: 'suggest'; suggestion: Suggestion }
+  | { kind: 'no'; reason: string }
+  | { kind: 'low'; confidence: number; reason: string }
+  | { kind: 'failed'; why: string }
+
+/** A reply read as one of the four outcomes, so a no, a doubt and a failure can each be told apart. */
+export function reviewOutcome(reply: string, id: string, prompt: string, learned: readonly Taught[]): ReviewResult {
   const raw = firstJson(reply) as Record<string, unknown> | null
-  if (raw === null || typeof raw !== 'object' || raw.could !== true) return null
-  if (typeof raw.confidence !== 'number' || raw.confidence < MIN_CONFIDENCE) return null
+  if (raw === null || typeof raw !== 'object' || typeof raw.could !== 'boolean') return { kind: 'failed', why: 'the reply was not readable' }
+  const reason = typeof raw.reason === 'string' ? raw.reason.trim().slice(0, 200) : ''
+  if (raw.could === false) return { kind: 'no', reason: reason === '' ? 'no reason given' : reason }
+  if (typeof raw.confidence !== 'number') return { kind: 'failed', why: 'it gave no confidence' }
+  if (raw.confidence < MIN_CONFIDENCE) return { kind: 'low', confidence: raw.confidence, reason }
   const guidance = typeof raw.guidance === 'string' ? raw.guidance.trim().slice(0, MAX_GUIDANCE_CHARS) : ''
-  if (guidance === '') return null
+  if (guidance === '') return { kind: 'failed', why: 'it gave no guidance' }
   const refined = typeof raw.refines === 'number' ? learned[raw.refines - 1] : undefined
   return {
-    id,
-    prompt,
-    verdict: raw.kind === 'investigate' ? 'investigate' : 'mechanical',
-    reason: typeof raw.reason === 'string' ? raw.reason.trim().slice(0, 200) : '',
-    guidance,
-    refines: refined !== undefined && refined.verdict !== 'needs-main' ? refined.text : null,
+    kind: 'suggest',
+    suggestion: {
+      id,
+      prompt,
+      verdict: raw.kind === 'investigate' ? 'investigate' : 'mechanical',
+      reason,
+      guidance,
+      refines: refined !== undefined && refined.verdict !== 'needs-main' ? refined.text : null,
+    },
   }
+}
+
+/** A reply as a suggestion for the person, or null when it isn't worth asking them. */
+export function parseReview(reply: string, id: string, prompt: string, learned: readonly Taught[]): Suggestion | null {
+  const result = reviewOutcome(reply, id, prompt, learned)
+  return result.kind === 'suggest' ? result.suggestion : null
 }
 
 /** The learned list with a person's yes: a new entry, or a better one in place of what it refines. */

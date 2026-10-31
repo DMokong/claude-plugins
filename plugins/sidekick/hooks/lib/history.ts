@@ -1,7 +1,8 @@
 /**
  * What the sidekick did across sessions, for the dashboard's Today and Week and the 7-day chart: one
- * row per finished job or pass to Claude, and one row a day for draft judging. Kept in the mod's
- * store, 35 days at most.
+ * row per finished job or pass to Claude, and one row a day for the judge calls made outside a job.
+ * Kept in the mod's store, 35 days at most, a key to each session: the store has no atomic write, so
+ * a session only ever writes its own key, and what is shown merges them all.
  */
 import { priceOf } from './cost'
 import type { Totals } from '../../types'
@@ -16,11 +17,15 @@ export type HistoryRow = {
   /** What the main session didn't have to spend, less what the sidekick spent; 0 when it saved nothing. */
   savedUsd: number
   id: string
-  /** Draft rows: how many typing pauses were judged that day. */
+  /** Draft rows: how many judge calls outside a job (typing pauses, shadow messages, reviews) that day; a warm-up adds money and no count. */
   count?: number
 }
 
+/** The key 0.7.x kept every session's rows under, together; now only read. */
 export const HISTORY_KEY = 'history'
+/** The key a session keeps its own rows under. */
+export const historyKey = (session: string): string => `${HISTORY_KEY}:${session}`
+export const isHistoryKey = (key: string): boolean => key === HISTORY_KEY || key.startsWith(`${HISTORY_KEY}:`)
 export const KEEP_DAYS = 35
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -57,6 +62,37 @@ export function toRows(raw: unknown): HistoryRow[] {
       typeof row.id === 'string'
     )
   })
+}
+
+/**
+ * Every session's rows as one list, oldest first. Earlier lists win a tie, so they come in order of
+ * trust: this session's own, other sessions', the shared key of 0.7.x last (its copy of a job is the
+ * stale one, as a later update is only ever written to a session's own key): a job that is in two
+ * (copied from the shared key into a session's own) is counted once. Draft rows are a day's total
+ * each and never tie.
+ */
+export function mergeHistory(lists: readonly (readonly HistoryRow[])[]): HistoryRow[] {
+  const seen = new Set<string>()
+  const merged: HistoryRow[] = []
+  for (const list of lists) {
+    for (const row of list) {
+      if (row.kind !== 'draft') {
+        const key = `${row.kind}|${row.id}|${row.at}`
+        if (seen.has(key)) continue
+        seen.add(key)
+      }
+      merged.push(row)
+    }
+  }
+  return merged.sort((a, b) => a.at - b.at)
+}
+
+/** How long a session's key sits untouched before it may be taken for finished: far past the 35 days shown, since age only suggests a session is over. */
+export const GONE_DAYS = 90
+
+/** Whether a stored list is rows that are all older than `GONE_DAYS`, so its key may go. Anything else, unreadable included, stays. */
+export function isExpired(raw: unknown, now: number): boolean {
+  return Array.isArray(raw) && raw.every(r => r !== null && typeof r === 'object' && typeof (r as { at?: unknown }).at === 'number' && (r as { at: number }).at < now - GONE_DAYS * DAY_MS)
 }
 
 /** Adds a row, dropping what is older than 35 days; draft spend joins the day's draft row. */
@@ -142,6 +178,23 @@ export function streak(days: readonly Day[]): number {
   let n = 0
   for (let i = days.length - 1; i >= 0 && (days[i]?.jobs ?? 0) > 0; i -= 1) n += 1
   return n
+}
+
+/** How the jobs since `from` went: how many it tried, finished, and how long a finished one took. */
+export function trackRecord(rows: readonly HistoryRow[], from: number): { tried: number; finished: number; avgMs: number } {
+  const jobs = rows.filter(r => r.at >= from && (r.kind === 'chore' || r.kind === 'investigate'))
+  const finished = jobs.filter(isFinished)
+  const timed = finished.filter(r => r.ms > 0)
+  return { tried: jobs.length, finished: finished.length, avgMs: timed.length === 0 ? 0 : timed.reduce((n, r) => n + r.ms, 0) / timed.length }
+}
+
+/** How long ago, in the largest unit that fits. */
+export function agoText(ms: number): string {
+  const minutes = Math.floor(ms / 60_000)
+  if (minutes < 1) return 'just now'
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`
 }
 
 const DEFAULT_CONTEXT = 40_000
