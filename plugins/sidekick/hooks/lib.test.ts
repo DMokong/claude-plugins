@@ -6,7 +6,7 @@ import { migrate, toTaught } from './lib/state'
 import { EMPTY } from './register'
 import { workerInput, INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPrompt, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
 import { COLORS, barCells, bigText, bigWidth, dayLevels, spaced, tileMoney } from './lib/draw'
-import { appendRow, weekStart, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals } from './lib/history'
+import { appendRow, weekStart, bestDay, markGiven, perDay, agoText, savedFor, startOfDay, streak, toRows, totals, trackRecord } from './lib/history'
 import type { HistoryRow } from './lib/history'
 import { PET_COLUMNS, SHEETS, encodeFrame, moodOf, newWalker, pastimeOf, petFrame, petPose } from './lib/pets'
 import { JUDGE_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
@@ -758,4 +758,18 @@ test('learned entries keep their guidance through a reload, and a stays-with-Cla
   expect(judgeSystem([{ text: 'design the cache', verdict: 'needs-main' }])).toContain('stay with the main session')
   expect(workerInput('t', 'p', 'pull first')).toContain('<notes>pull first</notes>')
   expect(workerInput('t', 'p')).not.toContain('<notes>')
+})
+
+test('the track record counts jobs only, and averages the finished ones', async () => {
+  const row = (kind: HistoryRow['kind'], status: HistoryRow['status'], ms: number, at = 100): HistoryRow => ({ at, kind, status, ms, judgeUsd: 0, workerUsd: 0, savedUsd: 0, id: `${kind}${status}${ms}` })
+  const rows = [row('chore', 'done', 4000), row('investigate', 'partial', 8000), row('chore', 'failed', 90_000), row('to-claude', 'passed', 500), row('chore', 'done', 1000, 1)]
+  expect(trackRecord(rows, 50)).toEqual({ tried: 3, finished: 2, avgMs: 6000 })
+  expect(trackRecord([], 0)).toEqual({ tried: 0, finished: 0, avgMs: 0 })
+})
+
+test('how long ago reads in the largest unit that fits', async () => {
+  expect(agoText(59_000)).toBe('just now')
+  expect(agoText(120_000)).toBe('2m ago')
+  expect(agoText(2 * 60 * 60_000)).toBe('2h ago')
+  expect(agoText(3 * 24 * 60 * 60_000)).toBe('3d ago')
 })

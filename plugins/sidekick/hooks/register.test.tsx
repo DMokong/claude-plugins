@@ -1437,6 +1437,25 @@ test('the pet comes out above the prompt for a job and goes back in 15 seconds a
   await pane.unmount()
 })
 
+test('the pane fills the space beside the pet with facts the tiles do not show', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE, stored: { settings: { pet: 'tater' } } })
+  underBand(on)
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const pane = await $.ui.mount(PET_PANE)
+  expect(await pane.find({ type: 'Text', text: /no jobs yet/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /nothing yet/ })).toBeDefined()
+  await clock.advance(1_000)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'done')
+  await clock.advance(125_000)
+  expect(await pane.find({ type: 'Text', text: /1 of 1 finished/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /1 day · best 1/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /✓ commit and push/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /2m ago/ })).toBeDefined()
+  await pane.unmount()
+})
+
 test("a judge's answer stays up for 15 seconds when it leaves the message with Claude", async ($, on) => {
   world(on, { judge: NEEDS_MAIN, worker: DONE })
   underBand(on)

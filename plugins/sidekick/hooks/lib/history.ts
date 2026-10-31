@@ -144,6 +144,23 @@ export function streak(days: readonly Day[]): number {
   return n
 }
 
+/** How the jobs since `from` went: how many it tried, finished, and how long a finished one took. */
+export function trackRecord(rows: readonly HistoryRow[], from: number): { tried: number; finished: number; avgMs: number } {
+  const jobs = rows.filter(r => r.at >= from && (r.kind === 'chore' || r.kind === 'investigate'))
+  const finished = jobs.filter(isFinished)
+  const timed = finished.filter(r => r.ms > 0)
+  return { tried: jobs.length, finished: finished.length, avgMs: timed.length === 0 ? 0 : timed.reduce((n, r) => n + r.ms, 0) / timed.length }
+}
+
+/** How long ago, in the largest unit that fits. */
+export function agoText(ms: number): string {
+  const minutes = Math.floor(ms / 60_000)
+  if (minutes < 1) return 'just now'
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`
+}
+
 const DEFAULT_CONTEXT = 40_000
 const TURN_OUTPUT = 500
 

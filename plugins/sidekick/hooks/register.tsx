@@ -6,7 +6,7 @@ import type { Judgment } from './lib/judge'
 import { NO_SPEND, addTally, modelName, tallyLine, tallyOf, tokens, usd } from './lib/cost'
 import { guidanceFor, learnSuggestion, needsNoReview, parseReview, REVIEW_SYSTEM, reviewPrompt, toolUsesSince } from './lib/review'
 import { migrate, toTaught } from './lib/state'
-import { HISTORY_KEY, NO_TOTALS, appendRow, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals, weekStart } from './lib/history'
+import { HISTORY_KEY, NO_TOTALS, agoText, appendRow, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals, trackRecord, weekStart } from './lib/history'
 import type { HistoryRow } from './lib/history'
 import { PET_CHIPS, PET_COLUMNS, PET_ROWS, PET_STROLL, isPetChoice, moodOf, newWalker, pastimeOf, petPose } from './lib/pets'
 import { JUDGE_CHIPS, SETTINGS_KEY, WORKER_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
@@ -1505,12 +1505,32 @@ export const register: Register = (on, options) => {
       // Leave the words beside it their room: the longest caption is 27 cells.
       const lane = Math.max(PET_COLUMNS - 1, Math.min(width - 28, PET_COLUMNS - 1 + PET_STROLL))
       const art = petPose(inPane, state.settings.pet, mood.animation, await read($, petBeat), lane, 'left')
+      // The rest of the pet's height holds what the tiles below don't: one line each, on the tab's span.
+      const record = state.tab === 'session' ? trackRecord(rows.filter(r => ids.has(r.id)), 0) : trackRecord(rows, state.tab === 'today' ? startOfDay(now) : weekStart(now))
+      const last = recent[0]
+      const facts = [
+        { key: 'record', label: 'record', text: record.tried === 0 ? 'no jobs yet' : `${record.finished} of ${record.tried} finished` },
+        { key: 'speed', label: 'speed', text: record.avgMs > 0 ? `${Math.max(1, Math.round(record.avgMs / 1000))}s a job` : '–' },
+        { key: 'streak', label: 'streak', text: `${days_} day${days_ === 1 ? '' : 's'}${best === undefined ? '' : ` · best ${best.jobs}`}` },
+        { key: 'learned', label: 'learned', text: `${state.learned.length}${state.suggestions.length > 0 ? ` · ${state.suggestions.length} to review` : ''}` },
+        { key: 'last', label: 'last', text: last === undefined ? 'nothing yet' : `${markOf(last).mark} ${last.prompt.replace(/\s+/g, ' ')}`, note: last === undefined || last.endedAt === 0 ? '' : ` · ${agoText(now - last.endedAt)}` },
+      ]
+      const factRoom = width - lane - 1 - 8
       panePet = (
         <Box key="sk-pane-pet" gap={1} marginTop={1} flexWrap="nowrap">
           <Box key="sk-pane-lane" width={lane} flexShrink={0} paddingLeft={art.offset}>
             <Raster key={`sk-pane-pet-${state.settings.pet}`} columns={art.columns} rows={art.rows} cells={art.cells} />
           </Box>
-          <Text dimColor>{mood.caption}</Text>
+          <Box key="sk-pane-facts" flexDirection="column">
+            <Text dimColor>{mood.caption}</Text>
+            {factRoom >= 12 && facts.map(fact => (
+              <Box key={`sk-fact-${fact.key}`} flexWrap="nowrap">
+                <Text dimColor>{fact.label.padEnd(8)}</Text>
+                <Text>{clip(fact.text, factRoom - (fact.note?.length ?? 0))}</Text>
+                {fact.note !== undefined && <Text dimColor>{fact.note}</Text>}
+              </Box>
+            ))}
+          </Box>
         </Box>
       )
     }
