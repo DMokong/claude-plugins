@@ -327,7 +327,7 @@ starting to type: it never stands between you and the prompt.
 |---|---|
 | **MODE** | Off / Shadow / Auto for this session (see [Modes](#modes)) |
 | **JUDGE**, **WORKER** | Which model judges and which does the work: Haiku or Sonnet. No Opus worker: work worth Opus belongs in the main session |
-| **PET** | Off, Kiki the quokka or Ibara the capybara, in the terminal (see [Pets](#pets)) |
+| **PET** | Off, Mochi the quokka or Tater the capybara, in the terminal (see [Pets](#pets)) |
 | **Investigations** | Whether "look into it" messages go to the sidekick (see [Looking into things](#looking-into-things)) |
 | **Draft judging** | Judge while you type, so Enter is instant. Each pause costs about $0.0001, which is the small cost that ticks up while you type. Off: messages are judged when sent, within 5 s |
 | **Notifications** | A system notification when a job finishes; the chat line and band say it either way |
@@ -336,18 +336,26 @@ starting to type: it never stands between you and the prompt.
 
 ### Pets
 
-A small animated companion can sit above the prompt: **Kiki the quokka** or **Ibara the capybara**
-(working names). Pick one under **PET** in the control panel, or with `/sidekick pet kiki`,
-`/sidekick pet ibara` and `/sidekick pet off`. It starts off, and your choice is kept for every
+A small animated companion can come out above the prompt: **Mochi the quokka** or **Tater the capybara**.
+Pick one under **PET** in the control panel, or with `/sidekick pet mochi`,
+`/sidekick pet tater` and `/sidekick pet off`. It starts off, and your choice is kept for every
 session.
 
-The pet follows the sidekick's work. It sleeps while the sidekick is off or after five quiet
-minutes, thinks while the judge does, hauls or works through a job with the job's card beside it,
-cheers and looks pleased with itself when a job finishes, and is alarmed when one fails. Between
-jobs it takes the occasional snack; Ibara also drinks, sweeps and has a bath.
+Above the prompt it only comes out for the sidekick's work: it thinks while the judge does, and
+hauls or works through a job at the right of the band, beside the job's card and the sidekick's line, so it adds no row. When a job ends, its outcome stays up for 15 seconds, and the pet with it. With the control panel open and nothing to do, it plays beside the panel if there's room. The 🐾 button
+on the sidekick's line says which pet is on and goes round the choices when pressed: off, mochi, tater.
 
-It takes six rows, in the terminal only. It steps aside while the panel is open, and when the band
-has fewer than seven rows or the terminal is under 59 columns. Builds before 2.1.308 don't get it.
+The Sidekick pane keeps it out and animated whenever it's on. There it also sleeps while the
+sidekick is off or after five quiet minutes, cheers and looks pleased with itself when a job
+finishes, and is alarmed when one fails. Every minute or so it goes for a wander along the pane and back. Between jobs it takes the occasional snack; Tater also
+drinks, sweeps and has a bath.
+
+Hopping, hauling and sweeping go somewhere: the pet walks up and down its lane, turning at each end,
+when there's room for one. Other animations stay wherever it has got to; it never jumps.
+
+It takes six rows, in the terminal only. Above the prompt it steps aside while the panel is open,
+and when the band has fewer than seven rows or the terminal is under 59 columns. Builds before
+2.1.308 don't get it.
 
 **Settings stick.** What you change in the panel is kept for every future session. Only what you
 change is kept: a setting you never touched follows the plugin's options (see
@@ -687,6 +695,7 @@ and rendered to SVG.
 
 | Version | |
 |---|---|
+| **0.6.1** | With the panel open and nothing to do, the pet plays beside it. The pane's pet wanders now and then. A finished job's outcome, or the judge's answer when it leaves a message with Claude, stays above the prompt for 15 seconds. The PET chips share the MODE row when they fit. The pets are now Mochi the quokka and Tater the capybara, and a pet you chose under its old name stays chosen. Above the prompt the pet only comes out while the sidekick thinks or works, on the right and without taking a row; the Sidekick pane keeps it animated whenever it's on, a 🐾 button on the sidekick's line shows and changes the pet, the panel shows the version, and hopping, hauling and sweeping now walk up and down. |
 | **0.6.0** | Pets: Kiki the quokka or Ibara the capybara above the prompt, off by default, chosen in the panel's PET row or with `/sidekick pet`. They follow the sidekick's work, in the terminal only. |
 | **0.5.5** | Draws on engines before 2.1.308: a plainer terminal panel and a prompt to update; graphical surfaces show only the update message. |
 | **0.5.4** | The control panel is never taller than 15 rows, so the line above the prompt stays in view: the NOW section is gone (the job card shows the running job). A test holds the height at every band size. |

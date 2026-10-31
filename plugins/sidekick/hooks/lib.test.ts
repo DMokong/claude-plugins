@@ -7,7 +7,7 @@ import { INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPro
 import { COLORS, barCells, bigText, bigWidth, dayLevels, spaced, tileMoney } from './lib/draw'
 import { appendRow, weekStart, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals } from './lib/history'
 import type { HistoryRow } from './lib/history'
-import { PET_COLUMNS, SHEETS, encodeFrame, moodOf, petFrame } from './lib/pets'
+import { PET_COLUMNS, SHEETS, encodeFrame, moodOf, newWalker, pastimeOf, petFrame, petPose } from './lib/pets'
 import { JUDGE_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
 import { DUMP_KEEP, dumpDir, dumpName, dumpText, redact } from './lib/dump'
 import { DAYS, PROGRESS, STACK, TILE, daysSvg, esc, fitText, progressSvg, stackSvg, textWidth, tileSvg } from './lib/svg'
@@ -570,7 +570,7 @@ const seenPet = (over: Partial<Parameters<typeof moodOf>[1]> = {}) => ({ mode: '
 const job = (over: object) => ({ kind: 'chore', status: 'running', createdAt: 1_000_000, endedAt: 0, steps: [], ...over })
 
 test('every frame of every pet is 12 rows of its width, in its palette, with an animation for each mood', () => {
-  for (const name of ['kiki', 'ibara'] as const) {
+  for (const name of ['mochi', 'tater'] as const) {
     const sheet = SHEETS[name]
     for (const frames of Object.values(sheet.animations)) {
       expect(frames.length).toBe(8)
@@ -602,7 +602,7 @@ test('every frame of every pet is 12 rows of its width, in its palette, with an 
 })
 
 test('a frame encodes to a Raster: 12 bytes a cell, half-blocks over the terminal default', () => {
-  const art = petFrame('kiki', 'idle', 9)
+  const art = petFrame('mochi', 'idle', 9)
   expect(art.rows).toBe(6)
   const padded = art.columns * art.rows * 12
   expect(art.cells.length).toBe((Math.ceil(padded / 3)) * 4)
@@ -611,19 +611,82 @@ test('a frame encodes to a Raster: 12 bytes a cell, half-blocks over the termina
 })
 
 test('the pet follows the work: hello, asleep when off, hauling, then pleased with itself', () => {
-  expect(moodOf('kiki', seenPet({ chosenAt: 999_000 })).animation).toBe('wave')
-  expect(moodOf('kiki', seenPet({ mode: 'off' })).animation).toBe('sleep')
-  expect(moodOf('kiki', seenPet({ entries: [job({})] }))).toEqual({ animation: 'haul', caption: 'Kiki · hauling it along', isLively: true })
-  expect(moodOf('ibara', seenPet({ entries: [job({})] })).animation).toBe('work')
-  expect(moodOf('ibara', seenPet({ entries: [job({ steps: ['$ git commit -m x'] })] })).animation).toBe('haul')
-  expect(moodOf('ibara', seenPet({ entries: [job({ status: 'done', endedAt: 999_000 })] })).animation).toBe('success')
-  expect(moodOf('kiki', seenPet({ entries: [job({ status: 'done', endedAt: 999_000 })] })).animation).toBe('hop')
-  expect(moodOf('kiki', seenPet({ entries: [job({ status: 'done', endedAt: 990_000 })] })).animation).toBe('smug')
-  expect(moodOf('ibara', seenPet({ entries: [job({ status: 'failed', endedAt: 999_000 })] })).animation).toBe('alert')
-  expect(moodOf('kiki', seenPet({ now: 1_000_000 + 10 * 60_000 })).animation).toBe('sleep')
+  expect(moodOf('mochi', seenPet({ chosenAt: 999_000 })).animation).toBe('wave')
+  expect(moodOf('mochi', seenPet({ mode: 'off' })).animation).toBe('sleep')
+  expect(moodOf('mochi', seenPet({ entries: [job({})] }))).toEqual({ animation: 'haul', caption: 'Mochi · hauling it along', isLively: true })
+  expect(moodOf('tater', seenPet({ entries: [job({})] })).animation).toBe('work')
+  expect(moodOf('tater', seenPet({ entries: [job({ steps: ['$ git commit -m x'] })] })).animation).toBe('haul')
+  expect(moodOf('tater', seenPet({ entries: [job({ status: 'done', endedAt: 999_000 })] })).animation).toBe('success')
+  expect(moodOf('mochi', seenPet({ entries: [job({ status: 'done', endedAt: 999_000 })] })).animation).toBe('hop')
+  expect(moodOf('mochi', seenPet({ entries: [job({ status: 'done', endedAt: 990_000 })] })).animation).toBe('smug')
+  expect(moodOf('tater', seenPet({ entries: [job({ status: 'failed', endedAt: 999_000 })] })).animation).toBe('alert')
+  expect(moodOf('mochi', seenPet({ now: 1_000_000 + 10 * 60_000 })).animation).toBe('sleep')
 })
 
 test('a stored pet that is no pet reads as the default', () => {
   expect(effective(defaultsFrom({}), { pet: 'hamster' }).pet).toBe('off')
-  expect(effective(defaultsFrom({}), { pet: 'ibara' }).pet).toBe('ibara')
+  expect(effective(defaultsFrom({}), { pet: 'tater' }).pet).toBe('tater')
+})
+
+test('a travelling pet walks up its lane and back, facing the way it goes', () => {
+  const lane = SHEETS.mochi.width + 3
+  const walker = newWalker()
+  expect([0, 1, 2, 3, 4, 5, 6].map(beat => petPose(walker, 'mochi', 'haul', beat, lane, 'left').offset)).toEqual([0, 1, 2, 3, 2, 1, 0])
+  // Hauling is drawn walking left, with the crate behind: going right takes the mirror image.
+  const toRight = newWalker()
+  expect(petPose(toRight, 'mochi', 'haul', 1, lane, 'left').cells).toBe(petFrame('mochi', 'haul', 1, true).cells)
+  const toLeft = newWalker()
+  expect(petPose(toLeft, 'mochi', 'haul', 1, lane, 'right').cells).toBe(petFrame('mochi', 'haul', 1).cells)
+  expect(petPose(toLeft, 'mochi', 'haul', 2, lane, 'right').offset).toBe(1)
+  // Sweeping is drawn facing right.
+  const sweeper = newWalker()
+  expect(petPose(sweeper, 'tater', 'sweep', 1, SHEETS.tater.width + 3, 'left').cells).toBe(petFrame('tater', 'sweep', 1).cells)
+})
+
+test('a change of animation leaves the pet where it is', () => {
+  const lane = SHEETS.mochi.width + 10
+  const walker = newWalker()
+  for (let beat = 0; beat <= 4; beat++) petPose(walker, 'mochi', 'hop', beat, lane, 'left')
+  expect(petPose(walker, 'mochi', 'idle', 5, lane, 'left').offset).toBe(4)
+  expect(petPose(walker, 'mochi', 'eat', 6, lane, 'left').offset).toBe(4)
+  expect(petPose(walker, 'mochi', 'hop', 7, lane, 'left').offset).toBe(5)
+  // Out of sight a while, it picks up from the same place; a narrower lane brings it inside.
+  expect(petPose(walker, 'mochi', 'hop', 500, lane, 'left').offset).toBe(6)
+  expect(petPose(walker, 'mochi', 'idle', 501, SHEETS.mochi.width + 2, 'left').offset).toBe(2)
+  expect(petPose(newWalker(), 'mochi', 'idle', 3, lane, 'right').offset).toBe(10)
+})
+
+test("a session's state from 0.6.0 comes through with the pet's new name, or none", () => {
+  const pet = (value: unknown) => migrate({ settings: { pet: value } } as never, EMPTY).settings.pet
+  expect(pet('ibara')).toBe('tater')
+  expect(pet('kiki')).toBe('mochi')
+  expect(pet('mochi')).toBe('mochi')
+  expect(pet('hamster')).toBe('off')
+  expect(migrate({} as never, EMPTY).settings.pet).toBe('off')
+})
+
+test('now and then an idle pet goes for one wander; Tater also sweeps', () => {
+  const at = (pet: 'mochi' | 'tater', now: number) => moodOf(pet, seenPet({ now, startedAt: now }))
+  expect(at('mochi', 60_000 * 5 + 40_000).animation).toBe('idle')
+  expect(at('mochi', 60_000 * 4 + 21_000)).toMatchObject({ animation: 'hop' })
+  expect(at('tater', 60_000 * 4 + 21_000).animation).toBe('hop')
+  expect(at('tater', 60_000 * 5 + 21_000)).toMatchObject({ animation: 'sweep' })
+})
+
+test('pastimes go through everything at a real clock time, and never repeat back to back', () => {
+  // Late 2026, in milliseconds: arithmetic that overflows a float's whole numbers only shows up this high.
+  const start = 1_793_400_000_000
+  for (const name of ['mochi', 'tater'] as const) {
+    let last = ''
+    const seen = new Set<string>()
+    for (let i = 0; i < 500; i++) {
+      const { animation } = pastimeOf(name, start + i * 12_000 + 5)
+      expect(SHEETS[name].animations[animation]).toBeDefined()
+      expect(pastimeOf(name, start + i * 12_000 + 11_000).animation).toBe(animation)
+      expect(animation).not.toBe(last)
+      last = animation
+      seen.add(animation)
+    }
+    expect(seen.size).toBe(name === 'mochi' ? 7 : 12)
+  }
 })
