@@ -128,6 +128,11 @@ export type Entry = {
 export type Waiting = { id: string; text: string }
 
 export type SidekickState = {
+  /**
+   * This session's identity, minted when it first starts and kept in its state, so it survives a
+   * reload: the key its history rows are kept under, and what the Session tab counts. Empty before then.
+   */
+  session: string
   mode: Mode
   entries: Entry[]
   waiting: Waiting[]

@@ -1,7 +1,8 @@
 /**
  * What the sidekick did across sessions, for the dashboard's Today and Week and the 7-day chart: one
- * row per finished job or pass to Claude, and one row a day for draft judging. Kept in the mod's
- * store, 35 days at most.
+ * row per finished job or pass to Claude, and one row a day for the judge calls made outside a job.
+ * Kept in the mod's store, 35 days at most, a key to each session: the store has no atomic write, so
+ * a session only ever writes its own key, and what is shown merges them all.
  */
 import { priceOf } from './cost'
 import type { Totals } from '../../types'
@@ -16,11 +17,15 @@ export type HistoryRow = {
   /** What the main session didn't have to spend, less what the sidekick spent; 0 when it saved nothing. */
   savedUsd: number
   id: string
-  /** Draft rows: how many typing pauses were judged that day. */
+  /** Draft rows: how many judge calls outside a job (typing pauses, shadow messages, reviews) that day; a warm-up adds money and no count. */
   count?: number
 }
 
+/** The key 0.7.x kept every session's rows under, together; now only read. */
 export const HISTORY_KEY = 'history'
+/** The key a session keeps its own rows under. */
+export const historyKey = (session: string): string => `${HISTORY_KEY}:${session}`
+export const isHistoryKey = (key: string): boolean => key === HISTORY_KEY || key.startsWith(`${HISTORY_KEY}:`)
 export const KEEP_DAYS = 35
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -57,6 +62,32 @@ export function toRows(raw: unknown): HistoryRow[] {
       typeof row.id === 'string'
     )
   })
+}
+
+/**
+ * Every session's rows as one list, oldest first. Earlier lists win a tie: a job that is in two
+ * (copied from the shared key into a session's own) is counted once. Draft rows are a day's total
+ * each and never tie.
+ */
+export function mergeHistory(lists: readonly (readonly HistoryRow[])[]): HistoryRow[] {
+  const seen = new Set<string>()
+  const merged: HistoryRow[] = []
+  for (const list of lists) {
+    for (const row of list) {
+      if (row.kind !== 'draft') {
+        const key = `${row.kind}|${row.id}|${row.at}`
+        if (seen.has(key)) continue
+        seen.add(key)
+      }
+      merged.push(row)
+    }
+  }
+  return merged.sort((a, b) => a.at - b.at)
+}
+
+/** Whether a stored list is rows that are all past the 35 days kept, so its key can go. Anything else, unreadable included, stays. */
+export function isExpired(raw: unknown, now: number): boolean {
+  return Array.isArray(raw) && raw.every(r => r !== null && typeof r === 'object' && typeof (r as { at?: unknown }).at === 'number' && (r as { at: number }).at < now - KEEP_DAYS * DAY_MS)
 }
 
 /** Adds a row, dropping what is older than 35 days; draft spend joins the day's draft row. */

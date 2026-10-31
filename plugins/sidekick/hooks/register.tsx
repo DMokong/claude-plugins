@@ -5,8 +5,8 @@ import { MAX_MISSES, canStart, holdsMain, judgePrompt, judgeSystem, lockKeys, pa
 import type { Judgment } from './lib/judge'
 import { NO_SPEND, addTally, modelName, tallyLine, tallyOf, tokens, usd } from './lib/cost'
 import { guidanceFor, learnSuggestion, needsNoReview, parseReview, REVIEW_SYSTEM, reviewPrompt, toolUsesSince } from './lib/review'
-import { migrate, toTaught } from './lib/state'
-import { HISTORY_KEY, NO_TOTALS, agoText, appendRow, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals, trackRecord, weekStart } from './lib/history'
+import { capEntries, migrate, toTaught } from './lib/state'
+import { HISTORY_KEY, NO_TOTALS, agoText, appendRow, bestDay, historyKey, isExpired, isHistoryKey, markGiven, mergeHistory, perDay, savedFor, startOfDay, streak, toRows, totals, trackRecord, weekStart } from './lib/history'
 import type { HistoryRow } from './lib/history'
 import { PET_CHIPS, PET_COLUMNS, PET_ROWS, PET_STROLL, isPetChoice, moodOf, newWalker, pastimeOf, petPose } from './lib/pets'
 import { JUDGE_CHIPS, SETTINGS_KEY, WORKER_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
@@ -28,6 +28,7 @@ import {
 import type { Entry, EntryStatus, Mode, Outcome, Profile, Settings, SidekickState, Suggestion, Taught, Tally } from '../types'
 
 export const EMPTY: SidekickState = {
+  session: '',
   mode: 'off',
   entries: [],
   waiting: [],
@@ -173,7 +174,7 @@ async function addSpend($: EngineInterface, spend: Tally): Promise<void> {
 }
 
 async function addEntry($: EngineInterface, entry: Entry): Promise<void> {
-  await change($, s => ({ ...s, entries: [entry, ...s.entries].slice(0, MAX_ENTRIES) }))
+  await change($, s => ({ ...s, entries: capEntries([entry, ...s.entries], MAX_ENTRIES) }))
 }
 
 async function patchEntry($: EngineInterface, id: string, patch: (entry: Entry) => Partial<Entry>): Promise<void> {
@@ -306,21 +307,33 @@ async function warm($: EngineInterface): Promise<void> {
   await change($, s => ({ ...s, isWarming: true }))
   const reply = await $.model.complete({ model: live.judgeModel, prompt: 'Reply with: ok', maxTokens: 1 }).catch(() => undefined)
   await change($, s => ({ ...s, isWarming: false }))
-  if (reply !== undefined) await addSpend($, tallyOf(live.judgeModel, reply.usage))
+  if (reply === undefined) return
+  const spent = tallyOf(live.judgeModel, reply.usage)
+  await addSpend($, spent)
+  // Money in the history's draft judging, as a draft is, but no draft was judged: it counts none.
+  if (spent.usd > 0) await record($, { at: 0, kind: 'draft', status: 'passed', ms: 0, judgeUsd: spent.usd, workerUsd: 0, savedUsd: 0, id: 'draft', count: 0 })
 }
 
-/** Starts every queued assist whose locks are free, oldest first; when nothing is left, releases held prompts. */
+/**
+ * Starts every queued assist whose locks are free, oldest first; when nothing is left, releases held
+ * prompts. The claim is one write of the session's state, retried against whatever another pump
+ * wrote meanwhile, so an assist is started by exactly one pump however many run at once.
+ */
 async function pump($: EngineInterface): Promise<void> {
-  const state = await load($)
-  const held = state.entries.filter(x => x.status === 'running').map(x => x.locks)
-  const queued = state.entries.filter(x => x.status === 'queued').reverse()
-  for (const entry of queued) {
-    if (!canStart(entry.locks, held, live.maxConcurrent)) continue
-    held.push(entry.locks)
-    await patchEntry($, entry.id, () => ({ status: 'running' }))
-    void runAssist($, entry.id)
-  }
-  if (!holdingMain(await load($))) await releaseWaiting($)
+  let claimed: string[] = []
+  await change($, s => {
+    // A retry runs this again on the newer state: only what the last run claimed was written.
+    claimed = []
+    const held = s.entries.filter(x => x.status === 'running').map(x => x.locks)
+    for (const entry of s.entries.filter(x => x.status === 'queued').reverse()) {
+      if (!canStart(entry.locks, held, live.maxConcurrent)) continue
+      held.push(entry.locks)
+      claimed.push(entry.id)
+    }
+    return claimed.length === 0 ? s : { ...s, entries: s.entries.map(x => (claimed.includes(x.id) ? { ...x, status: 'running' as const } : x)) }
+  })
+  for (const id of claimed) void runAssist($, id)
+  await releaseWaiting($)
 }
 
 /** Whether a running or queued assist holds prompts for the main session (chores do; investigations don't). */
@@ -328,12 +341,18 @@ function holdingMain(state: SidekickState): boolean {
   return state.entries.some(x => (x.status === 'running' || x.status === 'queued') && holdsMain(x.locks))
 }
 
-/** Sends the prompts held for the main session, in the order they were typed. */
+/**
+ * Sends the prompts held for the main session, in the order they were typed, once nothing holds
+ * them. Taking them and checking that nothing holds them is one write, so a prompt added as the last
+ * assist ends is either taken here or finds nothing holding it and goes straight through.
+ */
 async function releaseWaiting($: EngineInterface): Promise<void> {
-  const { waiting } = await load($)
-  if (waiting.length === 0) return
-  await change($, s => ({ ...s, waiting: [] }))
-  for (const held of waiting) await $.prompt.submit({ text: held.text, asUser: true })
+  let released: SidekickState['waiting'] = []
+  await change($, s => {
+    released = holdingMain(s) ? [] : s.waiting
+    return released.length === 0 ? s : { ...s, waiting: [] }
+  })
+  for (const held of released) await $.prompt.submit({ text: held.text, asUser: true })
 }
 
 /** Puts a note where the main session will read it: in the conversation now, else with the next prompt. */
@@ -431,34 +450,58 @@ async function resetSettings($: EngineInterface): Promise<void> {
 
 /** The local midnight `state.today` counts from; the band refreshes it when the day turns. */
 let todayFrom = 0
-/** The jobs this session recorded, for the dashboard's Session tab (the entry list keeps only the newest 60). */
-const sessionIds = new Set<string>()
+/** This session's identity, from its state: the key its history is kept under. Set at start, and kept across reloads there. */
+let sessionKey = ''
+/** The rows this session wrote, as it last read or wrote them: the dashboard's Session tab, drafts and reviews included. */
+let ownRows: HistoryRow[] = []
+
+/** Every session's rows, merged, this session's own among them, and the keys of sessions whose rows have all aged out. */
+async function readHistory($: EngineInterface): Promise<{ all: HistoryRow[]; own: HistoryRow[]; stale: string[] }> {
+  const mine = historyKey(sessionKey)
+  const now = await $.clock.now()
+  const keys = (await $.store.keys().catch(() => [mine])).filter(isHistoryKey)
+  const lists = await Promise.all(keys.map(async key => ({ key, raw: await $.store.get(key).catch(() => (key === mine ? ownRows : undefined)) })))
+  const own = toRows(lists.find(l => l.key === mine)?.raw)
+  const others = lists.filter(l => l.key !== mine)
+  return { own, all: mergeHistory([own, ...others.map(l => toRows(l.raw))]), stale: others.filter(l => isExpired(l.raw, now)).map(l => l.key) }
+}
 
 /** Mirrors today's totals into the session's state, where the band can draw them. */
-async function refreshToday($: EngineInterface, rows?: readonly HistoryRow[]): Promise<void> {
-  const all = rows ?? toRows(await $.store.get(HISTORY_KEY).catch(() => historyRows))
-  historyRows = [...all]
+async function refreshToday($: EngineInterface): Promise<string[]> {
+  const { all, own, stale } = await readHistory($)
+  historyRows = all
+  ownRows = own
   const now = await $.clock.now()
   todayFrom = startOfDay(now)
   const today = totals(all, todayFrom)
   await change($, s => ({ ...s, today })).catch(() => {})
+  return stale
 }
 
 /**
- * History writes, one at a time: each reads the rows, changes them and writes them back, so two at
- * once (two chores finishing together, a draft and its submit) would lose one.
+ * History writes, one at a time: each reads the session's rows, changes them and writes them back, so
+ * two at once (two chores finishing together, a draft and its submit) would lose one. They write only
+ * the session's own key, which no other session writes: the store has no atomic write, so a shared
+ * key could lose a row whenever two sessions wrote together.
  */
 let historyQueue: Promise<void> = Promise.resolve()
-/** The rows as this session last read or wrote them, for the pane to draw without re-reading. */
+/** Every session's rows as this one last read or wrote them, for the pane to draw without re-reading. */
 let historyRows: HistoryRow[] = []
 
 function editHistory($: EngineInterface, edit: (rows: HistoryRow[], now: number) => HistoryRow[]): Promise<void> {
   const run = historyQueue.then(async () => {
     const now = await $.clock.now()
-    const rows = edit(toRows(await $.store.get(HISTORY_KEY).catch(() => historyRows)), now)
-    await $.store.set(HISTORY_KEY, rows).catch(() => {})
-    historyRows = rows
-    await refreshToday($, rows)
+    const key = historyKey(sessionKey)
+    const rows = edit(toRows(await $.store.get(key).catch(() => ownRows)), now)
+    // The key is this session's alone. Read back all the same, since the engine does not say that a
+    // write of another key (another session's) can never take this one with it: a lost write is made again.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await $.store.set(key, rows).catch(() => {})
+      if (JSON.stringify(await $.store.get(key).catch(() => undefined)) === JSON.stringify(rows)) break
+    }
+    ownRows = rows
+    // A session whose rows have all aged out writes that key no more, so it goes.
+    for (const stale of await refreshToday($)) await $.store.delete(stale).catch(() => {})
   })
   historyQueue = run.catch(() => {})
   return run
@@ -466,8 +509,17 @@ function editHistory($: EngineInterface, edit: (rows: HistoryRow[], now: number)
 
 /** Adds one row to the history kept across sessions. */
 async function record($: EngineInterface, row: HistoryRow): Promise<void> {
-  if (row.kind !== 'draft') sessionIds.add(row.id)
   await editHistory($, (rows, now) => appendRow(rows, { ...row, at: now }, now))
+}
+
+/**
+ * Gives a session that had no identity (state an earlier version wrote) the rows that version kept
+ * for the jobs it lists, copied from the shared key into its own. Counted once: the merge ties them.
+ */
+async function adoptRows($: EngineInterface, ids: ReadonlySet<string>): Promise<void> {
+  const shared = toRows(await $.store.get(HISTORY_KEY).catch(() => undefined)).filter(r => r.kind !== 'draft' && ids.has(r.id))
+  if (shared.length === 0) return
+  await editHistory($, rows => [...rows, ...shared.filter(m => !rows.some(r => r.kind === m.kind && r.id === m.id && r.at === m.at))])
 }
 
 /** What the main session would have spent on this job, less what the sidekick did; 0 unless it finished. */
@@ -527,6 +579,57 @@ async function finish($: EngineInterface, id: string, outcome: Outcome, calls: r
   $.ui.log(chatLine(outcome, entry.backend, seconds, (after?.judgeSpend.usd ?? 0) + (after?.workerSpend.usd ?? 0)))
   await deliverNote($, handoffNote(entry.prompt, outcome, entry.backend, entry.dump))
   await tell($, status === 'done' ? `✓ ${outcome.summary}` : `⚠ ${outcome.summary} — open /sidekick to hand it to main`)
+  await pump($)
+}
+
+/**
+ * A reload kills the workers with the old module while the session's state stays, so an entry left
+ * running has no process, and one left judging has no judge: they would hold their locks and the
+ * prompts held behind them for good, and stop could not clear them. Settles them as failed (a
+ * running one is a job: counted once, its row written unless the history has it), then pumps so
+ * held prompts go. An entry with a live process in this module is left alone.
+ */
+async function settleOrphans($: EngineInterface): Promise<void> {
+  const now = await $.clock.now()
+  const gone = (await load($)).entries.filter(x => (x.status === 'running' || x.status === 'judging') && !workers.has(x.id))
+  if (gone.length === 0) return
+  const outcomeFor = (entry: Entry): Outcome =>
+    entry.status === 'running'
+      ? {
+          status: 'failed',
+          summary: 'Interrupted: the sidekick reloaded while this was running.',
+          commands: [],
+          shas: [],
+          changed: [],
+          uncertain: ['It may have run some commands before it stopped; check git status.'],
+          needsMain: 'The worker was cut off by a reload.',
+        }
+      : {
+          status: 'failed',
+          summary: 'Interrupted: the sidekick reloaded while judging this message.',
+          commands: [],
+          shas: [],
+          changed: [],
+          uncertain: [],
+          needsMain: 'The message may not have reached the main session; give it to main or send it again.',
+        }
+  const outcomes = new Map(gone.map(x => [x.id, outcomeFor(x)]))
+  for (const entry of gone.filter(x => x.status === 'running')) {
+    const row: HistoryRow = { at: 0, kind: entry.kind, status: 'failed', ms: now - (entry.startedAt || entry.createdAt), judgeUsd: entry.judgeSpend.usd, workerUsd: entry.workerSpend.usd, savedUsd: 0, id: entry.id }
+    // Not twice: the job may have written its row just before the reload cut it off.
+    await editHistory($, (rows, at) => (rows.some(r => r.id === entry.id && r.kind === entry.kind) ? rows : appendRow(rows, { ...row, at }, at)))
+  }
+  await change($, s => {
+    const settling = s.entries.filter(x => outcomes.has(x.id) && (x.status === 'running' || x.status === 'judging'))
+    const ran = settling.filter(x => x.status === 'running').length
+    return {
+      ...s,
+      entries: s.entries.map(x => (settling.includes(x) ? { ...x, status: 'failed' as const, endedAt: now, outcome: outcomes.get(x.id) ?? null } : x)),
+      totals: { ...s.totals, assists: s.totals.assists + ran, failed: s.totals.failed + ran },
+    }
+  })
+  $.ui.log(`⚠ The sidekick reloaded: ${gone.length === 1 ? 'a job was' : `${gone.length} jobs were`} cut off and marked failed (check git status).`)
+  for (const entry of gone.filter(x => x.status === 'running')) await deliverNote($, handoffNote(entry.prompt, outcomes.get(entry.id)!, entry.backend, entry.dump))
   await pump($)
 }
 
@@ -685,6 +788,8 @@ async function shadowJudge($: EngineInterface, id: string, text: string): Promis
     judgeSpend: spend,
     endedAt,
   }))
+  // The judge's money, in draft judging with the calls that make no job; the entry keeps it too, for its details.
+  await record($, { at: 0, kind: 'draft', status: 'passed', ms, judgeUsd: spend.usd, workerUsd: 0, savedUsd: 0, id: 'draft', count: 1 })
   redrawAfterLinger($)
 }
 
@@ -929,7 +1034,14 @@ export const register: Register = (on, options) => {
     }
     await change($, state => ({ ...state, learned: misses }))
     await refreshSettings($)
+    // This session's identity lives in its state, so a reload keeps it; state from before it existed gains one.
+    const minted = `${(await $.clock.now()).toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+    await change($, state => (state.session === '' ? { ...state, session: minted } : state))
+    const begun = await load($)
+    sessionKey = begun.session
+    if (sessionKey === minted && begun.entries.length > 0) await adoptRows($, new Set(begun.entries.map(x => x.id))).catch(() => {})
     await refreshToday($)
+    await settleOrphans($).catch(() => {})
     // Store the upgraded shape, so state written by an older version is current from here on.
     await change($, state => state)
     // 0.1.2 kept the mode in the status line; the band carries it now, so clear what it left.
@@ -1043,11 +1155,25 @@ export const register: Register = (on, options) => {
     }
 
     // auto
-    const isBusy = holdingMain(state)
     const holdForAssists = async (why: string): Promise<PromptSubmitResult> => {
-      if (!isBusy || isMidTurn) return toMain($, e, next)
+      if (isMidTurn) return toMain($, e, next)
+      // Nothing holds now (the judge may have outlasted the last assist): no reason to hold.
+      if (!holdingMain(await load($))) return toMain($, e, next)
+      // A resubmit carries the text and nothing else: an image or other attachment would be lost, and
+      // the hooks above this one add their context afresh. Rather than lose it, it goes to Claude now.
+      if ((e.attachments?.length ?? 0) > 0 || (e.context?.length ?? 0) > 0) {
+        $.ui.log('→ to Claude now, not held for the sidekick: it carries an attachment or hook context a held prompt would lose')
+        return toMain($, e, next)
+      }
       const id = newId(now)
-      await change($, s => ({ ...s, waiting: [...s.waiting, { id, text: e.text }] }))
+      // And asked again as the prompt is added, in the same write: the last assist may end between,
+      // and then nothing would ever release it.
+      let isHeld = false
+      await change($, s => {
+        isHeld = holdingMain(s)
+        return isHeld ? { ...s, waiting: [...s.waiting, { id, text: e.text }] } : s
+      })
+      if (!isHeld) return toMain($, e, next)
       clearRestored($, e.text)
       return { drop: `❯ ${clip(e.text.replace(/\s+/g, ' '), 160)} · held for Claude until the sidekick finishes (/sidekick → send now)` }
     }
@@ -1316,10 +1442,10 @@ export const register: Register = (on, options) => {
     }
 
     // ── the dashboard
-    const ids = new Set([...sessionIds, ...state.entries.map(x => x.id)])
+    // The Session tab counts the rows this session wrote, drafts and reviews with them, however long ago.
     const span =
       state.tab === 'session'
-        ? { ...totals(rows.filter(r => ids.has(r.id)), 0), costUsd: state.spend.usd }
+        ? { ...totals(ownRows, 0), costUsd: state.spend.usd }
         : totals(rows, state.tab === 'today' ? startOfDay(now) : weekStart(now))
     const isShortTabs = width - 4 < 30
     const tabName = (tab: 'session' | 'today' | 'week') => (isShortTabs ? { session: 'Sess', today: 'Day', week: 'Wk' }[tab] : `${tab[0]!.toUpperCase()}${tab.slice(1)}`)
@@ -1506,7 +1632,7 @@ export const register: Register = (on, options) => {
       const lane = Math.max(PET_COLUMNS - 1, Math.min(width - 28, PET_COLUMNS - 1 + PET_STROLL))
       const art = petPose(inPane, state.settings.pet, mood.animation, await read($, petBeat), lane, 'left')
       // The rest of the pet's height holds what the tiles below don't: one line each, on the tab's span.
-      const record = state.tab === 'session' ? trackRecord(rows.filter(r => ids.has(r.id)), 0) : trackRecord(rows, state.tab === 'today' ? startOfDay(now) : weekStart(now))
+      const record = state.tab === 'session' ? trackRecord(ownRows, 0) : trackRecord(rows, state.tab === 'today' ? startOfDay(now) : weekStart(now))
       const last = recent[0]
       const facts = [
         { key: 'record', label: 'record', text: record.tried === 0 ? 'no jobs yet' : `${record.finished} of ${record.tried} finished` },
