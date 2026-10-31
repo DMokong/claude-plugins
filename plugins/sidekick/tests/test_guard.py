@@ -913,7 +913,6 @@ BOTH_ALLOWED = [
 
 # Only an investigation fails closed on what the shell has yet to expand.
 INVESTIGATE_REFUSED = [
-    'while read f; do cat "$f"; done < list.txt',
     "cat $UNKNOWN",
     'cat "$(ls)"',
     "cat $(ls -t logs/*.log | head -1)",
@@ -988,7 +987,6 @@ CHORE_ALLOWED = [
     "git push -u origin topic",
     "git restore --staged f",
     "git restore -S f",
-    'while read f; do cat "$f"; done < list.txt',
     "cat $UNKNOWN",
     "git show HEAD:$f",
     "git show $sha",
@@ -1174,6 +1172,74 @@ class GuardRefuses(unittest.TestCase):
         source = open(os.path.join(os.path.dirname(__file__), "..", "hooks", "lib", "worker.ts")).read()
         matcher = re.search(r"matcher: '([^']+)'", source).group(1).split("|")
         self.assertEqual(sorted(matcher), ["Bash", "Glob", "Grep", "Read"])
+
+
+
+class TrkMrn(unittest.TestCase):
+    def assert_refused(self, command, profile):
+        code, said = bash(command, profile=profile)
+        self.assertEqual(code, 2, f"allowed in {profile}: {command!r}")
+        self.assertNotIn("could not check", said, command)
+
+    def test_an_investigation_may_read_herdr_status_only(self):
+        for command in ["herdr --version", "herdr --help", "herdr pane list", "herdr pane list --workspace wE", "herdr agent get sidekick-demo", "herdr agent get wE:p17", "herdr pane list | jq .result", "herdr pane read wE:p17 --lines 200", "herdr agent read sidekick-demo --lines 50", "herdr agent read x --source visible --lines=80", "herdr pane read --source recent-unwrapped --lines 1 wE:p17"]:
+            self.assertEqual(bash(command, profile="investigate")[0], 0, command)
+        for command in ["herdr pane read wE:p17", "herdr agent read x", "herdr pane read wE:p17 --lines 201", "herdr pane read wE:p17 --lines 9999", "herdr pane read wE:p17 --lines 0", "herdr pane read wE:p17 --lines $N", "herdr pane read $X --lines 50",
+                        "herdr pane read --lines 50", "herdr pane read a b --lines 50", "herdr pane read a --lines 50 --raw", "herdr pane read a --lines 50 --source other", "herdr --session slack-bot pane read a --lines 50", "herdr agent prompt x hi", "herdr pane run wE:p17 ls", "herdr pane send-keys x y", "herdr", "herdr agent get", "herdr agent get $X",
+                        "herdr agent get x y", "herdr pane list --workspace $X", "herdr server stop", "herdr --session slack-bot pane list", "echo x | xargs herdr pane read", "echo x | xargs herdr pane read --lines 50"]:
+            self.assert_refused(command, "investigate")
+
+    def test_a_malformed_herdr_read_says_how_to_correct_it(self):
+        for command in ["herdr agent get", "herdr pane read wE:p17", "herdr agent read x --lines 999"]:
+            code, said = bash(command, profile="investigate")
+            self.assertEqual(code, 2, command)
+            self.assertIn("Correct the command", said)
+            self.assertNotIn("Stop and report", said)
+        self.assertIn("Stop and report", bash("herdr agent prompt x hi", profile="investigate")[1])
+        self.assertIn("Stop and report", bash("herdr agent get", profile="chore")[1])
+
+    def test_a_chore_gets_no_herdr_at_all(self):
+        for command in ["herdr --version", "herdr --help", "herdr pane list", "herdr agent get x", "herdr pane read a --lines 50", "herdr agent read a --lines 50"]:
+            self.assert_refused(command, "chore")
+
+    def test_ps_may_not_print_environments(self):
+        for profile in ("chore", "investigate"):
+            for command in ["ps -E", "ps eww", "ps auxe", "ps -AE", "ps axe | grep x"]:
+                self.assert_refused(command, profile)
+            for command in ["ps aux", "ps -ef", "ps -e", "ps -axo pid,command", "ps -p 1"]:
+                self.assertEqual(bash(command, profile=profile)[0], 0, command)
+
+    def test_readers_fed_by_pipes_and_loops(self):
+        for profile in ("chore", "investigate"):
+            for command in ["ls -A | xargs cat", 'find . | while read f; do cat "$f"; done', 'while read -r f; do cat "$f"; done < list.txt', 'ls | while read; do head "$REPLY"; done']:
+                self.assert_refused(command, profile)
+        for command in ['while read f; do echo "$f"; done < list.txt', 'cat "$f.log"', "git log --oneline | xargs echo"]:
+            self.assertEqual(bash(command, profile="chore")[0], 0, command)
+
+    def test_more_credential_names_without_catching_every_json_file(self):
+        for command in ["cat secrets.yml", "cat config/secrets.yaml", "cat config/credentials.json", "cat .htpasswd", "cat secr*.yml"]:
+            self.assert_refused(command, "chore")
+        for command in ["cat *.json", "cat *.yml", "cat secrets_guide.md"]:
+            self.assertEqual(bash(command, profile="chore")[0], 0, command)
+
+    def test_git_prints_no_tracked_credentials(self):
+        with tempfile.TemporaryDirectory() as repo:
+            def git(*a):
+                subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", *a], check=True, capture_output=True)
+            git("init")
+            open(os.path.join(repo, "a.txt"), "w").write("x")
+            git("add", "."); git("commit", "-m", "clean")
+            for command in ["git grep x", "git log -p", "git diff", "git show"]:
+                self.assertEqual(run_in(repo, {"command": command}, profile="chore")[0], 0, command)
+            open(os.path.join(repo, ".env"), "w").write("KEY=1")
+            git("add", "."); git("commit", "-m", "oops")
+            for profile in ("chore", "investigate"):
+                for command in ["git grep KEY", "git log -p", "git log -G KEY", "git diff HEAD~1", "git show"]:
+                    code, said = run_in(repo, {"command": command}, profile=profile)
+                    self.assertEqual(code, 2, command)
+                    self.assertIn(".env", said)
+                for command in ["git log --oneline", "git grep -l KEY", "git grep x -- a.txt", "git log -p -- a.txt", "git show --stat", "git show HEAD:a.txt", "git status"]:
+                    self.assertEqual(run_in(repo, {"command": command}, profile=profile)[0], 0, command)
 
 
 if __name__ == "__main__":

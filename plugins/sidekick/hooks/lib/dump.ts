@@ -9,7 +9,7 @@ import type { Outcome } from '../../types'
 export const DUMP_KEEP = 50
 
 /** Room for each command's output in the record, in characters. */
-const OUTPUT_LIMIT = 4_000
+const OUTPUT_LIMIT = 20_000
 
 export type Call = { command: string; output: string; isError: boolean }
 
@@ -40,6 +40,13 @@ export function redact(text: string): string {
   out = out.replace(BEARER, '$1 [redacted]').replace(NAMED, '$1[redacted]')
   // scheme://user:password@host keeps the user and host.
   return out.replace(/([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:)[^\s@/]+@/gi, '$1[redacted]@')
+}
+
+/** Where a tool result too large for the transcript was saved, when only its preview came back. */
+export function persistedPath(output: string, storeRoot: string): string | undefined {
+  if (!output.trimStart().startsWith('<persisted-output>')) return undefined
+  const path = /saved to: (\S+\.txt)/.exec(output)?.[1]
+  return path !== undefined && path.startsWith(`${storeRoot}/`) && !path.includes('/../') ? path : undefined
 }
 
 function cut(text: string): string {

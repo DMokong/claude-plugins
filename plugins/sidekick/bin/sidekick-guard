@@ -31,6 +31,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 import time
 from functools import lru_cache
@@ -227,6 +228,8 @@ def git_read_refusal(args):
 SECRET_NAMES = {
     ".env", ".mcp.json", ".netrc", ".pgpass", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", ".npmrc", ".git-credentials",
     ".pypirc", ".dockercfg", ".vault-token", ".my.cnf", ".s3cfg", ".boto", ".credentials.json",
+    "secrets.yml", "secrets.yaml", "secrets.json", "secrets.toml", ".secrets", "credentials.json", "credentials.yml",
+    "credentials.yaml", ".htpasswd", "service-account.json", "service_account.json",
 }
 # A name that is only a credentials file inside a particular folder: (folder, name).
 SECRET_PAIRS = {
@@ -235,9 +238,14 @@ SECRET_PAIRS = {
     ("gcloud", "access_tokens.db"),
 }
 SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
+COMMON_ENDINGS = (".json", ".yml", ".yaml", ".toml")
 # A template beside the real file holds placeholders, not secrets.
 TEMPLATE_ENDINGS = ("example", "sample", "template", "dist")
 HOME = os.path.expanduser("~")
+HERDR_ID = re.compile(r"[A-Za-z0-9_:-]+")
+HERDR_MAX_LINES = 200
+HERDR_FIX = f"herdr needs a target from `herdr pane list`: `herdr agent get <id>`, or `herdr pane read <id> --lines N` / `herdr agent read <id> --lines N` with N up to {HERDR_MAX_LINES}"
+HERDR_SOURCES = {"visible", "recent", "recent-unwrapped", "detection"}
 STORE = [c.lower() for c in os.path.join(HOME, ".claude", "projects").split(os.sep) if c]
 
 
@@ -658,6 +666,8 @@ def pattern_hits_secret(elems):
     if named == 0:
         return False
     for secret in SECRET_NAMES:
+        if secret.endswith(COMMON_ENDINGS) and not secret.startswith(".") and elems[0][0] != "lit":
+            continue  # `*.json` is every JSON file, not a search for `secrets.json`
         # A pattern that opens with the dot (or a class that could be one) says enough in one more
         # character; any other needs two of the name's own, so `$v` + "v" is not `.env`.
         opens_with_dot = elems[0][0] == "cls" or elems[0] == ("lit", ".")
@@ -1395,6 +1405,52 @@ def awk_refusal(args):
     return None
 
 
+def herdr_screen_read(args):
+    """`herdr pane read <id> --lines N`, or `agent read`, with a line limit: one bounded look at another session's screen."""
+    target, lines, k = None, None, 0
+    while k < len(args):
+        a = args[k]
+        if a.startswith("--") and "=" in a:
+            a, given = a.split("=", 1)
+        elif a in ("--lines", "--source"):
+            k += 1
+            given = args[k] if k < len(args) else ""
+        else:
+            given = None
+        if a == "--lines" and re.fullmatch(r"[0-9]{1,3}", given or "") and 1 <= int(given) <= HERDR_MAX_LINES:
+            lines = int(given)
+        elif a == "--source" and given in HERDR_SOURCES:
+            pass
+        elif given is None and target is None and HERDR_ID.fullmatch(a) and not a.startswith("-"):
+            target = a
+        else:
+            return False
+        k += 1
+    return target is not None and lines is not None
+
+
+def herdr_is_read(args):
+    """The herdr commands that only look: status, and a bounded look at a screen. None can act on another session."""
+    if args[:2] in (["pane", "read"], ["agent", "read"]):
+        return herdr_screen_read(args[2:])
+    if args in (["--version"], ["--help"]):
+        return True
+    if args[:2] == ["pane", "list"]:
+        return args[2:] == [] or (len(args) == 4 and args[2] == "--workspace" and HERDR_ID.fullmatch(args[3]) is not None)
+    return len(args) == 3 and args[:2] == ["agent", "get"] and HERDR_ID.fullmatch(args[2]) is not None
+
+
+def ps_shows_environment(args):
+    """`ps -E`, `ps e`, `ps auxe`, `ps -Ae`: on macOS and Linux BSD-style `e` adds the environment. `ps -e` alone lists every process."""
+    for a in args:
+        if a.startswith("-"):
+            if not a.startswith("--") and "E" in a:
+                return True
+        elif re.fullmatch(r"[A-Za-z]+", a) and "e" in a:
+            return True
+    return False
+
+
 def simple_refusal(words, profile, check, again):
     """Why one simple command (no pipes or chains left in it) is refused, or None."""
     first = base(words[0])
@@ -1432,8 +1488,14 @@ def simple_refusal(words, profile, check, again):
         return check(args[1:])
     if name in ("setopt", "unsetopt") and args or name == "shopt" and any(letter in "su" for a in args for letter, _ in shorts(a)):
         return "changing the shell's options changes how it expands words"
+    if name == "herdr" and profile == "investigate" and herdr_is_read(args):
+        return None
+    if name == "herdr" and profile == "investigate" and args[:2] in (["pane", "read"], ["agent", "read"], ["agent", "get"]):
+        return HERDR_FIX
     if name in ALWAYS_REFUSED:
         return f"{name} {ALWAYS_REFUSED[name]}"
+    if name == "ps" and ps_shows_environment(args):
+        return "ps with the e option prints each process's environment, secrets included"
     if name == "eval":
         return first_refusal(again, texts(args))
     if name == "trap":
@@ -1640,8 +1702,23 @@ CONTENT_READERS = {
 } | SHELLS
 
 
-def unknown_refusal(words):
-    """An investigation fails closed: a file argument that is only known after the shell expands it."""
+READ_INTO = re.compile(r"\bread\b((?:\s+-[A-Za-z]+(?:\s+[^\s;|&]+)??)*)((?:\s+[A-Za-z_][A-Za-z0-9_]*)*)")
+
+
+def names_read(text):
+    """The variables `read` fills in a command line: what they hold arrives on stdin, out of the guard's sight."""
+    found = set()
+    for match in READ_INTO.finditer(text):
+        found.update(match.group(2).split() or ["REPLY"])
+    return found
+
+
+def holds_a_read(word, names):
+    return any(re.search(r"\$\{?" + re.escape(n) + r"\b", word) for n in names)
+
+
+def unknown_refusal(words, profile="investigate", read_names=()):
+    """A file argument only known after the shell expands it. An investigation fails closed on any; a chore on one filled by `read`, as a chore's other variables are its own."""
     while words and words[0] in KEYWORDS:
         words = words[1:]
     _, words = strip_wrappers(words)
@@ -1651,14 +1728,51 @@ def unknown_refusal(words):
     if name.startswith("g") and name[1:] in G_TOOLS:
         name = name[1:]
     args = words[1:]
-    if name == "git":
+    if name == "git" and profile == "investigate":
         if any(getattr(a, "unknown", False) and ":" in re.sub(r"\$\{[^}]*\}", "", a) for a in args):
             return "a git path only known after the shell expands it"
         return None
-    if name in CONTENT_READERS or interpreter_key(name) in INTERPRETERS:
+    if profile != "investigate":
+        for a in args:
+            if name in SUBST_READERS and not a.startswith("-") and holds_a_read(a, read_names):
+                return f"{name} reads a file named by what `read` was handed, which the guard can't see: {a}"
+    elif name in CONTENT_READERS or interpreter_key(name) in INTERPRETERS:
         for a in args:
             if getattr(a, "unknown", False) and not a.startswith("-"):
                 return f"{name} reads a file only known after the shell expands it: {a}"
+    return None
+
+
+# What prints file contents from git's history or index, unless it is pointed at particular paths.
+GIT_CONTENT_READS = {"grep", "diff", "show", "log"}
+
+
+def tracked_secret_refusal(words, cwd):
+    """git grep, git diff, git show and git log -p print tracked files a name check never sees, so ask git whether a credentials file is one of them."""
+    _, words = strip_wrappers(words)
+    if not words or base(words[0]) != "git":
+        return None
+    _, args = git_command(words)
+    if not args or args[0] not in GIT_CONTENT_READS:
+        return None
+    rest = [str(a) for a in args[1:]]
+    if args[0] == "log" and not any(a in ("-p", "-u", "--patch", "--patch-with-stat", "--patch-with-raw", "-c", "--cc") or a.startswith(("-G", "-S")) for a in rest):
+        return None
+    if args[0] == "grep" and any(a in ("-l", "--files-with-matches", "-c", "--count", "-L", "--files-without-match") for a in rest):
+        return None
+    if "--" in rest:
+        return None  # its paths were judged as paths
+    if args[0] != "grep" and any(a in ("--stat", "--shortstat", "--numstat", "--name-only", "--name-status", "--oneline", "-s", "--no-patch") for a in rest):
+        return None
+    if args[0] == "show" and any(":" in a for a in rest):
+        return None  # `HEAD:README.md` names one file, and a name is judged as a path
+    try:
+        listed = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", git_dir(words, cwd) or cwd or ".", "ls-files", "-z"], capture_output=True, timeout=2, text=True, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return f"git {args[0]} could print a tracked credentials file, and the guard could not check"
+    for path in listed.stdout.split("\0") if listed.returncode == 0 else ():
+        if path and is_secret(path):
+            return f"git {args[0]} prints tracked files and this repository tracks a credentials file: {path} (name the paths after --)"
     return None
 
 
@@ -1857,7 +1971,7 @@ def recursive_refusal(words, state, before=None, profile="chore"):
             if any(base(a) in CONTENT_READERS or interpreter_key(base(a)) in INTERPRETERS for a in inner):
                 roots, keep = find_scope([str(a) for a in previous[1:]])
                 return sweep_refusal("find | xargs", roots, cwd, named=keep)
-        elif profile == "investigate" and any(base(a) in SUBST_READERS for a in args if not a.startswith("-")):
+        elif any(base(a) in SUBST_READERS for a in args if not a.startswith("-")):
             return "xargs hands a reader names that arrive on stdin, which the guard can't see"
     return None
 
@@ -2008,6 +2122,7 @@ def check_text(text, profile, session="", cwd=None, env=None):
         if profile == "investigate":
             return "a command the guard can't parse"
         raw = protected.split()
+    read_names = names_read(text)
     state = State(cwd, session)
     state.env = {k: list(v) for k, v in (env or {}).items()}
 
@@ -2053,8 +2168,10 @@ def check_text(text, profile, session="", cwd=None, env=None):
             why = recursive_refusal(words, state, before, profile)
         if not why:
             why = subst_refusal(words)
-        if not why and profile == "investigate":
-            why = unknown_refusal(words)
+        if not why:
+            why = unknown_refusal(words, profile, read_names)
+        if not why:
+            why = tracked_secret_refusal(words, state.cwd)
         if why:
             return why
         learn(words, raws, state)
@@ -2109,6 +2226,9 @@ def check_text(text, profile, session="", cwd=None, env=None):
 
 
 def refuse(why):
+    if why == HERDR_FIX:
+        sys.stderr.write(f"sidekick guard: {why}. Correct the command and run it again.\n")
+        return 2
     sys.stderr.write(f"sidekick guard: refused ({why}). Stop and report that the main session should handle this.\n")
     return 2
 

@@ -92,6 +92,8 @@ export type EntryStatus =
   | 'shadow'
 
 export type Outcome = {
+  /** One short sentence for the screen. Runs from before it existed have none. */
+  headline?: string
   status: 'done' | 'partial' | 'stopped' | 'failed'
   summary: string
   commands: string[]
@@ -132,6 +134,30 @@ export type Entry = {
   workerSpend: Tally
   /** Where an investigation's full record was written; empty for chores and older entries. */
   dump: string
+}
+
+/** One tool call of the main session or its subagents, as the session did it. */
+export type PeekStep = {
+  id: string
+  tool: string
+  detail: string
+  status: 'running' | 'done' | 'failed'
+  isAgent: boolean
+  at: number
+  endedAt: number
+}
+
+/** What the person asked to see of the main session, and the log it is told from. */
+export type Peek = {
+  steps: PeekStep[]
+  turnStartedAt: number
+  turnEndedAt: number
+  isOpen: boolean
+  isAsking: boolean
+  /** Showing the step by step rather than the summary. */
+  isSteps: boolean
+  summary: string
+  askedAt: number
 }
 
 /** A prompt bound for the main session, held while assists run. */
@@ -188,6 +214,10 @@ declare module 'claude-code' {
       sidekick: SidekickState
       /** Counts the pet's frames; kept apart so its redraws touch nothing else. */
       petBeat: number
+      /** The session's steps and the answer to asking about them; kept apart so a tool call redraws nothing else. */
+      peek: Peek
+      /** Which jobs' boxes in the chat are expanded. */
+      openBoxes: string[]
     }
   }
 }
