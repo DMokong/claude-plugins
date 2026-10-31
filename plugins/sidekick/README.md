@@ -329,10 +329,24 @@ starting to type: it never stands between you and the prompt.
 | **JUDGE**, **WORKER** | Which model judges and which does the work: Haiku or Sonnet. No Opus worker: work worth Opus belongs in the main session |
 | **PET** | Off, Mochi the quokka or Tater the capybara, in the terminal (see [Pets](#pets)) |
 | **Investigations** | Whether "look into it" messages go to the sidekick (see [Looking into things](#looking-into-things)) |
+| **Reviews** | After Claude finishes a message the judge left with it, a cheap call asks whether the sidekick could have done it. See [Learning from Claude's work](#learning-from-claudes-work). About $0.002 a review. |
 | **Draft judging** | Judge while you type, so Enter is instant. Each pause costs about $0.0001, which is the small cost that ticks up while you type. Off: messages are judged when sent, within 5 s |
 | **Notifications** | A system notification when a job finishes; the chat line and band say it either way |
 | **Side by side** | How many chores in different repos may run at once (1–3) |
 | **LAUNCH** | Dashboard · What it learned · the last investigation record · give the last job to Claude · Reset to defaults |
+
+### Learning from Claude's work
+
+When the judge leaves a message with Claude and Claude finishes it, the sidekick reviews the job: given only what the worker would have, could it have done this? Turns that used no tools, more than 25 tools, or tools the worker lacks are settled without spending a call. Long or multi-line messages are never reviewed, since they never reach the judge.
+
+If the answer is a confident yes, a card above the prompt recommends it:
+
+- **Yes** adds it to the learned list, with guidance drawn from what Claude did. The judge sends messages like it to the sidekick, and the worker is told that guidance on jobs like it.
+- **No** teaches the judge that this kind stays with Claude.
+- **Ignore** doesn't ask about that message again.
+- **Adjust** says yes, then puts `/sidekick teach <n> <guidance>` in the prompt for you to reword.
+
+When a job matches something already learned, the card offers to improve the guidance in place. The pane's learned view shows the guidance in full, before and after you answer, with **adjust** on every entry. Guidance never overrides the worker's safety rules.
 
 ### Pets
 
@@ -695,6 +709,7 @@ and rendered to SVG.
 
 | Version | |
 |---|---|
+| **0.7.0** | Reviews: after Claude finishes a message the judge left with it, a cheap call asks whether the sidekick could have done it. Yes, No, Ignore or Adjust on the card teaches it, with guidance the worker follows on jobs like it, and refines what it already knows. `/sidekick teach <n> <guidance>`. |
 | **0.6.1** | With the panel open and nothing to do, the pet plays beside it. The pane's pet wanders now and then. A finished job's outcome, or the judge's answer when it leaves a message with Claude, stays above the prompt for 15 seconds. The PET chips share the MODE row when they fit. The pets are now Mochi the quokka and Tater the capybara, and a pet you chose under its old name stays chosen. Above the prompt the pet only comes out while the sidekick thinks or works, on the right and without taking a row; the Sidekick pane keeps it animated whenever it's on, a 🐾 button on the sidekick's line shows and changes the pet, the panel shows the version, and hopping, hauling and sweeping now walk up and down. |
 | **0.6.0** | Pets: Kiki the quokka or Ibara the capybara above the prompt, off by default, chosen in the panel's PET row or with `/sidekick pet`. They follow the sidekick's work, in the terminal only. |
 | **0.5.5** | Draws on engines before 2.1.308: a plainer terminal panel and a prompt to update; graphical surfaces show only the update message. |

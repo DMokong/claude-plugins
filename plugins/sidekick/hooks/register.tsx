@@ -4,6 +4,7 @@ import type { ElementTable, EngineInterface, PromptSubmitInput, PromptSubmitResu
 import { MAX_MISSES, canStart, holdsMain, judgePrompt, judgeSystem, lockKeys, parseJudgment, precheck, taughtVerdict } from './lib/judge'
 import type { Judgment } from './lib/judge'
 import { NO_SPEND, addTally, modelName, tallyLine, tallyOf, tokens, usd } from './lib/cost'
+import { guidanceFor, learnSuggestion, needsNoReview, parseReview, REVIEW_SYSTEM, reviewPrompt, toolUsesSince } from './lib/review'
 import { migrate, toTaught } from './lib/state'
 import { HISTORY_KEY, NO_TOTALS, appendRow, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals, weekStart } from './lib/history'
 import type { HistoryRow } from './lib/history'
@@ -24,7 +25,7 @@ import {
   workerArgv,
   workerInput,
 } from './lib/worker'
-import type { Entry, EntryStatus, Mode, Outcome, Profile, Settings, SidekickState, Taught, Tally } from '../types'
+import type { Entry, EntryStatus, Mode, Outcome, Profile, Settings, SidekickState, Suggestion, Taught, Tally } from '../types'
 
 export const EMPTY: SidekickState = {
   mode: 'off',
@@ -37,6 +38,7 @@ export const EMPTY: SidekickState = {
   tick: 0,
   isWarming: false,
   learned: [],
+  suggestions: [],
   instructions: null,
   settings: defaultsFrom({}),
   panelOpen: false,
@@ -394,8 +396,10 @@ async function setSetting<K extends keyof Settings>($: EngineInterface, key: K, 
   await refreshSettings($)
 }
 
+type OnOffSetting = 'investigations' | 'draftJudging' | 'reviews' | 'notifications'
+
 /** Flips one on/off setting from its value now, which another session may have changed. */
-async function toggleSetting($: EngineInterface, key: 'investigations' | 'draftJudging' | 'notifications'): Promise<void> {
+async function toggleSetting($: EngineInterface, key: OnOffSetting): Promise<void> {
   await refreshSettings($)
   await setSetting($, key, !live[key])
 }
@@ -540,7 +544,7 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
     argv: workerArgv(entry.backend, guardPath, instructions ?? [], entry.kind),
     cwd,
     env: { DMOKONG_MODS: '0', SIDEKICK_WORKER: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1' },
-    input: workerInput(entry.task, entry.prompt),
+    input: workerInput(entry.task, entry.prompt, guidanceFor(misses, entry.prompt)),
   })
   const stop = () => {
     isStopped = true
@@ -767,6 +771,69 @@ async function markMissed($: EngineInterface, id: string): Promise<void> {
   $.ui.toast(`Noted: messages like "${clip(entry.prompt, 40)}" go to the sidekick (${verdictLabel(verdict)}) from now on`)
 }
 
+/** The last message the judge left with the main session, until its turn is reviewed. */
+let awaitingReview: string | null = null
+const REVIEWED_KEY = 'review-ignored'
+const REVIEW_TIMEOUT_MS = 30_000
+const MAX_SUGGESTIONS = 5
+
+const normalized = (text: string) => text.trim().toLowerCase().replace(/\s+/g, ' ')
+
+/** After the main session's turn: could the sidekick have done it? Never holds the turn up; failure asks nothing. */
+async function reviewTurn($: EngineInterface, prompt: string, answer: string): Promise<void> {
+  const state = await load($)
+  if (state.suggestions.some(s => s.prompt === prompt) || state.suggestions.length >= MAX_SUGGESTIONS) return
+  const ignored = await $.store.get(REVIEWED_KEY).catch(() => undefined)
+  if (Array.isArray(ignored) && ignored.includes(normalized(prompt))) return
+  const known = await storedMisses($)
+  if (known.some(t => t.verdict === 'needs-main' && normalized(t.text) === normalized(prompt))) return
+  const uses = toolUsesSince(await $.session.messages(), prompt)
+  if (uses === null || needsNoReview(uses) !== null) return
+  const reply = await $.model.complete({ model: live.judgeModel, system: REVIEW_SYSTEM, prompt: reviewPrompt(prompt, uses, answer, known), maxTokens: 500, timeoutMs: REVIEW_TIMEOUT_MS })
+  const spent = tallyOf(live.judgeModel, reply.usage)
+  await addSpend($, spent)
+  await record($, { at: 0, kind: 'draft', status: 'passed', ms: 0, judgeUsd: spent.usd, workerUsd: 0, savedUsd: 0, id: 'draft', count: 1 })
+  if (!reply.isAnswered) return
+  const suggestion = parseReview(reply.text, `s-${await $.clock.now()}`, prompt, known)
+  if (suggestion === null) return
+  await change($, s => ({ ...s, suggestions: [...s.suggestions, suggestion] }))
+  const said = `${suggestion.refines === null ? 'The sidekick could have done' : 'The sidekick could do better at'} "${clip(prompt, 50)}": see above the prompt`
+  $.ui.log(`✎ ${said}`)
+  if (live.notifications) $.ui.toast(said)
+}
+
+const dropSuggestion = ($: EngineInterface, id: string) => change($, s => ({ ...s, suggestions: s.suggestions.filter(x => x.id !== id) }))
+
+/** Yes teaches it, guidance and all; no says this kind stays with the main session; ignore just won't ask again. */
+async function answerSuggestion($: EngineInterface, s: Suggestion, answer: 'yes' | 'no' | 'ignore'): Promise<void> {
+  await dropSuggestion($, s.id)
+  const known = await storedMisses($)
+  if (answer === 'yes') {
+    await setLearned($, learnSuggestion(known, s))
+    $.ui.toast(s.refines === null ? `Learned: "${clip(s.prompt, 40)}" goes to the sidekick from now on` : `Refined what the sidekick knows about "${clip(s.refines, 40)}"`)
+  } else if (answer === 'no' && s.refines === null) {
+    await setLearned($, [...known.filter(t => t.text !== s.prompt), { text: s.prompt, verdict: 'needs-main' }])
+    $.ui.toast(`Noted: messages like "${clip(s.prompt, 40)}" stay with Claude`)
+  } else {
+    const prior = await $.store.get(REVIEWED_KEY).catch(() => undefined)
+    await $.store.set(REVIEWED_KEY, [...(Array.isArray(prior) ? prior : []), normalized(s.prompt)].slice(-200))
+  }
+}
+
+/** Puts a command in the prompt to edit an entry's guidance by hand; `/sidekick teach` is what saves it. */
+function fillTeach($: EngineInterface, text: string, guidance: string): void {
+  void storedMisses($).then(list => {
+    const n = [...list].reverse().findIndex(t => t.text === text) + 1
+    return $.prompt.fill({ text: `/sidekick teach ${n} ${guidance}`, mode: 'replace' })
+  }).catch(() => {})
+}
+
+/** Takes the suggestion, so there is an entry, then lets the person reword what it says. */
+async function adjustSuggestion($: EngineInterface, s: Suggestion): Promise<void> {
+  await answerSuggestion($, s, 'yes')
+  fillTeach($, s.refines ?? s.prompt, s.guidance)
+}
+
 /** Drops one correction (or all of them) so the judge stops following it. */
 async function forget($: EngineInterface, which: string | 'all'): Promise<number> {
   const known = await storedMisses($)
@@ -776,7 +843,7 @@ async function forget($: EngineInterface, which: string | 'all'): Promise<number
 }
 
 /** `/sidekick learned`: every stored correction, newest first, numbered for `/sidekick forget <n>`. */
-const verdictLabel = (verdict: Taught['verdict']): string => (verdict === 'investigate' ? 'investigate' : 'chore')
+const verdictLabel = (verdict: Taught['verdict']): string => (verdict === 'investigate' ? 'investigate' : verdict === 'needs-main' ? 'stays with Claude' : 'chore')
 
 function learnedText(list: readonly Taught[]): string {
   if (list.length === 0) return "The judge has learned nothing yet. Press should've been sidekick on a TO CLAUDE entry to teach it."
@@ -879,7 +946,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'sidekick',
       description: 'Sidekick for this session: hand mechanical chores (git, bd) to a cheap worker',
-      argumentHint: '[auto|shadow|off|learned|forget <n|all>|pet [off|mochi|tater]]',
+      argumentHint: '[auto|shadow|off|learned|forget <n|all>|teach <n> <text>|pet [off|mochi|tater]]',
     })
     return next(e)
   })
@@ -925,6 +992,17 @@ export const register: Register = (on, options) => {
       await forget($, target.text)
       return { text: `Forgot "${clip(target.text, 60)}"; the judge no longer follows it.` }
     }
+    if (arg.startsWith('teach')) {
+      // From what was typed: `arg` is lowercased, and this is the person's own wording.
+      const [, which = '', ...rest] = (e.args ?? '').trim().split(/\s+/)
+      const list = await storedMisses($)
+      const target = [...list].reverse()[Number(which) - 1]
+      if (target === undefined || target.verdict === 'needs-main') return { text: 'Usage: /sidekick teach <n> <what the worker should know>. /sidekick learned shows the numbers.' }
+      const guidance = rest.join(' ').trim()
+      const { guidance: _old, ...plain } = target
+      await setLearned($, list.map(t => (t.text === target.text ? (guidance === '' ? plain : { ...plain, guidance }) : t)))
+      return { text: guidance === '' ? `Cleared what the worker is told about "${clip(target.text, 60)}".` : `The worker will follow that for jobs like "${clip(target.text, 60)}".` }
+    }
     if (arg === 'pet' || arg.startsWith('pet ')) {
       const what = arg.slice('pet'.length).trim()
       if (what === '') return { text: `Your pet is ${live.pet}. /sidekick pet off, mochi (the quokka) or tater (the capybara).` }
@@ -933,7 +1011,7 @@ export const register: Register = (on, options) => {
       return { text: what === 'off' ? 'Pet hidden.' : `${what === 'mochi' ? 'Mochi the quokka' : 'Tater the capybara'} is with you, above the prompt.` }
     }
     const asked: Mode | null = arg === 'auto' ? 'auto' : arg === 'off' ? 'off' : arg === 'on' || arg === 'shadow' ? 'shadow' : null
-    if (arg !== '' && asked === null) return { text: 'Usage: /sidekick [auto|shadow|off|learned|forget <n|all>|pet [off|mochi|tater]]' }
+    if (arg !== '' && asked === null) return { text: 'Usage: /sidekick [auto|shadow|off|learned|forget <n|all>|teach <n> <text>|pet [off|mochi|tater]]' }
     if (asked !== null) await setMode($, asked)
     const { mode } = await load($)
     if (mode !== 'off') await $.ui.open({ id: PANE, title: 'Sidekick', rows: PANE_ROWS })
@@ -994,6 +1072,7 @@ export const register: Register = (on, options) => {
     if (routed.verdict !== 'mechanical' && routed.verdict !== 'investigate') {
       const endedAt = await $.clock.now()
       await patchEntry($, id, () => ({ status: 'passed', endedAt }))
+      awaitingReview = e.text.trim()
       redrawAfterLinger($)
       await change($, s => ({ ...s, totals: { ...s.totals, passed: s.totals.passed + 1 } }))
       await record($, { at: 0, kind: 'to-claude', status: 'passed', ms, judgeUsd: spend.usd, workerUsd: 0, savedUsd: 0, id })
@@ -1006,6 +1085,14 @@ export const register: Register = (on, options) => {
     const doing = routed.verdict === 'investigate' ? ' · investigating' : ''
     return { drop: `❯ ${e.text} → sidekick (${live.workerModel})${doing} · judged in ${(ms / 1000).toFixed(1)}s` }
   }).catch(($, e, next) => next(e)) // fail open: any error lets the prompt through as typed
+
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    const prompt = awaitingReview
+    if (e.agentId === undefined) awaitingReview = null
+    if (e.agentId === undefined && prompt !== null && e.reason === 'answer' && live.reviews) void reviewTurn($, prompt, e.answer).catch(() => {})
+    return result
+  })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const elements = $.ui.resolve(e)
@@ -1192,14 +1279,35 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column">
           {header(back, 6)}
+          {state.suggestions.map(s => (
+            <Box key={`sg-${s.id}`} flexDirection="column" marginBottom={1}>
+              <Text bold color={COLORS.purple}>{`${s.refines === null ? '✎ could learn' : '✎ could improve'}: ${clip(s.prompt, width - 22)}`}</Text>
+              <Text dimColor>{s.reason}</Text>
+              <Text>{`Would tell the worker: ${s.guidance}`}</Text>
+              <Box flexWrap="wrap">
+                <Button key={`sg-yes-${s.id}`} label="yes" plain onPress={() => void answerSuggestion($, s, 'yes')} />
+                <Text dimColor> · </Text>
+                <Button key={`sg-no-${s.id}`} label="no" plain onPress={() => void answerSuggestion($, s, 'no')} />
+                <Text dimColor> · </Text>
+                <Button key={`sg-ignore-${s.id}`} label="ignore" plain onPress={() => void answerSuggestion($, s, 'ignore')} />
+                <Text dimColor> · </Text>
+                <Button key={`sg-adjust-${s.id}`} label="adjust" plain onPress={() => void adjustSuggestion($, s)} />
+              </Box>
+            </Box>
+          ))}
           {rule('lh', 'LEARNED', `${state.learned.length} stored`)}
           {learned.length === 0 && <Text dimColor>{"Nothing yet. Press should've been sidekick on a job that went to Claude."}</Text>}
           {learned.map(m => (
-            <Box key={`l-${m.text}`} flexWrap="nowrap">
-              <Text color={m.verdict === 'investigate' ? COLORS.orange : COLORS.yellow}>{`✎ [${verdictLabel(m.verdict)}] `}</Text>
-              <Text>{clip(m.text.replace(/\s+/g, ' '), width - 30)}</Text>
-              <Box flexGrow={1} />
-              <Button key={`forget-${m.text}`} label="forget" plain onPress={() => void forget($, m.text)} />
+            <Box key={`l-${m.text}`} flexDirection="column">
+              <Box flexWrap="nowrap">
+                <Text color={m.verdict === 'investigate' ? COLORS.orange : COLORS.yellow}>{`✎ [${verdictLabel(m.verdict)}] `}</Text>
+                <Text>{clip(m.text.replace(/\s+/g, ' '), width - 46)}</Text>
+                <Box flexGrow={1} />
+                {m.verdict !== 'needs-main' && <Button key={`adjust-${m.text}`} label="adjust" plain onPress={() => fillTeach($, m.text, m.guidance ?? '')} />}
+                {m.verdict !== 'needs-main' && <Text dimColor> · </Text>}
+                <Button key={`forget-${m.text}`} label="forget" plain onPress={() => void forget($, m.text)} />
+              </Box>
+              {m.guidance !== undefined && <Text dimColor>{`    ${m.guidance}`}</Text>}
             </Box>
           ))}
           {state.learned.length > learned.length && <Text dimColor>{`+${state.learned.length - learned.length} older, stored but not used · /sidekick learned`}</Text>}
@@ -1641,6 +1749,21 @@ export const register: Register = (on, options) => {
       </Box>
     )
 
+    const suggestion = state.suggestions[0]
+    const answerChips = (s: Suggestion) =>
+      (
+        [
+          ['yes', 'Yes', COLORS.green, () => void answerSuggestion($, s, 'yes')],
+          ['no', 'No', COLORS.yellow, () => void answerSuggestion($, s, 'no')],
+          ['ignore', 'Ignore', COLORS.dim, () => void answerSuggestion($, s, 'ignore')],
+          ['adjust', 'Adjust', COLORS.blue, () => void adjustSuggestion($, s)],
+        ] as const
+      ).flatMap(([key, label, color, act]) => [
+        <Button key={`card-${key}`} label={label} plain onPress={act}>
+          <Text bold color={color}>{` ${label} `}</Text>
+        </Button>,
+        <Text key={`card-gap-${key}`}> </Text>,
+      ])
     // ── the live job card (image 1): the running job, its latest command, what comes next
     const ageOf = (entry: Entry) => Math.max(0, Math.round((now - (entry.startedAt || entry.createdAt)) / 1000))
     const block = (entry: Entry) => {
@@ -1698,6 +1821,17 @@ export const register: Register = (on, options) => {
           <Text wrap="truncate-end">{clip(finished.outcome?.summary ?? entryDetail(finished, now), cardWidth - 6)}</Text>
           <Text dimColor>{`○ ${finished.status} ${Math.max(0, Math.round((now - finished.endedAt) / 1000))}s ago`}</Text>
         </Box>
+      ) : suggestion !== undefined && !state.panelOpen ? (
+        <Box key="sk-card" flexDirection="column" borderStyle="round" borderColor={COLORS.purple} paddingX={1}>
+          <Box flexWrap="nowrap">
+            <Text color={COLORS.purple}>{'✎ '}</Text>
+            <Text bold>{clip(`${suggestion.refines === null ? 'Teach the sidekick' : 'Improve the sidekick at'}: ${suggestion.prompt}`, cardWidth - 8)}</Text>
+          </Box>
+          <Text wrap="truncate-end">{clip(suggestion.reason, cardWidth - 6)}</Text>
+          <Box flexWrap="nowrap">
+            {answerChips(suggestion)}
+          </Box>
+        </Box>
       ) : null
 
     // ── the control panel (image 3)
@@ -1753,7 +1887,7 @@ export const register: Register = (on, options) => {
         {control as never}
       </Box>
     )
-    const toggle = (key: 'investigations' | 'draftJudging' | 'notifications') => pill(`set-${key}`, state.settings[key], () => void toggleSetting($, key))
+    const toggle = (key: OnOffSetting) => pill(`set-${key}`, state.settings[key], () => void toggleSetting($, key))
     const lastDump = state.entries.find(x => x.dump !== '')
     const lastDone = state.entries.find(x => x.status === 'done' || x.status === 'stopped' || x.status === 'failed')
     const openPane = (view: SidekickState['view']) => {
@@ -1834,6 +1968,7 @@ export const register: Register = (on, options) => {
         {!isTight && rule('r1', 'SETTINGS')}
         {settingRow('investigations', 'Investigations', 'look into services, restart in place', toggle('investigations'))}
         {settingRow('draftJudging', 'Draft judging', 'judge as you type · ≈$0.0001 a pause', toggle('draftJudging'))}
+        {settingRow('reviews', 'Reviews', 'could it have done Claude\'s job? · ≈$0.002', toggle('reviews'))}
         {settingRow('notifications', 'Notifications', 'a ping when a job finishes', toggle('notifications'))}
         {settingRow(
           'maxConcurrent',
@@ -1897,7 +2032,7 @@ export const register: Register = (on, options) => {
         { value: 'auto', label: 'Auto' },
       ]
       const modelOptions = (chips: typeof JUDGE_CHIPS, field: 'judgeModel' | 'workerModel') => chipsFor(chips, state.settings[field]).map(([label, alias]) => ({ value: alias, label }))
-      const setting = (key: 'investigations' | 'draftJudging' | 'notifications', name: string) =>
+      const setting = (key: OnOffSetting, name: string) =>
         tool(`set-${key}`, () => void toggleSetting($, key), [
           { text: state.settings[key] ? '● ' : '○ ', color: state.settings[key] ? COLORS.green : undefined, dimColor: !state.settings[key] },
           { text: name, dimColor: !state.settings[key] },
@@ -1918,6 +2053,7 @@ export const register: Register = (on, options) => {
           <Box key="row-settings" flexWrap="wrap" alignItems="center" columnGap="md" rowGap="xs">
             {setting('investigations', 'Investigations')}
             {setting('draftJudging', 'Draft judging')}
+            {setting('reviews', 'Reviews')}
             {setting('notifications', 'Notifications')}
             <Box flexGrow={1} />
             {launch.map(item =>
@@ -1962,7 +2098,16 @@ export const register: Register = (on, options) => {
       )
       return (
         <Box flexDirection="column" rowGap="xs">
-          {richCard}
+          {richCard ??
+            (suggestion !== undefined && !state.panelOpen && (
+              <Box key="sk-card" flexDirection="column" borderStyle="round" borderColor={COLORS.line} paddingX={1} rowGap="xs">
+                <Text bold wrap="truncate-end">{`${suggestion.refines === null ? 'Teach the sidekick' : 'Improve the sidekick at'}: ${suggestion.prompt}`}</Text>
+                <Text dimColor wrap="truncate-end">{suggestion.reason}</Text>
+                <Box flexWrap="wrap" columnGap="sm">
+                  {answerChips(suggestion)}
+                </Box>
+              </Box>
+            ))}
           {richPanel !== null && (
             <Box key="sk-panel-row" flexWrap="nowrap">
               <Box flexGrow={1} />

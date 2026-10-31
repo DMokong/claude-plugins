@@ -21,6 +21,8 @@ export type Settings = {
   workerModel: string
   investigations: boolean
   draftJudging: boolean
+  /** Whether finished main-session turns are reviewed for work the sidekick could learn. */
+  reviews: boolean
   notifications: boolean
   maxConcurrent: number
   /** Which pet keeps you company above the prompt, in the terminal; off for none. */
@@ -48,7 +50,26 @@ export type Verdict = 'mechanical' | 'investigate' | 'needs-main' | 'unclear'
 export type Profile = 'chore' | 'investigate'
 
 /** One "should've been sidekick" correction, and the verdict it teaches the judge. */
-export type Taught = { text: string; verdict: 'mechanical' | 'investigate' }
+export type Taught = {
+  text: string
+  /** `needs-main`: the person said this kind of message stays with the main session. */
+  verdict: 'mechanical' | 'investigate' | 'needs-main'
+  /** What the worker is told about doing this kind of job, once the person has approved it. */
+  guidance?: string
+  /** Other messages of the same kind, from refinements. */
+  examples?: string[]
+}
+
+/** A review's recommendation that the sidekick could have done a main-session job, waiting on the person. */
+export type Suggestion = {
+  id: string
+  prompt: string
+  verdict: 'mechanical' | 'investigate'
+  reason: string
+  guidance: string
+  /** The learned entry's text this would improve; null for a new one. */
+  refines: string | null
+}
 
 export type EntryStatus =
   | 'judging'
@@ -123,6 +144,8 @@ export type SidekickState = {
   isWarming: boolean
   /** The "should've been sidekick" corrections the judge learns from, oldest first; a copy of the stored list, so the pane redraws when one is added or forgotten. */
   learned: Taught[]
+  /** Reviews waiting on the person's answer, oldest first. */
+  suggestions: Suggestion[]
   /**
    * The main session's instruction files, captured when it built its context; the worker gets the
    * same. Null until that happens in a conversation this mod saw (it is redone after a compaction or /clear).

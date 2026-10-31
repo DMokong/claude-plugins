@@ -16,6 +16,8 @@ const TYPED = { origin: { kind: 'composer' }, wait: false } as const
 type World = {
   /** What the judge model replies; a number delays the reply by that many ms first. */
   judge: string
+  /** What a review of a finished main-session turn answers. */
+  review?: string
   judgeDelayMs?: number
   /** What the worker's final result line carries. */
   worker: string
@@ -74,6 +76,7 @@ function world(on: On, w: World) {
     release: () => release(),
   }
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('turn.complete', async () => ({ text: '' }))
   // The engine's own answer to a context build: the blocks it was given.
   on('prompt.context', async (_$, e) => ({ blocks: e.blocks }))
   on('command.register', async (_$, e) => ({ value: { command: e.name } }))
@@ -115,6 +118,10 @@ function world(on: On, w: World) {
     return { value: { exitCode: 0, stdout: out, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('model.complete', async ($, e) => {
+    if (typeof e.system === 'string' && e.system.startsWith('You review')) {
+      reviews.push(e.prompt)
+      return { value: { isAnswered: true, text: w.review ?? '', usage: { input_tokens: 500, output_tokens: 50 } } } as never
+    }
     seen.judged += 1
     if (e.prompt.includes('<message>')) {
       seen.judgments.push(e.prompt)
@@ -593,7 +600,7 @@ test('the toggle opens the control panel; its chips and pills change the session
     expect((await state($)).settings.maxConcurrent).toBe(n)
   }
   await ui.press({ key: 'launch-reset' })
-  expect((await state($)).settings).toEqual({ judgeModel: 'haiku', workerModel: 'haiku', investigations: true, draftJudging: true, notifications: true, maxConcurrent: 1, pet: 'off' })
+  expect((await state($)).settings).toEqual({ judgeModel: 'haiku', workerModel: 'haiku', investigations: true, draftJudging: true, reviews: true, notifications: true, maxConcurrent: 1, pet: 'off' })
   expect(seen.store.get('settings')).toEqual({})
   await ui.press({ key: 'band-toggle' })
   expect((await state($)).panelOpen).toBe(false)
@@ -1459,6 +1466,97 @@ test('the pet chips share the mode row when the panel is wide, saving a row', as
   const row = (within(tree, 'sk-panel')!.children ?? []).filter((c): c is Node => typeof c !== 'string').find(c => within(c, 'mode-auto') !== undefined)!
   expect(within(row, 'pet-mochi')).toBeDefined()
   await ui.unmount()
+})
+
+const reviews: string[] = []
+const REVIEW = (over: object = {}) => JSON.stringify({ could: true, confidence: 0.9, kind: 'chore', reason: 'Routine git steps.', guidance: 'Pull before tagging.', refines: null, ...over })
+
+function reviewWorld(on: On, reply: string, tools = [{ tool_use_id: '1', tool: 'Bash', input: { command: 'git tag v1' } }], stored: Record<string, unknown> = {}) {
+  reviews.length = 0
+  const seen = world(on, { judge: NEEDS_MAIN, review: reply, worker: DONE, stored })
+  on('session.messages', async () => ({ value: [{ role: 'user', text: 'tag the release', toolUses: [] }, { role: 'assistant', text: '', toolUses: tools }] }) as never)
+  underBand(on)
+  return { seen }
+}
+
+async function finishTurn($: never, prompt = 'tag the release') {
+  const api = $ as { session: { start: (x: unknown) => Promise<unknown> }; command: { run: (x: unknown) => Promise<unknown> }; prompt: { submit: (x: unknown) => Promise<unknown> }; turn: { complete: (x: unknown) => Promise<unknown> } }
+  await api.session.start(START)
+  await api.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' })
+  await clock.advance(1_000)
+  await api.prompt.submit({ text: prompt, ...TYPED })
+  await api.turn.complete({ answer: 'Tagged.', durationMs: 1000, isAborted: false, turnId: 't', reason: 'answer' })
+  // Past the judge's own card, which goes first.
+  await clock.advance(16_000)
+}
+
+test('a finished main-session job the sidekick could do gets a card; yes teaches it with guidance', async ($, on) => {
+  const { seen } = reviewWorld(on, REVIEW())
+  await finishTurn($ as never)
+  expect(reviews).toHaveLength(1)
+  expect(seen.toasts.some(t => t.includes('could have done'))).toBe(true)
+  const ui = await $.ui.mount(BAND(100, 30))
+  expect(await ui.find({ type: 'Text', text: /Teach the sidekick: tag the release/ })).toBeDefined()
+  await ui.press({ key: 'card-yes' })
+  expect((await state($)).suggestions).toEqual([])
+  expect(seen.store.get('missed')).toEqual([{ text: 'tag the release', verdict: 'mechanical', guidance: 'Pull before tagging.' }])
+  await ui.unmount()
+})
+
+test('no teaches that it stays with Claude; ignore never asks again; either way the card goes', async ($, on) => {
+  const { seen } = reviewWorld(on, REVIEW())
+  await finishTurn($ as never)
+  const ui = await $.ui.mount(BAND(100, 30))
+  await ui.press({ key: 'card-ignore' })
+  expect((await state($)).suggestions).toEqual([])
+  expect(seen.store.get('missed')).toBeUndefined()
+  await $.prompt.submit({ text: 'tag the release', ...TYPED })
+  await ($ as never as { turn: { complete: (x: unknown) => Promise<unknown> } }).turn.complete({ answer: 'x', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(10)
+  expect(reviews).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('no on a new suggestion stays with Claude, and the judge is told', async ($, on) => {
+  const { seen } = reviewWorld(on, REVIEW())
+  await finishTurn($ as never)
+  const ui = await $.ui.mount(BAND(100, 30))
+  await ui.press({ key: 'card-no' })
+  expect(seen.store.get('missed')).toEqual([{ text: 'tag the release', verdict: 'needs-main' }])
+  await ui.unmount()
+})
+
+test('a refinement improves the entry in place, and adjust opens it for rewording', async ($, on) => {
+  const filled: string[] = []
+  const { seen } = reviewWorld(on, REVIEW({ refines: 1 }), undefined, { missed: [{ text: 'tag a release', verdict: 'mechanical', guidance: 'old' }] })
+  on('prompt.fill', async (_$, e) => {
+    filled.push(e.text)
+    return { isFilled: true } as never
+  })
+  await finishTurn($ as never)
+  const ui = await $.ui.mount(BAND(100, 30))
+  expect(await ui.find({ type: 'Text', text: /Improve the sidekick at/ })).toBeDefined()
+  await ui.press({ key: 'card-adjust' })
+  await clock.advance(10)
+  expect(seen.store.get('missed')).toEqual([{ text: 'tag a release', verdict: 'mechanical', guidance: 'Pull before tagging.', examples: ['tag the release'] }])
+  expect(filled).toEqual(['/sidekick teach 1 Pull before tagging.'])
+  const run = async (args: string) => ((await $.command.run({ command: 'sidekick', args, origin: { kind: 'composer' }, presentation: 'inline' } as never)) as { text: string }).text
+  expect(await run('teach 1 Tag from main only.')).toContain('tag a release')
+  expect(seen.store.get('missed')).toEqual([{ text: 'tag a release', verdict: 'mechanical', guidance: 'Tag from main only.', examples: ['tag the release'] }])
+  expect(await run('teach 9 x')).toContain('Usage')
+  await ui.unmount()
+})
+
+test('no review is spent on a job beyond the worker or an interrupted turn', async ($, on) => {
+  reviewWorld(on, REVIEW(), [{ tool_use_id: '1', tool: 'Edit', input: {} }])
+  await finishTurn($ as never)
+  expect(reviews).toEqual([])
+  expect((await state($)).suggestions).toEqual([])
+  const turn = ($ as never as { turn: { complete: (x: unknown) => Promise<unknown> } }).turn
+  await $.prompt.submit({ text: 'tag the release', ...TYPED })
+  await turn.complete({ answer: 'x', durationMs: 1, isAborted: true, turnId: 't3', reason: 'aborted' })
+  await clock.advance(10)
+  expect(reviews).toEqual([])
 })
 
 test('beside the open panel an idle pet plays, given the room, and not during a job', async ($, on) => {
