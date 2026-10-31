@@ -1696,6 +1696,7 @@ export const register: Register = (on, options) => {
         { key: 'learned', label: 'learned', text: `${state.learned.length}${state.suggestions.length > 0 ? ` · ${state.suggestions.length} to review` : ''}` },
         { key: 'last', label: 'last', text: last === undefined ? 'nothing yet' : `${markOf(last).mark} ${last.prompt.replace(/\s+/g, ' ')}`, note: last === undefined || last.endedAt === 0 ? '' : ` · ${agoText(now - last.endedAt)}` },
       ]
+      const [name = '', note = ''] = mood.caption.split(' · ')
       const factRoom = width - lane - 1 - 8
       panePet = (
         <Box key="sk-pane-pet" gap={1} marginTop={1} flexWrap="nowrap">
@@ -1703,7 +1704,10 @@ export const register: Register = (on, options) => {
             <Raster key={`sk-pane-pet-${state.settings.pet}`} columns={art.columns} rows={art.rows} cells={art.cells} />
           </Box>
           <Box key="sk-pane-facts" flexDirection="column">
-            <Text dimColor>{mood.caption}</Text>
+            <Box key="sk-pane-caption" flexWrap="nowrap">
+              <Text bold color={COLORS.yellow}>{name}</Text>
+              <Text color={COLORS.purple}>{` ${note}`}</Text>
+            </Box>
             {factRoom >= 12 && facts.map(fact => (
               <Box key={`sk-fact-${fact.key}`} flexWrap="nowrap">
                 <Text dimColor>{fact.label.padEnd(8)}</Text>
