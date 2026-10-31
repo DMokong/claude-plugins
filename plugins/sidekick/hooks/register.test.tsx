@@ -2033,3 +2033,65 @@ test('a history write the store lost is made again', async ($, on) => {
   expect(lost.count).toBe(0)
   expect(storedRows(seen).filter(r => r.kind === 'chore').length).toBe(1)
 })
+
+test('send now pressed as the held prompts are released sends the prompt once', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  // Every write that takes held prompts out waits, so the release and the press are both in flight.
+  const parked: (() => void)[] = []
+  let isParking = false
+  const seen = world(on, {
+    judge: MECHANICAL,
+    worker: DONE,
+    workerGate: gate,
+    beforeWrite: async (was, will) => {
+      if (isParking && (was?.waiting.length ?? 0) > 0 && will.waiting.length === 0) await new Promise<void>(resolve => parked.push(resolve))
+    },
+  })
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'running')
+  await $.prompt.submit({ text: 'why does the stage-2 doc mention codex twice?', ...TYPED })
+  const held = (await state($)).waiting[0]!
+  const ui = await $.ui.mount({
+    plugin: 'sidekick',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'sidekick',
+    props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
+  } as never)
+  isParking = true
+  open()
+  for (let i = 0; i < 200 && parked.length < 1; i += 1) await clock.advance(10)
+  await ui.press({ key: `send-${held.id}` })
+  for (let i = 0; i < 50 && parked.length < 2; i += 1) await clock.advance(10)
+  isParking = false
+  for (const release of parked) release()
+  await until($, x => x.entries[0]?.status === 'done' && x.waiting.length === 0)
+  await clock.advance(100)
+  await ui.unmount()
+  expect(seen.resubmitted).toEqual(['why does the stage-2 doc mention codex twice?'])
+})
+
+test('a judge call that answers after its budget is in the history, so the history adds up to the session spend', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, judgeDelayMs: 8_000, worker: DONE })
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  const pending = $.prompt.submit({ text: 'push it', ...TYPED })
+  await clock.advance(5_000)
+  const result = await pending
+  expect(result.drop).toBeUndefined()
+  expect((await state($)).entries[0]?.reason).toBe('judge timed out')
+  // The judge answers late: its money is spent, and no entry carries it.
+  seen.release()
+  await until($, x => x.spend.usd > 0)
+  await clock.advance(100)
+  const recorded = storedRows(seen).reduce((n, r) => n + r.judgeUsd + r.workerUsd, 0)
+  expect(recorded).toBeGreaterThan(0)
+  expect(Math.abs(recorded - (await state($)).spend.usd)).toBeLessThan(1e-12)
+  // It is money in draft judging; it makes no job.
+  expect((await state($)).today.done).toBe(0)
+})

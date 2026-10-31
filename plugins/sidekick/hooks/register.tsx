@@ -205,6 +205,8 @@ async function judge($: EngineInterface, text: string, budgetMs: number | null =
   const started = await $.clock.now()
   lastJudgeAt = started
   const timedOut: Judgment = { verdict: 'unclear', task: '', resources: [], reason: 'judge timed out' }
+  // Set when the budget ran out first: the call's spend then reaches no entry, so it is recorded here.
+  let isLate = false
   let repo = cwd
   let stateMs = 0
   let spent: Tally = NO_SPEND
@@ -232,6 +234,7 @@ async function judge($: EngineInterface, text: string, budgetMs: number | null =
     await state
     spent = tallyOf(live.judgeModel, reply.usage)
     await addSpend($, spent)
+    if (isLate && spent.usd > 0) await record($, { at: 0, kind: 'draft', status: 'passed', ms: 0, judgeUsd: spent.usd, workerUsd: 0, savedUsd: 0, id: 'draft', count: 0 })
     if (!reply.isAnswered) return { verdict: 'unclear', task: '', resources: [], reason: `judge: ${reply.reason}` }
     return parseJudgment(reply.text, text)
   })().catch((): Judgment => ({ verdict: 'unclear', task: '', resources: [], reason: 'judge failed' }))
@@ -240,7 +243,10 @@ async function judge($: EngineInterface, text: string, budgetMs: number | null =
     budgetMs === null
       ? asked
       : $.clock.sleep(budgetMs, { signal: stop.signal }).then(
-          () => timedOut,
+          () => {
+            isLate = true
+            return timedOut
+          },
           () => timedOut,
         )
   const judgment = await Promise.race([asked, timer])
@@ -845,10 +851,13 @@ async function revert($: EngineInterface, id: string): Promise<void> {
 }
 
 async function sendNow($: EngineInterface, waitingId: string): Promise<void> {
-  const { waiting } = await load($)
-  const held = waiting.find(w => w.id === waitingId)
+  // Taken in one write, as a release takes them: pressed as the assists end, it is sent by one of the two.
+  let held: SidekickState['waiting'][number] | undefined
+  await change($, s => {
+    held = s.waiting.find(w => w.id === waitingId)
+    return held === undefined ? s : { ...s, waiting: s.waiting.filter(w => w.id !== waitingId) }
+  })
   if (held === undefined) return
-  await change($, s => ({ ...s, waiting: s.waiting.filter(w => w.id !== waitingId) }))
   await $.prompt.submit({ text: held.text, asUser: true })
 }
 
