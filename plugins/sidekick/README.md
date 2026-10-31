@@ -162,7 +162,7 @@ Then, in any Claude Code session that was already open:
 /reload-plugins
 ```
 
-Check that it loaded: run `/sidekick`. The pane opens with the version (`v0.5.4`) at the top right.
+Check that it loaded: run `/sidekick`. The pane opens with the installed version at the top right.
 
 > [!TIP]
 > **Updating later:** `claude plugin marketplace update dmokong-plugins && claude plugin update sidekick@dmokong-plugins`,
