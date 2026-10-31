@@ -3,7 +3,7 @@
  * they never touched keeps following the plugin's option; Reset to defaults clears the lot.
  */
 import type { Settings } from '../../types'
-import { isPetChoice } from './pets'
+import { toPetChoice } from './pets'
 
 export const SETTINGS_KEY = 'settings'
 
@@ -38,7 +38,7 @@ export function effective(defaults: Settings, stored: unknown): Settings {
   for (const key of Object.keys(defaults) as (keyof Settings)[]) {
     const value = raw[key]
     if (typeof value !== typeof defaults[key]) continue
-    if (key === 'pet') out.pet = isPetChoice(value) ? value : defaults.pet
+    if (key === 'pet') out.pet = toPetChoice(value, defaults.pet)
     else if (key === 'maxConcurrent') out.maxConcurrent = Math.min(4, Math.max(1, Math.round(value as number)))
     else if (typeof value === 'string' && value !== '') (out[key] as string) = value
     else if (typeof value === 'boolean') (out[key] as boolean) = value

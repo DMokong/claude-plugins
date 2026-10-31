@@ -641,7 +641,7 @@ test('a narrow band keeps the toggle and drops cost, then saved, then the counts
   const wide = await $.ui.mount(BAND(120))
   expect(await wide.find({ type: 'Text', text: /^cost/ })).toBeDefined()
   await wide.unmount()
-  const mid = await $.ui.mount(BAND(60))
+  const mid = await $.ui.mount(BAND(68))
   expect(await mid.find({ type: 'Text', text: /^cost/ })).toBeUndefined()
   expect(await mid.find({ type: 'Text', text: /^saved/ })).toBeDefined()
   await mid.unmount()
@@ -1346,57 +1346,174 @@ test('the pet starts off, and the panel chooses it, keeps it and hides it', asyn
   const ui = await $.ui.mount(BAND(100, 30))
   expect(await ui.find({ key: 'sk-pet' })).toBeUndefined()
   await ui.press({ key: 'band-toggle' })
-  await ui.press({ key: 'pet-kiki' })
-  expect((await state($)).settings.pet).toBe('kiki')
-  expect(seen.store.get('settings')).toEqual({ pet: 'kiki' })
-  // The panel has the rows; it comes back when the panel folds.
-  expect(await ui.find({ key: 'sk-pet' })).toBeUndefined()
-  await ui.press({ key: 'band-toggle' })
-  expect(await ui.find({ key: 'sk-pet-kiki' })).toBeDefined()
-  await ui.press({ key: 'band-toggle' })
-  await ui.press({ key: 'pet-ibara' })
-  await ui.press({ key: 'band-toggle' })
-  expect(await ui.find({ key: 'sk-pet-ibara' })).toBeDefined()
-  await ui.press({ key: 'band-toggle' })
-  await ui.press({ key: 'pet-off' })
+  expect(await ui.find({ type: 'Text', text: 'v9.9.9' })).toBeDefined()
+  await ui.press({ key: 'pet-mochi' })
+  expect((await state($)).settings.pet).toBe('mochi')
+  expect(seen.store.get('settings')).toEqual({ pet: 'mochi' })
+  // With nothing to do it stays in, and the flag says it's on.
   await ui.press({ key: 'band-toggle' })
   expect(await ui.find({ key: 'sk-pet' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /🐾 mochi/ })).toBeDefined()
+  // The band's own button goes round the choices.
+  await ui.press({ key: 'band-pet' })
+  expect((await state($)).settings.pet).toBe('tater')
+  await ui.press({ key: 'band-pet' })
+  expect((await state($)).settings.pet).toBe('off')
+  expect(await ui.find({ type: 'Text', text: /🐾 off/ })).toBeDefined()
+  await ui.press({ key: 'band-pet' })
+  expect((await state($)).settings.pet).toBe('mochi')
   await ui.unmount()
+})
+
+test('a pet chosen in 0.6.0 under its old name stays chosen', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE, stored: { settings: { pet: 'ibara' } } })
+  await $.session.start(START)
+  expect((await state($)).settings.pet).toBe('tater')
 })
 
 test('/sidekick pet chooses, and refuses what is not a pet', async ($, on) => {
   world(on, { judge: MECHANICAL, worker: DONE })
   await $.session.start(START)
   const run = async (args: string) => ((await $.command.run({ command: 'sidekick', args, origin: { kind: 'composer' }, presentation: 'inline' } as never)) as { text: string }).text
-  expect(await run('pet ibara')).toContain('Ibara')
-  expect((await state($)).settings.pet).toBe('ibara')
-  expect(await run('pet')).toContain('ibara')
+  expect(await run('pet tater')).toContain('Tater')
+  expect((await state($)).settings.pet).toBe('tater')
+  expect(await run('pet')).toContain('tater')
   expect(await run('pet hamster')).toContain('Usage')
-  expect((await state($)).settings.pet).toBe('ibara')
+  expect((await state($)).settings.pet).toBe('tater')
   await run('pet off')
   expect((await state($)).settings.pet).toBe('off')
 })
 
-test('a short or narrow band keeps the folded line and leaves the pet out', async ($, on) => {
-  world(on, { judge: MECHANICAL, worker: DONE, stored: { settings: { pet: 'kiki' } } })
+const PET_PANE = {
+  plugin: 'sidekick',
+  surface: 'terminal',
+  component: 'Pane',
+  requestId: 'sidekick',
+  props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+} as never
+
+test('the pet comes out above the prompt for a job and goes back in 15 seconds after; the pane keeps it', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  world(on, { judge: MECHANICAL, worker: DONE, workerGate: gate, stored: { settings: { pet: 'tater' } } })
   underBand(on)
   await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const band = await $.ui.mount(BAND(100, 30))
+  const pane = await $.ui.mount(PET_PANE)
+  expect(await band.find({ key: 'sk-pet' })).toBeUndefined()
+  expect(await pane.find({ key: 'sk-pane-pet-tater' })).toBeDefined()
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'running')
+  expect(await band.find({ key: 'sk-pet-tater' })).toBeDefined()
+  // It stands beside the card and the folded line, and adds no row of its own.
+  const tree = (await (band as unknown as { drawn: () => Promise<unknown> }).drawn()) as Node
+  const within = (n: Node, key: string): Node | undefined =>
+    n.props?.key === key ? n : (n.children ?? []).filter((c): c is Node => typeof c !== 'string').map(c => within(c, key)).find(x => x !== undefined)
+  const pet = within(tree, 'sk-pet')!
+  expect(within(pet, 'sk-card')).toBeDefined()
+  expect(within(pet, 'sk-folded')).toBeDefined()
+  open()
+  await until($, x => x.entries[0]?.status === 'done')
+  // The outcome stays up to be read, and the pet with it.
+  expect(await band.find({ key: 'sk-pet' })).toBeDefined()
+  expect(await band.find({ key: 'sk-card' })).toBeDefined()
+  await clock.advance(14_000)
+  expect(await band.find({ key: 'sk-pet' })).toBeDefined()
+  await clock.advance(1_200)
+  expect(await band.find({ key: 'sk-pet' })).toBeUndefined()
+  expect(await band.find({ key: 'sk-card' })).toBeUndefined()
+  expect(await pane.find({ key: 'sk-pane-pet-tater' })).toBeDefined()
+  await band.unmount()
+  await pane.unmount()
+})
+
+test("a judge's answer stays up for 15 seconds when it leaves the message with Claude", async ($, on) => {
+  world(on, { judge: NEEDS_MAIN, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const ui = await $.ui.mount(BAND(100, 30))
+  await clock.advance(1_000)
+  await $.prompt.submit({ text: 'design the new cache', ...TYPED })
+  expect(await ui.find({ key: 'sk-card' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /left with Claude/ })).toBeDefined()
+  await clock.advance(14_000)
+  expect(await ui.find({ key: 'sk-card' })).toBeDefined()
+  await clock.advance(1_200)
+  expect(await ui.find({ key: 'sk-card' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the pet chips share the mode row when the panel is wide, saving a row', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  const ui = await $.ui.mount(BAND(100, 30))
+  await ui.press({ key: 'band-toggle' })
+  const tree = (await (ui as unknown as { drawn: () => Promise<unknown> }).drawn()) as Node
+  const within = (n: Node, key: string): Node | undefined =>
+    n.props?.key === key ? n : (n.children ?? []).filter((c): c is Node => typeof c !== 'string').map(c => within(c, key)).find(x => x !== undefined)
+  const row = (within(tree, 'sk-panel')!.children ?? []).filter((c): c is Node => typeof c !== 'string').find(c => within(c, 'mode-auto') !== undefined)!
+  expect(within(row, 'pet-mochi')).toBeDefined()
+  await ui.unmount()
+})
+
+test('beside the open panel an idle pet plays, given the room, and not during a job', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  world(on, { judge: MECHANICAL, worker: DONE, workerGate: gate, stored: { settings: { pet: 'mochi' } } })
+  underBand(on)
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  for (const [columns, shows] of [[100, true], [91, true], [90, false]] as const) {
+    const ui = await $.ui.mount(BAND(columns, 30))
+    if ((await ui.find({ key: 'sk-panel' })) === undefined) await ui.press({ key: 'band-toggle' })
+    expect({ columns, shows: (await ui.find({ key: 'sk-panel-pet-mochi' })) !== undefined }).toEqual({ columns, shows })
+    await ui.unmount()
+  }
+  const ui = await $.ui.mount(BAND(100, 30))
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'running')
+  expect(await ui.find({ key: 'sk-panel-pet-mochi' })).toBeUndefined()
+  open()
+  await until($, x => x.entries[0]?.status === 'done')
+  await ui.unmount()
+})
+
+test('a short or narrow band keeps the folded line and leaves the pet out', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  world(on, { judge: MECHANICAL, worker: DONE, workerGate: gate, stored: { settings: { pet: 'mochi' } } })
+  underBand(on)
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'running')
   for (const [columns, maxRows, shows] of [[100, 6, false], [100, 7, true], [58, 30, false], [59, 30, true]] as const) {
     const ui = await $.ui.mount(BAND(columns, maxRows))
     expect({ columns, maxRows, shows: (await ui.find({ key: 'sk-pet' })) !== undefined }).toEqual({ columns, maxRows, shows })
     expect(await ui.find({ key: 'band-toggle' })).toBeDefined()
     await ui.unmount()
   }
+  open()
+  await until($, x => x.entries[0]?.status === 'done')
 })
 
 test('on an engine before 2.1.308 there is no pet and no chip for one', async ($, on) => {
-  world(on, { judge: MECHANICAL, worker: DONE, stored: { settings: { pet: 'kiki' } } })
+  world(on, { judge: MECHANICAL, worker: DONE, stored: { settings: { pet: 'mochi' } } })
   underBand(on)
   on('session.version', async () => ({ value: { version: '2.1.300' } }))
   await $.session.start(START)
   const ui = await $.ui.mount(BAND(100, 30))
-  expect(await ui.find({ key: 'sk-pet' })).toBeUndefined()
+  expect(await ui.find({ key: 'band-pet' })).toBeUndefined()
   await ui.press({ key: 'band-toggle' })
-  expect(await ui.find({ key: 'pet-kiki' })).toBeUndefined()
+  expect(await ui.find({ key: 'pet-mochi' })).toBeUndefined()
   await ui.unmount()
 })

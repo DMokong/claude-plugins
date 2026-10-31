@@ -24,7 +24,7 @@ export type Settings = {
   notifications: boolean
   maxConcurrent: number
   /** Which pet keeps you company above the prompt, in the terminal; off for none. */
-  pet: 'off' | 'kiki' | 'ibara'
+  pet: 'off' | 'mochi' | 'tater'
 }
 
 /** What the tiles and bars count over a span of the history. */

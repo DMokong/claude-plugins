@@ -7,7 +7,7 @@ import { NO_SPEND, addTally, modelName, tallyLine, tallyOf, tokens, usd } from '
 import { migrate, toTaught } from './lib/state'
 import { HISTORY_KEY, NO_TOTALS, appendRow, bestDay, markGiven, perDay, savedFor, startOfDay, streak, toRows, totals, weekStart } from './lib/history'
 import type { HistoryRow } from './lib/history'
-import { PET_CHIPS, PET_COLUMNS, PET_ROWS, isPetChoice, moodOf, petFrame } from './lib/pets'
+import { PET_CHIPS, PET_COLUMNS, PET_ROWS, PET_STROLL, isPetChoice, moodOf, newWalker, pastimeOf, petPose } from './lib/pets'
 import { JUDGE_CHIPS, SETTINGS_KEY, WORKER_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
 import { COLORS, barCells, bigText, dayLevels, spaced, tileMoney } from './lib/draw'
 import { daysSvg, progressSvg, stackSvg, tileSvg } from './lib/svg'
@@ -54,11 +54,18 @@ async function load($: EngineInterface): Promise<SidekickState> {
   return migrate(await read($, sidekick), EMPTY)
 }
 
+/** Draws once more when a finished entry's card has had its time above the prompt. */
+function redrawAfterLinger($: EngineInterface): void {
+  $.clock.after(LINGER_MS + 100, () => void change($, s => ({ ...s, tick: s.tick + 1 })).catch(() => {}))
+}
+
 /** Writes the session's state through `fn`, which always sees it upgraded. */
 async function change($: EngineInterface, fn: (state: SidekickState) => SidekickState): Promise<void> {
   await update($, sidekick, state => fn(migrate(state, EMPTY)))
 }
 
+/** How long a finished job's outcome, or a judge's answer, stays above the prompt to be read. */
+const LINGER_MS = 15_000
 const PANE = 'sidekick'
 /** Rows asked for inline, past the default third, so a running assist's command and buttons show. */
 const PANE_ROWS = 28
@@ -399,6 +406,13 @@ let petStartedAt = 0
 /** Whether the pet last drew something moving; a resting pet changes frame a third as often. */
 let isPetLively = false
 const PET_FRAME_MS = 200
+/** Where the pet stands in each place it can be drawn. */
+const inPane = newWalker()
+const byPanel = newWalker()
+const onBand = newWalker()
+/** The band's pet button, which goes round the choices. The emoji is two cells, and two in a string too. */
+const petFlag = (pet: Settings['pet']) => ` 🐾 ${pet}`
+const NEXT_PET = { off: 'mochi', mochi: 'tater', tater: 'off' } as const
 
 async function choosePet($: EngineInterface, pet: Settings['pet']): Promise<void> {
   petChosenAt = await $.clock.now()
@@ -577,6 +591,7 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
   }
   timer.cancel()
   ticker.cancel()
+  redrawAfterLinger($)
   // After the stream ends, so the worker is done with its own saved output.
   if (sessionId !== '') await cleanupSession($, sessionId)
   if (isStopped) {
@@ -656,6 +671,7 @@ async function shadowJudge($: EngineInterface, id: string, text: string): Promis
   const { judgment, ms, stateMs, spend } = await judge($, text, null)
   const would = judgment.verdict === 'mechanical' || judgment.verdict === 'investigate'
   const what = judgment.verdict === 'investigate' ? 'would investigate' : 'would hand off'
+  const endedAt = await $.clock.now()
   await patchEntry($, id, () => ({
     status: would ? 'shadow' : 'passed',
     verdict: judgment.verdict,
@@ -663,7 +679,9 @@ async function shadowJudge($: EngineInterface, id: string, text: string): Promis
     task: judgment.task,
     judgeMs: ms,
     judgeSpend: spend,
+    endedAt,
   }))
+  redrawAfterLinger($)
 }
 
 async function stopEntry($: EngineInterface, id: string): Promise<void> {
@@ -861,7 +879,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'sidekick',
       description: 'Sidekick for this session: hand mechanical chores (git, bd) to a cheap worker',
-      argumentHint: '[auto|shadow|off|learned|forget <n|all>|pet [off|kiki|ibara]]',
+      argumentHint: '[auto|shadow|off|learned|forget <n|all>|pet [off|mochi|tater]]',
     })
     return next(e)
   })
@@ -909,13 +927,13 @@ export const register: Register = (on, options) => {
     }
     if (arg === 'pet' || arg.startsWith('pet ')) {
       const what = arg.slice('pet'.length).trim()
-      if (what === '') return { text: `Your pet is ${live.pet}. /sidekick pet off, kiki (the quokka) or ibara (the capybara).` }
-      if (!isPetChoice(what)) return { text: 'Usage: /sidekick pet [off|kiki|ibara]' }
+      if (what === '') return { text: `Your pet is ${live.pet}. /sidekick pet off, mochi (the quokka) or tater (the capybara).` }
+      if (!isPetChoice(what)) return { text: 'Usage: /sidekick pet [off|mochi|tater]' }
       await choosePet($, what)
-      return { text: what === 'off' ? 'Pet hidden.' : `${what === 'kiki' ? 'Kiki the quokka' : 'Ibara the capybara'} is with you, above the prompt.` }
+      return { text: what === 'off' ? 'Pet hidden.' : `${what === 'mochi' ? 'Mochi the quokka' : 'Tater the capybara'} is with you, above the prompt.` }
     }
     const asked: Mode | null = arg === 'auto' ? 'auto' : arg === 'off' ? 'off' : arg === 'on' || arg === 'shadow' ? 'shadow' : null
-    if (arg !== '' && asked === null) return { text: 'Usage: /sidekick [auto|shadow|off|learned|forget <n|all>|pet [off|kiki|ibara]]' }
+    if (arg !== '' && asked === null) return { text: 'Usage: /sidekick [auto|shadow|off|learned|forget <n|all>|pet [off|mochi|tater]]' }
     if (asked !== null) await setMode($, asked)
     const { mode } = await load($)
     if (mode !== 'off') await $.ui.open({ id: PANE, title: 'Sidekick', rows: PANE_ROWS })
@@ -974,7 +992,9 @@ export const register: Register = (on, options) => {
         : judgment
     await patchEntry($, id, () => ({ verdict: judgment.verdict, reason: routed.reason, judgeMs: ms, judgeSpend: spend }))
     if (routed.verdict !== 'mechanical' && routed.verdict !== 'investigate') {
-      await patchEntry($, id, () => ({ status: 'passed' }))
+      const endedAt = await $.clock.now()
+      await patchEntry($, id, () => ({ status: 'passed', endedAt }))
+      redrawAfterLinger($)
       await change($, s => ({ ...s, totals: { ...s.totals, passed: s.totals.passed + 1 } }))
       await record($, { at: 0, kind: 'to-claude', status: 'passed', ms, judgeUsd: spend.usd, workerUsd: 0, savedUsd: 0, id })
       // A pass is a decision too: say so, or a sidekick that passes looks like one that is gone.
@@ -988,7 +1008,8 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e)) // fail open: any error lets the prompt through as typed
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Button: DrawnButton, Text } = $.ui.resolve(e)
+    const elements = $.ui.resolve(e)
+    const { Box, Button: DrawnButton, Text } = elements
     const Button: typeof DrawnButton = isLabelOnly ? ({ children: _, ...props }) => DrawnButton(props) : DrawnButton
     // An older engine refuses the graphical layout too; only its terminal gets the panel.
     if (isLabelOnly && e.surface !== 'terminal') return <Text>{UPDATE_MESSAGE}</Text>
@@ -1088,7 +1109,7 @@ export const register: Register = (on, options) => {
       </Button>
     )
     // The header fits the pane: one row when it all fits, else the right-hand controls on a second
-    // row; the models and the version give way first. `rightWidth` is what `right` draws, in cells.
+    // row; the models give way first, then the version. `rightWidth` is what `right` draws, in cells.
     const header = (right: unknown, rightWidth: number) => {
       if (rich !== null) {
         return (
@@ -1110,8 +1131,8 @@ export const register: Register = (on, options) => {
       const core = title.length + pillWidth
       const isOneRow = core + rightWidth + 1 <= inner
       const room = inner - core - (isOneRow ? rightWidth + 1 : 0)
-      const showModels = models.length <= room
-      const showVersion = showModels && models.length + ver.length <= room
+      const showVersion = ver.length <= room
+      const showModels = models.length + (showVersion ? ver.length : 0) <= room
       return (
         <Box key="hdr" flexDirection="column" borderStyle="round" borderColor={COLORS.line} paddingX={1}>
           <Box flexWrap="nowrap">
@@ -1367,6 +1388,24 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
+    // The pane has the room to keep the pet out whenever it's on, between jobs too.
+    let panePet = null
+    if (state.settings.pet !== 'off' && !isLabelOnly && width >= PET_COLUMNS && 'Raster' in elements) {
+      const { Raster } = elements
+      const mood = moodOf(state.settings.pet, { mode: state.mode, entries: state.entries, now, chosenAt: petChosenAt, startedAt: petStartedAt })
+      isPetLively = mood.isLively
+      // Leave the words beside it their room: the longest caption is 27 cells.
+      const lane = Math.max(PET_COLUMNS - 1, Math.min(width - 28, PET_COLUMNS - 1 + PET_STROLL))
+      const art = petPose(inPane, state.settings.pet, mood.animation, await read($, petBeat), lane, 'left')
+      panePet = (
+        <Box key="sk-pane-pet" gap={1} marginTop={1} flexWrap="nowrap">
+          <Box key="sk-pane-lane" width={lane} flexShrink={0} paddingLeft={art.offset}>
+            <Raster key={`sk-pane-pet-${state.settings.pet}`} columns={art.columns} rows={art.rows} cells={art.cells} />
+          </Box>
+          <Text dimColor>{mood.caption}</Text>
+        </Box>
+      )
+    }
     return (
       <Box flexDirection="column">
         {header(
@@ -1378,6 +1417,7 @@ export const register: Register = (on, options) => {
           </Box>,
           tabsWidth,
         )}
+        {panePet}
         <Box flexDirection={isStacked ? 'column' : 'row'} marginTop={1}>
           {tile('tile-done', 'DONE', String(span.done), COLORS.yellow, `${span.chores} chores · ${span.looks} looks`)}
           {tile('tile-saved', 'SAVED', tileMoney(span.savedUsd), COLORS.green, `est. vs ${mainModel}`)}
@@ -1514,12 +1554,27 @@ export const register: Register = (on, options) => {
     const isOn = state.mode !== 'off'
     const lead = running[0]
     const now = await $.clock.now()
-    // The pet needs its rows and the folded line's, and room for a job card beside it. Terminal only;
+    // The pet comes out for the sidekick's work, thinking or on a job; the pane keeps it the rest of the
+    // time. It needs its rows and the folded line's, and room for a job card beside it. Terminal only;
     // engines before 2.1.308 keep the plainer panel, without it.
     const pet = state.settings.pet === 'off' ? null : state.settings.pet
     const canHavePet = e.surface === 'terminal' && !isLabelOnly && 'Raster' in elements
-    const shownPet = pet !== null && canHavePet && !state.panelOpen && maxRows > PET_ROWS && width >= PET_COLUMNS + 40 ? pet : null
-    const cardWidth = shownPet === null ? width : width - PET_COLUMNS
+    // The newest job to finish, while its outcome is still up and nothing has taken its place.
+    const finished =
+      lead !== undefined
+        ? undefined
+        : state.entries
+            .filter(x => x.endedAt > 0 && now - x.endedAt < LINGER_MS && (x.status === 'done' || x.status === 'failed' || x.status === 'stopped' || x.status === 'passed' || x.status === 'shadow'))
+            .reduce<Entry | undefined>((a, b) => (a === undefined || b.endedAt > a.endedAt ? b : a), undefined)
+    const judged = state.entries.find(x => x.status === 'judging')
+    const isIdle = running.length === 0 && queued.length === 0 && judged === undefined
+    const isPetAtWork = running.length > 0 || finished !== undefined || judged !== undefined
+    const shownPet = pet !== null && canHavePet && isPetAtWork && !state.panelOpen && maxRows > PET_ROWS && width >= PET_COLUMNS + 40 ? pet : null
+    // Its lane to walk in takes only what a job card can spare above 60 columns.
+    const petLane = PET_COLUMNS - 1 + Math.max(0, Math.min(PET_STROLL, width - PET_COLUMNS - 60))
+    const cardWidth = shownPet === null ? width : width - petLane - 1
+    // Out, it stands beside the card and the folded line, whose six rows are its height: it adds none.
+    const lineWidth = cardWidth
 
     // ── the folded line: what's happening, at a glance; parts give way from the right as it narrows
     // The day turned since today's totals were counted: count them again (the draw after shows them).
@@ -1532,7 +1587,11 @@ export const register: Register = (on, options) => {
     const savedText = tileMoney(state.today.savedUsd)
     const costText = tileMoney(state.today.costUsd)
     const pillText = state.mode === 'auto' ? ' ● AUTO ' : state.mode === 'shadow' ? ' ◌ SHADOW ' : '○ OFF'
-    const head = '◆ sidekick '.length + pillText.length + (state.isWarming ? ' warming up…'.length : 0)
+    const bareHead = '◆ sidekick '.length + pillText.length + (state.isWarming ? ' warming up…'.length : 0)
+    // Says which pet is on for all the time it isn't out, and changes it; it gives way before the toggle's arrow does.
+    const flagText = petFlag(state.settings.pet)
+    const hasPetFlag = canHavePet && bareHead + flagText.length + 1 + ' ▾ '.length + 1 <= lineWidth
+    const head = bareHead + (hasPetFlag ? flagText.length + 1 : 0)
     const partWidths = {
       counts: ' │ '.length + counts.reduce((n, c) => n + `${c.glyph} ${c.n} `.length, 0),
       saved: '│ saved '.length + savedText.length + 1,
@@ -1540,8 +1599,8 @@ export const register: Register = (on, options) => {
     }
     const longToggle = state.panelOpen ? ' ◆ Sidekick ▴ ' : ' ◆ Sidekick ▾ '
     // Below the room for the whole button, it keeps its arrow: it always opens the panel.
-    const toggleText = head + longToggle.length + 1 <= width ? longToggle : state.panelOpen ? ' ▴ ' : ' ▾ '
-    const fits = (parts: (keyof typeof partWidths)[]) => head + parts.reduce((n, k) => n + partWidths[k], 0) + toggleText.length + 1 <= width
+    const toggleText = head + longToggle.length + 1 <= lineWidth ? longToggle : state.panelOpen ? ' ▴ ' : ' ▾ '
+    const fits = (parts: (keyof typeof partWidths)[]) => head + parts.reduce((n, k) => n + partWidths[k], 0) + toggleText.length + 1 <= lineWidth
     const order: (keyof typeof partWidths)[] = ['counts', 'saved', 'cost']
     let shown = isOn ? order : []
     while (shown.length > 0 && !fits(shown)) shown = shown.slice(0, -1)
@@ -1557,6 +1616,11 @@ export const register: Register = (on, options) => {
       <Box key="sk-folded" flexWrap="nowrap">
         <Text bold={isOn} dimColor={!isOn} color={isOn ? COLORS.claude : undefined}>{'◆ sidekick '}</Text>
         {modeChip}
+        {hasPetFlag && (
+          <Button key="band-pet" label={flagText} plain onPress={() => void choosePet($, NEXT_PET[state.settings.pet])}>
+            <Text dimColor={pet === null}>{flagText}</Text>
+          </Button>
+        )}
         {/* A cold judge can take seconds on its first call; say so, or the first message looks ignored. */}
         {state.isWarming && <Text color={COLORS.purple}>{' warming up…'}</Text>}
         {shown.includes('counts') && <Text color={COLORS.line}>{' │ '}</Text>}
@@ -1605,6 +1669,34 @@ export const register: Register = (on, options) => {
             <Box flexGrow={1} />
             <Text dimColor>{'Next'}</Text>
           </Box>
+        </Box>
+      ) : judged !== undefined && !state.panelOpen ? (
+        <Box key="sk-card" flexDirection="column" borderStyle="round" borderColor={COLORS.purple} paddingX={1}>
+          <Box flexWrap="nowrap">
+            <Text color={COLORS.purple}>{'✦ '}</Text>
+            <Text bold>{clip(judged.prompt, cardWidth - 8)}</Text>
+          </Box>
+          <Text color={COLORS.purple}>{'● thinking it over…'}</Text>
+          <Text dimColor>{'○ a chore for the sidekick, or one for Claude'}</Text>
+        </Box>
+      ) : (finished?.status === 'passed' || finished?.status === 'shadow') && !state.panelOpen ? (
+        <Box key="sk-card" flexDirection="column" borderStyle="round" borderColor={COLORS.purple} paddingX={1}>
+          <Box flexWrap="nowrap">
+            <Text color={COLORS.purple}>{'→ '}</Text>
+            <Text bold>{clip(finished.prompt, cardWidth - 8)}</Text>
+          </Box>
+          <Text wrap="truncate-end">{clip(finished.reason !== '' ? finished.reason : 'Not one for the sidekick.', cardWidth - 6)}</Text>
+          <Text dimColor>{`○ ${finished.status === 'shadow' ? 'shadow: left with Claude' : 'left with Claude'} ${Math.max(0, Math.round((now - finished.endedAt) / 1000))}s ago`}</Text>
+        </Box>
+      ) : finished !== undefined && !state.panelOpen ? (
+        <Box key="sk-card" flexDirection="column" borderStyle="round" borderColor={finished.status === 'done' ? COLORS.green : COLORS.yellow} paddingX={1}>
+          <Box flexWrap="nowrap">
+            <Text color={finished.status === 'done' ? COLORS.green : COLORS.yellow}>{finished.status === 'done' ? '✓ ' : '✗ '}</Text>
+            <Text bold color={COLORS.orange}>{finished.kind === 'investigate' ? 'investigate ' : 'chore '}</Text>
+            <Text bold>{clip(finished.prompt, cardWidth - 20)}</Text>
+          </Box>
+          <Text wrap="truncate-end">{clip(finished.outcome?.summary ?? entryDetail(finished, now), cardWidth - 6)}</Text>
+          <Text dimColor>{`○ ${finished.status} ${Math.max(0, Math.round((now - finished.endedAt) / 1000))}s ago`}</Text>
         </Box>
       ) : null
 
@@ -1692,6 +1784,10 @@ export const register: Register = (on, options) => {
       'launch-main': 'To main',
       'launch-reset': 'Reset',
     }
+    const petChips = PET_CHIPS.map(([label, choice]) => chip(`pet-${choice}`, label, state.settings.pet === choice, COLORS.orange, () => void choosePet($, choice)))
+    // Beside the mode when both fit, a row saved: the labels, their chips and the version, in cells.
+    const isPetInline = canHavePet && inner >= 59
+    const hasPanelVersion = version !== '' && inner >= (isPetInline ? 66 : 48)
     const panel = !state.panelOpen ? null : (
       <Box key="sk-panel" flexDirection="column" borderStyle="round" borderColor={COLORS.claude} paddingX={1} width={panelW}>
         <Box flexWrap="nowrap">
@@ -1712,6 +1808,10 @@ export const register: Register = (on, options) => {
           {chip('mode-off', 'Off', state.mode === 'off', '#c9ced8', () => void setMode($, 'off'))}
           {chip('mode-shadow', 'Shadow', state.mode === 'shadow', COLORS.purple, () => void setMode($, 'shadow'))}
           {chip('mode-auto', 'Auto', state.mode === 'auto', COLORS.green, () => void setMode($, 'auto'))}
+          {isPetInline && <Text dimColor>{'  PET '}</Text>}
+          {isPetInline && petChips}
+          {hasPanelVersion && <Box flexGrow={1} />}
+          {hasPanelVersion && <Text key="panel-version" dimColor>{`v${version}`}</Text>}
         </Box>
         <Box flexWrap="wrap">
           <Text dimColor>{rowLabel('JUDGE')}</Text>
@@ -1725,10 +1825,10 @@ export const register: Register = (on, options) => {
             chip(`worker-${alias}`, chipLabel(label), state.settings.workerModel === alias, COLORS.purple, () => void setSetting($, 'workerModel', alias)),
           )}
         </Box>
-        {canHavePet && (
+        {canHavePet && !isPetInline && (
           <Box flexWrap="wrap">
             <Text dimColor>{rowLabel('PET')}</Text>
-            {PET_CHIPS.map(([label, choice]) => chip(`pet-${choice}`, label, state.settings.pet === choice, COLORS.orange, () => void choosePet($, choice)))}
+            {petChips}
           </Box>
         )}
         {!isTight && rule('r1', 'SETTINGS')}
@@ -1875,27 +1975,48 @@ export const register: Register = (on, options) => {
       )
     }
 
-    let petRow = null
     if (shownPet !== null && 'Raster' in elements) {
       const { Raster } = elements
       const mood = moodOf(shownPet, { mode: state.mode, entries: state.entries, now, chosenAt: petChosenAt, startedAt: petStartedAt })
       isPetLively = mood.isLively
-      const art = petFrame(shownPet, mood.animation, await read($, petBeat))
-      petRow = (
-        <Box key="sk-pet" gap={1} flexWrap="nowrap">
-          <Raster key={`sk-pet-${shownPet}`} columns={art.columns} rows={art.rows} cells={art.cells} />
-          <Box flexDirection="column" flexGrow={1}>
-            {card ?? <Text dimColor>{mood.caption}</Text>}
+      const art = petPose(onBand, shownPet, mood.animation, await read($, petBeat), petLane, 'right')
+      return (
+        <Box flexDirection="column">
+          <Box key="sk-pet" gap={1} flexWrap="nowrap">
+            <Box flexDirection="column" flexGrow={1} justifyContent="flex-end">
+              {card}
+              {folded}
+            </Box>
+            <Box key="sk-pet-lane" width={petLane} flexShrink={0} paddingLeft={art.offset}>
+              <Raster key={`sk-pet-${shownPet}`} columns={art.columns} rows={art.rows} cells={art.cells} />
+            </Box>
           </Box>
+          {below}
+        </Box>
+      )
+    }
+    // With nothing to do, the pet plays in the room the open panel leaves beside it, on the same rows.
+    let panelPet = null
+    const panelRoom = width - panelW - 1
+    if (pet !== null && canHavePet && state.panelOpen && isIdle && maxRows > PET_ROWS && panelRoom >= PET_COLUMNS - 1 && 'Raster' in elements) {
+      const { Raster } = elements
+      const mood = pastimeOf(pet, now)
+      isPetLively = mood.isLively
+      const lane = Math.min(panelRoom, PET_COLUMNS - 1 + PET_STROLL)
+      const art = petPose(byPanel, pet, mood.animation, await read($, petBeat), lane, 'right')
+      panelPet = (
+        <Box key="sk-panel-pet" width={lane + 1} flexShrink={0} paddingLeft={art.offset}>
+          <Raster key={`sk-panel-pet-${pet}`} columns={art.columns} rows={art.rows} cells={art.cells} />
         </Box>
       )
     }
     return (
       <Box flexDirection="column">
-        {petRow ?? card}
+        {card}
         {panel !== null && (
-          <Box key="sk-panel-row" flexWrap="nowrap">
+          <Box key="sk-panel-row" flexWrap="nowrap" alignItems="flex-end">
             <Box flexGrow={1} />
+            {panelPet}
             {panel}
           </Box>
         )}

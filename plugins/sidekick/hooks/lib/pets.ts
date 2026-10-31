@@ -1,12 +1,12 @@
 /**
- * The pets: Kiki the quokka and Ibara the capybara (working names). Each frame is 12 pixel rows
+ * The pets: Mochi the quokka and Tater the capybara (working names). Each frame is 12 pixel rows
  * joined by `/`, one character per pixel: `.` is clear, anything else indexes the palette in base 36.
  */
-export type PetName = 'kiki' | 'ibara'
+export type PetName = 'mochi' | 'tater'
 type Sheet = { width: number; palette: string[]; animations: Record<string, string[]> }
 
 export const SHEETS: Record<PetName, Sheet> = {
-  kiki: {
+  mochi: {
     width: 16,
     palette: ["#b97942", "#915d3a", "#d99a5c", "#f4d4a0", "#332c29", "#e6aa80", "#80bb56", "#4e8847"],
     animations: {
@@ -92,7 +92,7 @@ export const SHEETS: Record<PetName, Sheet> = {
       ],
     },
   },
-  ibara: {
+  tater: {
     width: 18,
     palette: ["#bd8348", "#93613e", "#dfa45f", "#edc388", "#342e2a", "#9eb8bc", "#84bd55", "#f1cc65", "#e87866", "#d5ebdf"],
     animations: {
@@ -252,18 +252,26 @@ export const SHEETS: Record<PetName, Sheet> = {
 
 export const PET_CHIPS: readonly (readonly [string, 'off' | PetName])[] = [
   ['Off', 'off'],
-  ['Kiki', 'kiki'],
-  ['Ibara', 'ibara'],
+  ['Mochi', 'mochi'],
+  ['Tater', 'tater'],
 ]
-const TITLES: Record<PetName, string> = { kiki: 'Kiki', ibara: 'Ibara' }
+const TITLES: Record<PetName, string> = { mochi: 'Mochi', tater: 'Tater' }
 
 /** Terminal rows a pet takes, and what it takes off a row beside it (its widest, and a gap). */
 export const PET_ROWS = 6
 export const PET_COLUMNS = 19
+/** The most a pet walks beyond its own width, above the prompt or in the pane. */
+export const PET_STROLL = 24
 const FRAMES = 8
 const DEFAULT_COLOR = 0x01000000
 
-export const isPetChoice = (value: unknown): value is 'off' | PetName => value === 'off' || value === 'kiki' || value === 'ibara'
+export const isPetChoice = (value: unknown): value is 'off' | PetName => value === 'off' || value === 'mochi' || value === 'tater'
+
+/** A pet as anything stored it, 0.6.0's working names among them; what isn't one is the fallback. */
+export function toPetChoice(value: unknown, fallback: 'off' | PetName): 'off' | PetName {
+  const named = value === 'kiki' ? 'mochi' : value === 'ibara' ? 'tater' : value
+  return isPetChoice(named) ? named : fallback
+}
 
 const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 
@@ -303,16 +311,54 @@ export function encodeFrame(rows: readonly string[], palette: readonly string[])
 const encoded = new Map<string, string>()
 
 /** A drawn frame: the Raster's size and cells. Encoded once, on first draw. */
-export function petFrame(pet: PetName, animation: string, beat: number): { columns: number; rows: number; cells: string } {
+export function petFrame(pet: PetName, animation: string, beat: number, isMirrored = false): { columns: number; rows: number; cells: string } {
   const sheet = SHEETS[pet]
   const at = beat % FRAMES
-  const key = `${pet}/${animation}/${at}`
+  const key = `${pet}/${animation}/${at}/${isMirrored}`
   let cells = encoded.get(key)
   if (cells === undefined) {
-    cells = encodeFrame(sheet.animations[animation]![at]!.split('/'), sheet.palette)
+    const rows = sheet.animations[animation]![at]!.split('/')
+    cells = encodeFrame(isMirrored ? rows.map(row => [...row].reverse().join('')) : rows, sheet.palette)
     encoded.set(key, cells)
   }
   return { columns: sheet.width, rows: PET_ROWS, cells }
+}
+
+/** The rows of a sheet that go somewhere, and whether they're drawn facing left; the others are done on the spot. */
+const TRAVELLING = new Map([
+  ['hop', false],
+  ['haul', true],
+  ['sweep', false],
+])
+
+/** Where a pet stands in its lane, kept from draw to draw so that no change of animation moves it. */
+export type Walker = { x: number | null; direction: 1 | -1; beat: number }
+export const newWalker = (): Walker => ({ x: null, direction: 1, beat: 0 })
+
+/** Beats further apart than this were spent out of sight: it picks up where it was. */
+const MAX_STRIDE = 3
+
+/**
+ * A frame placed in a lane wider than the pet, moving `walker` on. A travelling animation goes one cell
+ * a beat, turning at the ends and facing the way it goes; everything else stands where the pet already is.
+ */
+export function petPose(walker: Walker, pet: PetName, animation: string, beat: number, lane: number, home: 'left' | 'right'): { columns: number; rows: number; cells: string; offset: number } {
+  const room = Math.max(0, lane - SHEETS[pet].width)
+  if (walker.x === null) walker.direction = home === 'left' ? 1 : -1
+  let x = Math.min(walker.x ?? (home === 'left' ? 0 : room), room)
+  const isDrawnLeft = TRAVELLING.get(animation)
+  const beats = beat - walker.beat
+  walker.beat = beat
+  if (isDrawnLeft === undefined || room === 0) {
+    walker.x = x
+    return { ...petFrame(pet, animation, beat), offset: x }
+  }
+  for (let i = beats > MAX_STRIDE ? 1 : beats; i > 0; i--) {
+    if (x + walker.direction < 0 || x + walker.direction > room) walker.direction = walker.direction === 1 ? -1 : 1
+    x += walker.direction
+  }
+  walker.x = x
+  return { ...petFrame(pet, animation, beat, (walker.direction === 1) === isDrawnLeft), offset: x }
 }
 
 /** What the pet is doing: the row of its sheet, and the words beside it. */
@@ -331,22 +377,56 @@ type Seen = {
 const HELLO_MS = 4_000
 const CHEER_MS = 3_000
 const HOP_MS = 6_000
-const SMUG_MS = 14_000
-const OOPS_MS = 15_000
+const SMUG_MS = 16_000
+const OOPS_MS = 16_000
 const DROWSY_MS = 5 * 60_000
 const TREAT_EVERY_MS = 3 * 60_000
 const TREAT_MS = 8_000
+const STROLL_EVERY_MS = 60_000
+const STROLL_AT_MS = 20_000
+const STROLL_MS = 11_000
 const COMMITTING = /\bgit\s+(commit|push|merge|rebase|tag)\b/
 
 /** Between jobs, now and then. */
 const TREATS: Record<PetName, readonly (readonly [string, string])[]> = {
-  kiki: [['eat', 'snack break']],
-  ibara: [
+  mochi: [['eat', 'snack break']],
+  tater: [
     ['eat', 'snack break'],
     ['drink', 'a little drink'],
     ['sweep', 'tidying up'],
     ['bath', 'bath time'],
   ],
+}
+
+/** What a pet gets up to beside the open panel, with no work to follow. */
+const PASTIMES: Record<PetName, readonly string[]> = {
+  mochi: ['idle', 'wave', 'look', 'eat', 'hop', 'smug', 'sleep'],
+  tater: ['idle', 'wave', 'look', 'eat', 'drink', 'hop', 'sweep', 'fix', 'success', 'smug', 'bath', 'sleep'],
+}
+const PASTIME_MS = 12_000
+
+/** The list in an order fixed by `seed`. Integer arithmetic: a clock's numbers lose their low bits in a float. */
+function shuffled(list: readonly string[], seed: number): string[] {
+  const out = [...list]
+  let hash = seed | 0
+  for (let i = out.length - 1; i > 0; i--) {
+    hash = Math.imul(hash ^ (hash >>> 15), 0x2c1b3c6d) + 0x9e3779b9
+    const j = (hash >>> 0) % (i + 1)
+    ;[out[i], out[j]] = [out[j]!, out[i]!]
+  }
+  return out
+}
+
+/** A pastime for this stretch of time: each one in turn, in a new order every round, and never the same twice running. */
+export function pastimeOf(pet: PetName, now: number): Mood {
+  const list = PASTIMES[pet]
+  const slot = Math.floor(now / PASTIME_MS)
+  const round = Math.floor(slot / list.length)
+  const order = shuffled(list, round)
+  const before = shuffled(list, round - 1).at(-1)
+  if (order[0] === before) [order[0], order[1]] = [order[1]!, order[0]!]
+  const animation = order[slot % list.length]!
+  return { animation, caption: TITLES[pet], isLively: animation !== 'idle' && animation !== 'sleep' }
 }
 
 /** The pet follows the sidekick's own work: nothing here is decoration on a timer, but the treats. */
@@ -358,16 +438,16 @@ export function moodOf(pet: PetName, seen: Seen): Mood {
   if (seen.mode === 'off') return mood('sleep', 'asleep', false)
   const running = entries.find(x => x.status === 'running')
   if (running !== undefined) {
-    if (running.kind === 'investigate') return pet === 'kiki' ? mood('look', 'looking into it') : mood('work', 'looking into it')
-    if (pet === 'kiki' || COMMITTING.test(running.steps.at(-1) ?? '')) return mood('haul', 'hauling it along')
+    if (running.kind === 'investigate') return pet === 'mochi' ? mood('look', 'looking into it') : mood('work', 'looking into it')
+    if (pet === 'mochi' || COMMITTING.test(running.steps.at(-1) ?? '')) return mood('haul', 'hauling it along')
     return mood('work', 'working on it')
   }
   if (entries.some(x => x.status === 'judging')) return mood('look', 'thinking it over')
   const finished = entries.filter(x => x.endedAt > 0).reduce<Seen['entries'][number] | undefined>((a, b) => (a === undefined || b.endedAt > a.endedAt ? b : a), undefined)
   const age = finished === undefined ? Number.POSITIVE_INFINITY : now - finished.endedAt
-  if (finished?.status === 'failed' && age < OOPS_MS) return pet === 'kiki' ? mood('look', 'uh oh') : mood('alert', 'uh oh')
+  if (finished?.status === 'failed' && age < OOPS_MS) return pet === 'mochi' ? mood('look', 'uh oh') : mood('alert', 'uh oh')
   if (finished?.status === 'done') {
-    if (pet === 'ibara' && age < CHEER_MS) return mood('success', 'done!')
+    if (pet === 'tater' && age < CHEER_MS) return mood('success', 'done!')
     if (age < HOP_MS) return mood('hop', 'done!')
     if (age < SMUG_MS) return mood('smug', 'pleased with itself')
   }
@@ -377,6 +457,11 @@ export function moodOf(pet: PetName, seen: Seen): Mood {
     const treats = TREATS[pet]
     const [animation, note] = treats[Math.floor(now / TREAT_EVERY_MS) % treats.length]!
     return mood(animation, note)
+  }
+  // Clear of the treats, which start on the minute.
+  if (now % STROLL_EVERY_MS >= STROLL_AT_MS && now % STROLL_EVERY_MS < STROLL_AT_MS + STROLL_MS) {
+    const isSweeping = pet === 'tater' && Math.floor(now / STROLL_EVERY_MS) % 2 === 1
+    return isSweeping ? mood('sweep', 'tidying up') : mood('hop', 'going for a wander')
   }
   return mood('idle', 'keeping you company', false)
 }

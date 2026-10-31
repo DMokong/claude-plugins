@@ -1,4 +1,5 @@
 import { NO_SPEND } from './cost'
+import { toPetChoice } from './pets'
 import type { Entry, SidekickState, Taught } from '../../types'
 
 /**
@@ -19,7 +20,7 @@ export function migrate(raw: Partial<SidekickState> | undefined, empty: Sidekick
     isWarming: state.isWarming === true,
     learned: toTaught(state.learned),
     instructions: Array.isArray(state.instructions) ? state.instructions : null,
-    settings: { ...empty.settings, ...(state.settings ?? {}) },
+    settings: { ...empty.settings, ...(state.settings ?? {}), pet: toPetChoice(state.settings?.pet, empty.settings.pet) },
     panelOpen: state.panelOpen === true,
     today: { ...empty.today, ...(state.today ?? {}) },
     tab: state.tab === 'session' || state.tab === 'week' ? state.tab : 'today',
