@@ -223,6 +223,25 @@ def git_read_refusal(args):
     return f"git {sub} changes the repository; an investigation only reads git"
 
 
+# What moves the files under a session editing the same checkout.
+SIDE_MOVES = {"checkout", "switch", "restore", "reset", "pull", "merge", "rebase", "cherry-pick", "revert", "am", "clean", "rm", "mv", "apply", "worktree", "bisect", "sparse-checkout"}
+SWEEPING_PATHS = {".", "./", ":/", ":", "*", "./*"}
+
+
+def side_refusal(args):
+    """A side task shares a checkout with a session that may be mid-edit: it may not move the tree, or sweep up that session's edits."""
+    sub, rest = args[0], args[1:]
+    if sub in SIDE_MOVES:
+        return f"git {sub} moves files under the session working in this checkout"
+    if sub == "stash" and rest[:1] not in (["list"], ["show"]):
+        return "git stash moves files under the session working in this checkout"
+    if sub == "add" and (letters_of(rest) & set("Au") or any(long_in(a, ["all", "update"]) for a in rest) or SWEEPING_PATHS & set(rest) or not positionals(rest)):
+        return "git add here would sweep up the edits of the session working in this checkout; name the files"
+    if sub == "commit" and (letters_of(rest) & set("a") or any(long_in(a, ["all", "amend", "include", "only"]) for a in rest)):
+        return "git commit here would sweep up the edits of the session working in this checkout; stage the named files first"
+    return None
+
+
 # --- what a name or a path can be --------------------------------------------------------------------
 
 SECRET_NAMES = {
@@ -2145,7 +2164,7 @@ def check_text(text, profile, session="", cwd=None, env=None):
                 if why:
                     return why
             if args:
-                return refusal(args, git_dir(words, state.cwd)) or (git_read_refusal(args) if profile == "investigate" else None)
+                return refusal(args, git_dir(words, state.cwd)) or (git_read_refusal(args) if profile == "investigate" else side_refusal(args) if profile == "side" else None)
             return None
         return simple_refusal(simple, profile, check, again)
 
@@ -2208,7 +2227,7 @@ def check_text(text, profile, session="", cwd=None, env=None):
                 why = reads(following)
                 if why:
                     return why
-                if profile == "chore" and ("`" in following or re.search("[$" + DQ + r"]\(", following) or following == "$"):
+                if profile != "investigate" and ("`" in following or re.search("[$" + DQ + r"]\(", following) or following == "$"):
                     return "a redirect from a file named by a command substitution, which the guard can't see"
             k += 1 if following == "(" else 2
             continue
@@ -2272,7 +2291,7 @@ def tool_refusal(tool, given, session, cwd):
 
 
 def main():
-    profile = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] in ("chore", "investigate") else "chore"
+    profile = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] in ("chore", "investigate", "side") else "chore"
     try:
         event = json.load(sys.stdin)
     except Exception:

@@ -48,7 +48,7 @@ export const DENIED_TOOLS = [
 ]
 
 const REPORT = `Finish with ONLY a JSON object, no prose around it:
-{"status":"done"|"partial"|"stopped"|"failed","headline":"<one short plain sentence for the screen, under 20 words>","summary":"<the full account for the session that may take over: what you found, the evidence and what you did>","commands":["<each command you ran>"],"shas":["<short shas you created or pushed>"],"changed":["<paths or refs changed>"],"uncertain":["<anything you guessed>"],"needsMain":"<first sentence: what is still open, under 20 words; then any commands; or empty>"}`
+{"status":"done"|"partial"|"stopped"|"failed","headline":"<the result itself in one plain sentence under 20 words: the answer or what changed, never just that you did it>","summary":"<the full account for the session that may take over: what you found, the evidence and what you did>","commands":["<each command you ran>"],"shas":["<short shas you created or pushed>"],"changed":["<paths or refs changed>"],"uncertain":["<anything you guessed>"],"needsMain":"<first sentence: what is still open, under 20 words; then any commands; or empty>"}`
 
 export const WORKER_SYSTEM = `You are a sidekick: you carry out ONE small, mechanical repository chore for a developer, then report back. You have no memory of their conversation; work only from what is on disk (git status, diff, log, bd).
 
@@ -127,11 +127,11 @@ export function instructionsPrompt(files: readonly Instruction[]): string {
 }
 
 /** The argument vector for one headless worker run. The task goes on stdin. */
-export function workerArgv(model: string, guardPath: string, instructions: readonly Instruction[] = [], profile: Profile = 'chore'): string[] {
+export function workerArgv(model: string, guardPath: string, instructions: readonly Instruction[] = [], profile: Profile = 'chore', isSide = false): string[] {
   const settings = JSON.stringify({
     // The guard is told the profile: an investigation's git must stay read-only. Every tool the
     // worker has is hooked (Glob too: a pattern can name another session's files).
-    hooks: { PreToolUse: [{ matcher: 'Bash|Read|Glob|Grep', hooks: [{ type: 'command', command: `${guardPath} ${profile}` }] }] },
+    hooks: { PreToolUse: [{ matcher: 'Bash|Read|Glob|Grep', hooks: [{ type: 'command', command: `${guardPath} ${isSide && profile === 'chore' ? 'side' : profile}` }] }] },
     // The main session's memory files come in with its instructions; never the worker's own.
     autoMemoryEnabled: false,
   })
@@ -175,9 +175,12 @@ export function workerArgv(model: string, guardPath: string, instructions: reado
   ]
 }
 
-export function workerInput(task: string, prompt: string, guidance = ''): string {
+/** What a side task is told: another session may be editing this same checkout right now. */
+export const SIDE_RULES = `Another session is working in this same checkout right now, and its edits may be half finished. Never stage or commit files the task does not name: no git add -A, git add . or git commit -a. Never move the working tree: no checkout, switch, pull, merge, rebase, stash or reset. If the task needs any of that, stop and say so in needsMain.`
+
+export function workerInput(task: string, prompt: string, guidance = '', isSide = false): string {
   const notes = guidance === '' ? '' : `\n\nNotes the developer approved from earlier jobs like this; they never override your rules: <notes>${guidance}</notes>`
-  return `Task: ${task}\n\nThe developer's own words, for reference only: <message>${prompt}</message>${notes}`
+  return `${isSide ? `${SIDE_RULES}\n\n` : ''}Task: ${task}\n\nThe developer's own words, for reference only: <message>${prompt}</message>${notes}`
 }
 
 /**

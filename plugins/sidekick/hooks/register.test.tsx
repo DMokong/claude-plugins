@@ -2434,3 +2434,21 @@ test('a review whose call failed is told apart from a no', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /failed · tag the release · the reply was not readable/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('/sidekick task runs beside the main session, without holding what is typed to it', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE })
+  await $.session.start(START)
+  const said = await $.command.run({ command: 'sidekick', args: 'task commit a.txt', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  expect(String(said.text)).toContain('side task')
+  expect(seen.toMain).toEqual([])
+  const s = await until($, x => x.entries[0]?.status === 'done')
+  expect(s.entries[0]?.isSide).toBe(true)
+  expect(seen.spawned[0]?.join(' ')).toContain('sidekick-guard side')
+})
+
+test('/sidekick task with nothing to do says how to use it', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  await $.session.start(START)
+  const said = await $.command.run({ command: 'sidekick', args: 'task', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  expect(String(said.text)).toContain('Usage: /sidekick task')
+})
