@@ -2,11 +2,11 @@ import { test, expect } from 'claude-code/testing'
 
 import { JUDGE_SYSTEM, canStart, holdsMain, judgeSystem, lockKeys, parseJudgment, precheck, resourcesOf } from './lib/judge'
 import { guidanceFor, learnSuggestion, needsNoReview, parseReview, reviewPrompt, toolUsesSince } from './lib/review'
-import { migrate, toTaught } from './lib/state'
+import { capEntries, migrate, toTaught } from './lib/state'
 import { EMPTY } from './register'
 import { workerInput, INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPrompt, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
 import { COLORS, barCells, bigText, bigWidth, dayLevels, spaced, tileMoney } from './lib/draw'
-import { appendRow, weekStart, bestDay, markGiven, perDay, agoText, savedFor, startOfDay, streak, toRows, totals, trackRecord } from './lib/history'
+import { appendRow, weekStart, bestDay, historyKey, isExpired, isHistoryKey, markGiven, mergeHistory, perDay, agoText, savedFor, startOfDay, streak, toRows, totals, trackRecord } from './lib/history'
 import type { HistoryRow } from './lib/history'
 import { PET_COLUMNS, SHEETS, encodeFrame, moodOf, newWalker, pastimeOf, petFrame, petPose } from './lib/pets'
 import { JUDGE_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
@@ -357,6 +357,46 @@ test("state an older version wrote is upgraded, so new fields are never undefine
   expect(state.entries[0]?.workerSpend.cacheRead).toBe(0)
   expect(state.entries[0]?.prompt).toBe('git status')
   expect(migrate(undefined, EMPTY)).toEqual(EMPTY)
+  // Sessions had no identity before: state without one gains the empty one, and keeps one it has.
+  expect(state.session).toBe('')
+  expect(migrate({ session: 's-1' } as never, EMPTY).session).toBe('s-1')
+  expect(migrate({ session: 7 } as never, EMPTY).session).toBe('')
+})
+
+test('the entry list keeps its newest, and never drops one that is still judging, queued or running', async () => {
+  const entry = (id: string, status: string) => migrate({ entries: [{ id, status }] } as never, EMPTY).entries[0]!
+  const newestFirst = [entry('a', 'done'), entry('b', 'running'), entry('c', 'passed'), entry('d', 'queued'), entry('e', 'failed'), entry('f', 'judging'), entry('g', 'stopped')]
+  expect(capEntries(newestFirst, 10).map(x => x.id)).toEqual(['a', 'b', 'c', 'd', 'e', 'f', 'g'])
+  // Over by three: the oldest finished ones go; the active ones stay wherever they stand.
+  expect(capEntries(newestFirst, 4).map(x => x.id)).toEqual(['b', 'd', 'f', 'a'].sort((p, q) => 'abcdefg'.indexOf(p) - 'abcdefg'.indexOf(q)))
+  // More active than the cap: all of them are kept, the cap yields.
+  const busy = ['a', 'b', 'c'].map(id => entry(id, 'running'))
+  expect(capEntries([...busy, entry('z', 'done')], 2).map(x => x.id)).toEqual(['a', 'b', 'c'])
+})
+
+test("each session keeps its own history key; the merge counts a job once and keeps every session's drafts", async () => {
+  expect(historyKey('s-1')).toBe('history:s-1')
+  expect(isHistoryKey('history')).toBe(true)
+  expect(isHistoryKey('history:s-1')).toBe(true)
+  expect(isHistoryKey('history-old')).toBe(false)
+  expect(isHistoryKey('settings')).toBe(false)
+  const row = (id: string, at: number, kind: HistoryRow['kind'] = 'chore'): HistoryRow => ({ at, kind, status: 'done', ms: 1, judgeUsd: 0.1, workerUsd: 0, savedUsd: 0, id })
+  // A job copied from the shared key into a session's own is the same job; two drafts on a day are two sessions'.
+  const merged = mergeHistory([[row('a', 30), row('draft', 20, 'draft')], [row('a', 30), row('b', 10), row('draft', 20, 'draft')]])
+  expect(merged.map(r => `${r.id}@${r.at}`)).toEqual(['b@10', 'draft@20', 'draft@20', 'a@30'])
+  // Same id at another time is another job.
+  expect(mergeHistory([[row('a', 1)], [row('a', 2)]]).length).toBe(2)
+})
+
+test('a session key is only deleted when every row in it is past the 35 days kept', async () => {
+  const now = 100 * 24 * 60 * 60 * 1000
+  const old = { at: now - 40 * 24 * 60 * 60 * 1000 }
+  expect(isExpired([old, old], now)).toBe(true)
+  expect(isExpired([old, { at: now - 1000 }], now)).toBe(false)
+  // Unreadable or empty-of-evidence stays: a failed read must never delete someone's rows.
+  expect(isExpired(undefined, now)).toBe(false)
+  expect(isExpired('rows', now)).toBe(false)
+  expect(isExpired([old, { kind: 'future-shape' }], now)).toBe(false)
 })
 
 test('stored corrections upgrade from bare strings; junk is dropped', async () => {

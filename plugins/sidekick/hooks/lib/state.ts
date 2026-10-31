@@ -11,6 +11,7 @@ export function migrate(raw: Partial<SidekickState> | undefined, empty: Sidekick
   const state = { ...empty, ...(raw ?? {}) }
   return {
     ...state,
+    session: typeof state.session === 'string' ? state.session : '',
     entries: (state.entries ?? []).map(migrateEntry),
     waiting: state.waiting ?? [],
     notes: state.notes ?? [],
@@ -28,6 +29,23 @@ export function migrate(raw: Partial<SidekickState> | undefined, empty: Sidekick
     view: state.view === 'learned' || state.view === 'job' ? state.view : 'dashboard',
     jobId: typeof state.jobId === 'string' ? state.jobId : '',
   }
+}
+
+/**
+ * The entry list, newest first, held to `max`: past it the oldest finished entries go. An entry
+ * still judging, queued or running is never dropped; it holds locks and will report.
+ */
+export function capEntries(entries: readonly Entry[], max: number): Entry[] {
+  let over = entries.length - max
+  if (over <= 0) return [...entries]
+  const dropped = new Set<number>()
+  for (let i = entries.length - 1; i >= 0 && over > 0; i -= 1) {
+    const status = entries[i]!.status
+    if (status === 'judging' || status === 'queued' || status === 'running') continue
+    dropped.add(i)
+    over -= 1
+  }
+  return entries.filter((_, i) => !dropped.has(i))
 }
 
 /**

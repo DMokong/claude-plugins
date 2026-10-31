@@ -3,7 +3,8 @@ import type { MockClock } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import type { SidekickState } from '../types'
-import { tallyOf } from './lib/cost'
+import { tallyOf, usd } from './lib/cost'
+import type { HistoryRow } from './lib/history'
 
 let clock: MockClock
 /** The mod's state as it last wrote it, seen from beneath. */
@@ -29,6 +30,12 @@ type World = {
   mainModel?: string
   /** What the store holds before the session starts. */
   stored?: Record<string, unknown>
+  /** The session's state as an earlier load of the mod left it, for the session that starts here to find. */
+  seed?: Record<string, unknown>
+  /** Runs before each write of the session's state lands, with the state as it stood and as it will stand; the write waits for it. */
+  beforeWrite?: (was: SidekickState | undefined, will: SidekickState) => Promise<void>
+  /** How many writes of a history key the store loses: the next ones answer and keep nothing. */
+  losesWrites?: { count: number }
 }
 
 /** The engine beneath the mod: answers every call it makes and records what it did. */
@@ -38,6 +45,10 @@ function world(on: On, w: World) {
   const store = new Map<string, unknown>(Object.entries(w.stored ?? {}).map(([k, v]) => [k, JSON.parse(JSON.stringify(v))]))
   on('store.get', async (_$, e) => ({ value: store.has(e.key) ? JSON.parse(JSON.stringify(store.get(e.key))) : undefined }))
   on('store.set', async (_$, e) => {
+    if (e.key.startsWith('history:') && w.losesWrites !== undefined && w.losesWrites.count > 0) {
+      w.losesWrites.count -= 1
+      return { value: undefined }
+    }
     store.set(e.key, JSON.parse(JSON.stringify(e.value)))
     return { value: undefined }
   })
@@ -49,8 +60,18 @@ function world(on: On, w: World) {
   on('session.model', async () => ({ value: w.mainModel ?? 'Opus 5.5' }))
   on('session.usage', async () => ({ value: { startedAt: 0, context: { tokens: 40_000, window: 200_000 }, rateLimits: [] } }))
   latest = undefined
+  // Until the mod first writes its state, it reads the seed: a version-0 read answers it, and the first write lands on it.
+  if (w.seed !== undefined) {
+    on('state.get', async (_$, e, next) => {
+      const read = await next(e)
+      return e.plugin === 'sidekick' && e.key === 'sidekick' && read.value.version === 0 ? { value: { value: w.seed, version: 0 } } : read
+    })
+  }
   on('state.set', async (_$, e, next) => {
-    if (e.plugin === 'sidekick' && e.key === 'sidekick') latest = e.value as SidekickState
+    if (e.plugin === 'sidekick' && e.key === 'sidekick') {
+      await w.beforeWrite?.(e.previous as SidekickState | undefined, e.value as SidekickState)
+      latest = e.value as SidekickState
+    }
     return next(e)
   })
   let release = () => {}
@@ -166,6 +187,17 @@ const DONE = '{"status":"done","summary":"Committed 3f2a91c and pushed to origin
 async function state(_$: unknown): Promise<SidekickState> {
   return latest as SidekickState
 }
+
+/** Every history row the store holds, whichever key a session kept its own under. */
+function storedRows(seen: { store: Map<string, unknown> }): HistoryRow[] {
+  const all = [...seen.store.entries()].filter(([key]) => key === 'history' || key.startsWith('history:')).flatMap(([, rows]) => rows as HistoryRow[])
+  // A job kept in two places (copied from the shared key into a session's own) is one job.
+  return all.filter((r, i) => r.kind === 'draft' || all.findIndex(o => o.kind === r.kind && o.id === r.id && o.at === r.at) === i)
+}
+
+const DAY = 24 * 60 * 60 * 1000
+/** A finished chore someone else's session recorded `ago` ms before `now`. */
+const chore = (now: number, ago: number, id: string): HistoryRow => ({ at: now - ago, kind: 'chore', status: 'done', ms: 1000, judgeUsd: 0.001, workerUsd: 0.002, savedUsd: 0.05, id })
 
 /** Moves the mocked clock on until the mod's state satisfies `ok`. */
 async function until($: unknown, ok: (s: SidekickState) => boolean): Promise<SidekickState> {
@@ -852,7 +884,7 @@ test('history: finished work and passes are kept across sessions, and give to ma
   await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
   await $.prompt.submit({ text: 'commit and push', ...TYPED })
   const s = await until($, x => x.entries[0]?.status === 'done' && x.today.done === 1)
-  const rows = seen.store.get('history') as { kind: string; status: string; savedUsd: number; id: string }[]
+  const rows = storedRows(seen)
   expect(rows.length).toBe(1)
   expect(rows[0]?.kind).toBe('chore')
   expect(rows[0]?.status).toBe('done')
@@ -871,7 +903,7 @@ test('history: finished work and passes are kept across sessions, and give to ma
   await ui.unmount()
   const after = await until($, x => x.today.savedUsd === 0)
   expect(after.today.done).toBe(0)
-  expect((seen.store.get('history') as { status: string }[])[0]?.status).toBe('given')
+  expect(storedRows(seen)[0]?.status).toBe('given')
 })
 
 test('a pass to Claude is kept in the history too', async ($, on) => {
@@ -879,15 +911,19 @@ test('a pass to Claude is kept in the history too', async ($, on) => {
   await $.session.start(START)
   await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
   await $.prompt.submit({ text: 'rename the judge function', ...TYPED })
-  expect((seen.store.get('history') as { kind: string }[]).map(r => r.kind)).toEqual(['to-claude'])
+  expect(storedRows(seen).map(r => r.kind)).toEqual(['to-claude'])
 })
 
 test('the dashboard tabs pick the span, and a narrow pane stacks the tiles', async ($, on) => {
-  world(on, { judge: MECHANICAL, worker: DONE })
+  const seen = world(on, { judge: MECHANICAL, worker: DONE })
+  // Other sessions' work: one chore today, one three days ago, two ten days ago (outside the week).
+  await clock.set(Date.UTC(2026, 9, 14, 12))
+  const now = clock.now()
+  seen.store.set('history', [chore(now, 0, 'x1'), chore(now, 3 * DAY, 'x2'), chore(now, 10 * DAY, 'x3'), chore(now, 10 * DAY, 'x4')])
   await $.session.start(START)
   await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
   await $.prompt.submit({ text: 'commit and push', ...TYPED })
-  await until($, x => x.entries[0]?.status === 'done' && x.today.done === 1)
+  await until($, x => x.entries[0]?.status === 'done' && x.today.done === 2)
   const pane = (columns: number) =>
     $.ui.mount({
       plugin: 'sidekick',
@@ -897,13 +933,13 @@ test('the dashboard tabs pick the span, and a narrow pane stacks the tiles', asy
       props: { title: 'Sidekick', isFocused: false, bodyColumns: columns, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
     } as never)
   const ui = await pane(100)
-  for (const tab of ['week', 'session', 'today'] as const) {
+  // The span decides the count: this session did 1, today holds 2, the week 3; the ten-day-old two are in none.
+  for (const [tab, chores] of [['week', 3], ['session', 1], ['today', 2]] as const) {
     await ui.press({ key: `tab-${tab}` })
     expect((await state($)).tab).toBe(tab)
-    // One chore in every span: the DONE tile draws a 1.
-    expect(await ui.find({ type: 'Text', text: /^ {2}╷ $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: new RegExp(`(^|\\D)${chores} chores · 0 looks`) })).toBeDefined()
+    for (const other of [1, 2, 3].filter(n => n !== chores)) expect(await ui.find({ type: 'Text', text: new RegExp(`(^|\\D)${other} chores · 0 looks`) })).toBeUndefined()
   }
-  expect(await ui.find({ type: 'Text', text: /1 chores · 0 looks/ })).toBeDefined()
   await ui.unmount()
   const narrow = await pane(50)
   const drawn = JSON.stringify(await (narrow as unknown as { drawn: () => Promise<unknown> }).drawn())
@@ -913,7 +949,7 @@ test('the dashboard tabs pick the span, and a narrow pane stacks the tiles', asy
   await narrow.unmount()
   const tiny = await pane(30)
   // Too narrow for segment digits: plain numbers.
-  expect(await tiny.find({ type: 'Text', text: /^1$/ })).toBeDefined()
+  expect(await tiny.find({ type: 'Text', text: /^2$/ })).toBeDefined()
   await tiny.unmount()
 })
 
@@ -950,9 +986,9 @@ test("a draft's judge call is counted once: as draft judging, not again on the m
   const typing = $.prompt as unknown as { edit: (e: unknown) => Promise<unknown> }
   await typing.edit({ origin: { kind: 'composer' }, text: '', cursor: 0, start: 0, end: 0, inputText: 'rename the judge' })
   await clock.advance(500)
-  await until($, () => Array.isArray(seen.store.get('history')))
+  await until($, () => storedRows(seen).length > 0)
   await $.prompt.submit({ text: 'rename the judge', ...TYPED })
-  const rows = seen.store.get('history') as { kind: string; judgeUsd: number }[]
+  const rows = storedRows(seen)
   const judged = rows.reduce((n, r) => n + r.judgeUsd, 0)
   // One judge call: 1000 input tokens and 1 output at Haiku's rates.
   expect(Math.abs(judged - tallyOf('haiku', { input_tokens: 1000, output_tokens: 1 }).usd) < 1e-12).toBe(true)
@@ -972,7 +1008,7 @@ test('two jobs finishing together both land in the history', async ($, on) => {
   await until($, x => x.entries.filter(e => e.status === 'running').length === 2)
   open()
   await until($, x => x.entries.every(e => e.status === 'done') && x.today.done === 2)
-  expect((seen.store.get('history') as unknown[]).length).toBe(2)
+  expect(storedRows(seen).length).toBe(2)
 })
 
 test('the folded line fits its width, keeping the toggle, at every width', async ($, on) => {
@@ -1513,6 +1549,9 @@ test('a finished main-session job the sidekick could do gets a card; yes teaches
   const { seen } = reviewWorld(on, REVIEW())
   await finishTurn($ as never)
   expect(reviews).toHaveLength(1)
+  // The review's spend is in this session's history, with its draft judging.
+  expect([...seen.store.keys()].some(k => k.startsWith('history:'))).toBe(true)
+  expect(storedRows(seen).filter(r => r.kind === 'draft').length).toBe(1)
   expect(seen.toasts.some(t => t.includes('could have done'))).toBe(true)
   const ui = await $.ui.mount(BAND(100, 30))
   expect(await ui.find({ type: 'Text', text: /Teach the sidekick: tag the release/ })).toBeDefined()
@@ -1633,4 +1672,426 @@ test('on an engine before 2.1.308 there is no pet and no chip for one', async ($
   await ui.press({ key: 'band-toggle' })
   expect(await ui.find({ key: 'pet-mochi' })).toBeUndefined()
   await ui.unmount()
+})
+
+// ── job handling and figures (trk-at9)
+
+const AUTO = { command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never
+
+/** An entry as an earlier load of the mod left it in the session's state. */
+const leftover = (id: string, status: string, extra: Record<string, unknown> = {}) => ({ id, kind: 'chore', prompt: `prompt ${id}`, status, locks: ['git:/repo'], backend: 'haiku', createdAt: 100, startedAt: status === 'running' ? 200 : 0, ...extra })
+
+test('two pumps at once start a queued job once: workers finishing together, and prompts judged together', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  // The writes that start a queued job are held back until the test lets them through together,
+  // so two pumps that both saw the job queued are both in flight.
+  const parked: (() => void)[] = []
+  let isParking = false
+  const seen = world(on, {
+    judge: MECHANICAL,
+    worker: DONE,
+    workerGate: gate,
+    stored: { settings: { maxConcurrent: 2 } },
+    beforeWrite: async (was, will) => {
+      const isClaim = isParking && will.entries.some(x => x.status === 'running' && (was?.entries ?? []).some(y => y.id === x.id && y.status === 'queued'))
+      if (isClaim) await new Promise<void>(resolve => parked.push(resolve))
+    },
+  })
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  await Promise.all([$.prompt.submit({ text: 'commit and push', ...TYPED }), $.prompt.submit({ text: 'close the bd issue', ...TYPED })])
+  await until($, x => x.entries.filter(e => e.status === 'running').length === 2)
+  expect(seen.spawned.length).toBe(2)
+  // A third waits for a slot; the two running finish together, and each finish pumps.
+  await $.prompt.submit({ text: 'tag the release in git', ...TYPED })
+  expect((await state($)).entries.filter(e => e.status === 'queued').length).toBe(1)
+  isParking = true
+  open()
+  for (let i = 0; i < 200 && parked.length < 2; i += 1) await clock.advance(10)
+  expect(parked.length).toBe(2)
+  isParking = false
+  for (const release of parked) release()
+  await until($, x => x.entries.length === 3 && x.entries.every(e => e.status === 'done'))
+  await clock.advance(100)
+  expect(seen.spawned.length).toBe(3)
+  expect((await state($)).totals.assists).toBe(3)
+  expect(storedRows(seen).length).toBe(3)
+})
+
+test('a reload leaves no process behind: running and judging entries are settled once, and held prompts go', async ($, on) => {
+  const seen = world(on, {
+    judge: MECHANICAL,
+    worker: DONE,
+    seed: {
+      mode: 'auto',
+      entries: [leftover('old-run', 'running', { workerSpend: { usd: 0.002 } }), leftover('old-judge', 'judging', { locks: [] }), leftover('old-queued', 'queued', { task: 'tag it', locks: ['bd'] })],
+      waiting: [{ id: 'w1', text: 'why does the doc mention codex twice?' }],
+    },
+  })
+  // The row the dead job already had, written just before the reload cut it off.
+  seen.store.set('history', [{ at: 300, kind: 'chore', status: 'failed', ms: 1, judgeUsd: 0, workerUsd: 0.002, savedUsd: 0, id: 'old-run' }])
+  await $.session.start(START)
+  const s = await until($, x => x.waiting.length === 0 && x.entries.some(e => e.id === 'old-queued' && e.status !== 'queued'))
+  const by = (id: string) => s.entries.find(e => e.id === id)
+  expect(by('old-run')?.status).toBe('failed')
+  expect(by('old-run')?.outcome?.summary).toMatch(/reload/i)
+  expect(by('old-judge')?.status).toBe('failed')
+  expect(by('old-judge')?.outcome?.summary).toMatch(/reload/i)
+  // The held prompt was released, and the queued job (no process either) was started afresh.
+  expect(seen.resubmitted).toEqual(['why does the doc mention codex twice?'])
+  expect(seen.spawned.length).toBe(1)
+  await until($, x => by('old-queued') !== undefined && x.entries.find(e => e.id === 'old-queued')?.status === 'done')
+  // One failed job counted once; the row it already had is not doubled, and the queued job's is its own.
+  const rows = storedRows(seen)
+  expect(rows.filter(r => r.id === 'old-run').length).toBe(1)
+  expect(rows.filter(r => r.id === 'old-judge').length).toBe(0)
+  expect((await state($)).totals.failed).toBe(1)
+  expect((await state($)).totals.assists).toBe(2)
+  // A second start (another reload) finds nothing more to settle.
+  await $.session.start(START)
+  expect((await state($)).totals.assists).toBe(2)
+  expect(storedRows(seen).filter(r => r.id === 'old-run').length).toBe(1)
+})
+
+test('a reload settles a job that never wrote a row once, and frees its locks for the next chore', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, seed: { mode: 'auto', entries: [leftover('old-run', 'running', { workerSpend: { usd: 0.002 } })] } })
+  await $.session.start(START)
+  await until($, x => x.entries[0]?.status === 'failed')
+  const rows = storedRows(seen).filter(r => r.id === 'old-run')
+  expect(rows.map(r => r.status)).toEqual(['failed'])
+  expect(rows[0]?.workerUsd).toBe(0.002)
+  // The dead job held the repository's lock; a new chore starts at once.
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries.some(e => e.id !== 'old-run' && e.status === 'done'))
+})
+
+test('a job with a live process is not settled when the module starts again', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  world(on, { judge: MECHANICAL, worker: DONE, workerGate: gate })
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'running')
+  await $.session.start(START)
+  expect((await state($)).entries[0]?.status).toBe('running')
+  open()
+  await until($, x => x.entries[0]?.status === 'done')
+})
+
+test('a prompt whose judgment outlasts the last assist goes straight to main: nothing would release it', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  const w: World = { judge: MECHANICAL, worker: DONE, workerGate: gate }
+  const seen = world(on, w)
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'running')
+  // The next message is judged slowly; the assist ends while the judge is still thinking.
+  w.judge = NEEDS_MAIN
+  w.judgeDelayMs = 1
+  const pending = $.prompt.submit({ text: 'rename the judge function', ...TYPED })
+  await clock.advance(20)
+  open()
+  await until($, x => x.entries.some(e => e.prompt === 'commit and push' && e.status === 'done'))
+  seen.release()
+  const result = await pending
+  expect(result.drop).toBeUndefined()
+  expect(seen.toMain.map(p => p.text)).toEqual(['rename the judge function'])
+  await clock.advance(100)
+  expect((await state($)).waiting).toEqual([])
+})
+
+test('a prompt added as the held ones are released is not lost with them', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  // The write that takes the held prompts out waits, so another prompt can be added while it does.
+  const parked: (() => void)[] = []
+  let isParking = false
+  const w: World = {
+    judge: MECHANICAL,
+    worker: DONE,
+    workerGate: gate,
+    beforeWrite: async (was, will) => {
+      if (isParking && (was?.waiting.length ?? 0) > 0 && will.waiting.length === 0) await new Promise<void>(resolve => parked.push(resolve))
+    },
+  }
+  const seen = world(on, w)
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'running')
+  const held = await $.prompt.submit({ text: 'why does the stage-2 doc mention codex twice?', ...TYPED })
+  expect(held.drop).toContain('held for Claude')
+  // Another message, judged slowly, is on its way to being held too.
+  w.judge = NEEDS_MAIN
+  w.judgeDelayMs = 1
+  const second = $.prompt.submit({ text: 'rename the judge function', ...TYPED })
+  await clock.advance(20)
+  isParking = true
+  open()
+  for (let i = 0; i < 200 && parked.length < 1; i += 1) await clock.advance(10)
+  expect(parked.length).toBe(1)
+  seen.release()
+  await second
+  isParking = false
+  for (const release of parked) release()
+  await until($, x => x.entries.find(e => e.prompt === 'commit and push')?.status === 'done')
+  await clock.advance(100)
+  const reached = [...seen.resubmitted, ...seen.toMain.map(p => p.text)]
+  expect(reached.sort()).toEqual(['rename the judge function', 'why does the stage-2 doc mention codex twice?'])
+  expect((await state($)).waiting).toEqual([])
+})
+
+test('a prompt with an attachment is not held: the engine cannot carry it to a resubmit, so it goes to main, and says so', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, workerGate: gate })
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'running')
+  const result = await $.prompt.submit({ text: 'why does this screenshot look wrong?', attachments: [{ type: 'image', id: 'img-1' }], ...TYPED })
+  expect(result.drop).toBeUndefined()
+  expect(seen.toMain.map(p => p.text)).toEqual(['why does this screenshot look wrong?'])
+  expect((await state($)).waiting).toEqual([])
+  expect(seen.logs.some(line => /attachment/i.test(line) && /not held/i.test(line))).toBe(true)
+  open()
+  await until($, x => x.entries[0]?.status === 'done')
+})
+
+test('the entry list keeps a running job however many finish after it', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  const w: World = { judge: MECHANICAL, worker: DONE, workerGate: gate }
+  world(on, w)
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'running')
+  // The job is the oldest entry; 60 messages for Claude come after it.
+  w.judge = NEEDS_MAIN
+  for (let i = 0; i < 60; i += 1) await $.prompt.submit({ text: `rename function number ${i}`, ...TYPED })
+  const s = await state($)
+  expect(s.entries.length).toBe(60)
+  const job = s.entries.find(e => e.prompt === 'commit and push')
+  expect(job?.status).toBe('running')
+  // The oldest finished one went instead.
+  expect(s.entries.some(e => e.prompt === 'rename function number 0')).toBe(false)
+  open()
+  await until($, x => x.entries.find(e => e.prompt === 'commit and push')?.status === 'done')
+})
+
+test('the session breakdown counts its own draft judging and reviews, and COST matches what it shows', async ($, on) => {
+  const seen = world(on, { judge: NEEDS_MAIN, worker: DONE })
+  on('prompt.edit', async (_$, e) => ({ text: e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end), cursor: e.start + e.inputText.length }))
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  const typing = $.prompt as unknown as { edit: (e: unknown) => Promise<unknown> }
+  await typing.edit({ origin: { kind: 'composer' }, text: '', cursor: 0, start: 0, end: 0, inputText: 'rename the judge function' })
+  await clock.advance(500)
+  await until($, () => storedRows(seen).some(r => r.kind === 'draft'))
+  const ui = await $.ui.mount({
+    plugin: 'sidekick',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'sidekick',
+    props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
+  } as never)
+  await ui.press({ key: 'tab-session' })
+  const call = usd(tallyOf('haiku', { input_tokens: 1000, output_tokens: 1 }).usd)
+  // The draft's one judge call shows in the draft judging row, not only in COST.
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^ +${call.replace('$', '\\$')}$`) })).toBeDefined()
+  await ui.unmount()
+})
+
+test('everything the session spent reaches the history once: warm-up, draft, job; and done counts only the job', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE })
+  on('prompt.edit', async (_$, e) => ({ text: e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end), cursor: e.start + e.inputText.length }))
+  await $.session.start(START)
+  await clock.advance(50_000)
+  await $.command.run(AUTO)
+  const typing = $.prompt as unknown as { edit: (e: unknown) => Promise<unknown> }
+  await typing.edit({ origin: { kind: 'composer' }, text: '', cursor: 0, start: 0, end: 0, inputText: 'commit and push' })
+  await clock.advance(500)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  const s = await until($, x => x.entries[0]?.status === 'done' && x.today.done === 1)
+  await clock.advance(100)
+  const rows = storedRows(seen)
+  const recorded = rows.reduce((n, r) => n + r.judgeUsd + r.workerUsd, 0)
+  expect(Math.abs(recorded - (await state($)).spend.usd)).toBeLessThan(1e-12)
+  expect(s.today.done).toBe(1)
+  // The warm-up is not a draft that was judged: it adds money to draft judging, not a count.
+  expect((await state($)).today.drafts).toBe(1)
+  expect(rows.filter(r => r.kind === 'draft').reduce((n, r) => n + r.judgeUsd, 0)).toBeGreaterThan(tallyOf('haiku', { input_tokens: 1000, output_tokens: 1 }).usd)
+})
+
+test('shadow judging is in the history too, and counts no job', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE })
+  await $.session.start(START)
+  await $.command.run({ ...AUTO, args: 'shadow' } as never)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'shadow')
+  await clock.advance(100)
+  const recorded = storedRows(seen).reduce((n, r) => n + r.judgeUsd + r.workerUsd, 0)
+  expect(recorded).toBeGreaterThan(0)
+  expect(Math.abs(recorded - (await state($)).spend.usd)).toBeLessThan(1e-12)
+  expect((await state($)).today.done).toBe(0)
+  expect(storedRows(seen).some(r => r.kind === 'chore' || r.kind === 'to-claude')).toBe(false)
+})
+
+test('the session tab survives a reload past 60 jobs: it counts the session, not the entries still listed', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, seed: { mode: 'auto', session: 'session-a', entries: [] } })
+  await clock.set(Date.UTC(2026, 9, 14, 12))
+  const now = clock.now()
+  // 70 jobs of this session (state keeps 60 entries; the rest only the history remembers) and one of another.
+  const mine = Array.from({ length: 70 }, (_, i) => chore(now, 60_000 + i, `mine-${i}`))
+  seen.store.set('history:session-a', mine)
+  seen.store.set('history:session-b', [chore(now, 1000, 'theirs')])
+  await $.session.start(START)
+  const ui = await $.ui.mount({
+    plugin: 'sidekick',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'sidekick',
+    props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
+  } as never)
+  await ui.press({ key: 'tab-session' })
+  expect(await ui.find({ type: 'Text', text: /70 chores · 0 looks/ })).toBeDefined()
+  await ui.press({ key: 'tab-today' })
+  expect(await ui.find({ type: 'Text', text: /71 chores · 0 looks/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('state written before sessions had an identity gains one, and keeps the jobs it listed', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, seed: { mode: 'auto', entries: [leftover('e1', 'done', { locks: [] })] } })
+  await clock.set(Date.UTC(2026, 9, 14, 12))
+  const now = clock.now()
+  // An older load recorded these in the shared history, and listed one of them as this session's entry.
+  seen.store.set('history', [chore(now, 5000, 'e1'), chore(now, 4000, 'someone-else')])
+  await $.session.start(START)
+  const s = await state($)
+  expect(typeof s.session).toBe('string')
+  expect(s.session).not.toBe('')
+  const ui = await $.ui.mount({
+    plugin: 'sidekick',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'sidekick',
+    props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
+  } as never)
+  await ui.press({ key: 'tab-session' })
+  expect(await ui.find({ type: 'Text', text: /(^|\D)1 chores · 0 looks/ })).toBeDefined()
+  await ui.press({ key: 'tab-today' })
+  // Counted once in the day, not once for each place it is kept.
+  expect(await ui.find({ type: 'Text', text: /(^|\D)2 chores · 0 looks/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test("another session's history is never overwritten by this one's writes, and both count", async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, workerGate: gate })
+  await clock.set(Date.UTC(2026, 9, 14, 12))
+  const now = clock.now()
+  const theirs = [chore(now, 1000, 'theirs-1')]
+  seen.store.set('history:session-b', theirs)
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'running')
+  // The other session finishes a job while this one's is mid-flight: it writes its own history.
+  seen.store.set('history:session-b', [...theirs, chore(now, 0, 'theirs-2')])
+  open()
+  await until($, x => x.entries[0]?.status === 'done' && x.today.done === 3)
+  expect(storedRows(seen).filter(r => r.kind !== 'draft').map(r => r.id).sort()).toEqual([(await state($)).entries[0]!.id, 'theirs-1', 'theirs-2'].sort())
+})
+
+test('a history write the store lost is made again', async ($, on) => {
+  const lost = { count: 2 }
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, losesWrites: lost })
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'done' && x.today.done === 1)
+  expect(lost.count).toBe(0)
+  expect(storedRows(seen).filter(r => r.kind === 'chore').length).toBe(1)
+})
+
+test('send now pressed as the held prompts are released sends the prompt once', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  // Every write that takes held prompts out waits, so the release and the press are both in flight.
+  const parked: (() => void)[] = []
+  let isParking = false
+  const seen = world(on, {
+    judge: MECHANICAL,
+    worker: DONE,
+    workerGate: gate,
+    beforeWrite: async (was, will) => {
+      if (isParking && (was?.waiting.length ?? 0) > 0 && will.waiting.length === 0) await new Promise<void>(resolve => parked.push(resolve))
+    },
+  })
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'running')
+  await $.prompt.submit({ text: 'why does the stage-2 doc mention codex twice?', ...TYPED })
+  const held = (await state($)).waiting[0]!
+  const ui = await $.ui.mount({
+    plugin: 'sidekick',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'sidekick',
+    props: { title: 'Sidekick', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
+  } as never)
+  isParking = true
+  open()
+  for (let i = 0; i < 200 && parked.length < 1; i += 1) await clock.advance(10)
+  await ui.press({ key: `send-${held.id}` })
+  for (let i = 0; i < 50 && parked.length < 2; i += 1) await clock.advance(10)
+  isParking = false
+  for (const release of parked) release()
+  await until($, x => x.entries[0]?.status === 'done' && x.waiting.length === 0)
+  await clock.advance(100)
+  await ui.unmount()
+  expect(seen.resubmitted).toEqual(['why does the stage-2 doc mention codex twice?'])
+})
+
+test('a judge call that answers after its budget is in the history, so the history adds up to the session spend', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, judgeDelayMs: 8_000, worker: DONE })
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  const pending = $.prompt.submit({ text: 'push it', ...TYPED })
+  await clock.advance(5_000)
+  const result = await pending
+  expect(result.drop).toBeUndefined()
+  expect((await state($)).entries[0]?.reason).toBe('judge timed out')
+  // The judge answers late: its money is spent, and no entry carries it.
+  seen.release()
+  await until($, x => x.spend.usd > 0)
+  await clock.advance(100)
+  const recorded = storedRows(seen).reduce((n, r) => n + r.judgeUsd + r.workerUsd, 0)
+  expect(recorded).toBeGreaterThan(0)
+  expect(Math.abs(recorded - (await state($)).spend.usd)).toBeLessThan(1e-12)
+  // It is money in draft judging; it makes no job.
+  expect((await state($)).today.done).toBe(0)
 })
