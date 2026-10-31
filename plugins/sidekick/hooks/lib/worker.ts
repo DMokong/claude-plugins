@@ -127,8 +127,9 @@ export function instructionsPrompt(files: readonly Instruction[]): string {
 /** The argument vector for one headless worker run. The task goes on stdin. */
 export function workerArgv(model: string, guardPath: string, instructions: readonly Instruction[] = [], profile: Profile = 'chore'): string[] {
   const settings = JSON.stringify({
-    // The guard is told the profile: an investigation's git must stay read-only.
-    hooks: { PreToolUse: [{ matcher: 'Bash|Read|Grep', hooks: [{ type: 'command', command: `${guardPath} ${profile}` }] }] },
+    // The guard is told the profile: an investigation's git must stay read-only. Every tool the
+    // worker has is hooked (Glob too: a pattern can name another session's files).
+    hooks: { PreToolUse: [{ matcher: 'Bash|Read|Glob|Grep', hooks: [{ type: 'command', command: `${guardPath} ${profile}` }] }] },
     // The main session's memory files come in with its instructions; never the worker's own.
     autoMemoryEnabled: false,
   })

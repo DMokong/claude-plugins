@@ -122,7 +122,7 @@ test('the worker runs lean, locked down and guarded', async () => {
   expect(argv[argv.indexOf('--settings') + 1]).toContain('/p/bin/sidekick-guard')
   // The guard sees reads too, so a credentials file never enters the worker's context.
   const settings = JSON.parse(argv[argv.indexOf('--settings') + 1] ?? '{}')
-  expect(settings.hooks.PreToolUse[0].matcher).toBe('Bash|Read|Grep')
+  expect(settings.hooks.PreToolUse[0].matcher).toBe('Bash|Read|Glob|Grep')
   expect(settings.autoMemoryEnabled).toBe(false)
   for (const rule of ['Read(**/.env)', 'Read(**/.mcp.json)']) expect(argv).toContain(rule)
   expect(argv[argv.indexOf('--append-system-prompt') + 1]).toBe(WORKER_SYSTEM)
