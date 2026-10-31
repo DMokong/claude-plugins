@@ -4,7 +4,7 @@ import type { ElementTable, EngineInterface, PromptSubmitInput, PromptSubmitResu
 import { MAX_MISSES, canStart, holdsMain, judgePrompt, judgeSystem, lockKeys, parseJudgment, precheck, taughtVerdict } from './lib/judge'
 import type { Judgment } from './lib/judge'
 import { NO_SPEND, addTally, modelName, tallyLine, tallyOf, tokens, usd } from './lib/cost'
-import { guidanceFor, learnSuggestion, needsNoReview, parseReview, REVIEW_SYSTEM, reviewPrompt, toolUsesSince } from './lib/review'
+import { guidanceFor, learnSuggestion, needsNoReview, reviewOutcome, REVIEW_SYSTEM, reviewPrompt, toolUsesSince } from './lib/review'
 import { capEntries, migrate, toTaught } from './lib/state'
 import { HISTORY_KEY, NO_TOTALS, agoText, appendRow, bestDay, historyKey, isExpired, isHistoryKey, markGiven, mergeHistory, perDay, savedFor, startOfDay, streak, toRows, totals, trackRecord, weekStart } from './lib/history'
 import type { HistoryRow } from './lib/history'
@@ -26,7 +26,7 @@ import {
   workerArgv,
   workerInput,
 } from './lib/worker'
-import type { Entry, EntryStatus, Mode, Outcome, Profile, Settings, SidekickState, Suggestion, Taught, Tally } from '../types'
+import type { Entry, EntryStatus, Mode, Outcome, Profile, ReviewNote, Settings, SidekickState, Suggestion, Taught, Tally } from '../types'
 
 export const EMPTY: SidekickState = {
   session: '',
@@ -41,6 +41,7 @@ export const EMPTY: SidekickState = {
   isWarming: false,
   learned: [],
   suggestions: [],
+  reviews: [],
   instructions: null,
   settings: defaultsFrom({}),
   panelOpen: false,
@@ -231,7 +232,8 @@ async function judge($: EngineInterface, text: string, budgetMs: number | null =
         model: live.judgeModel,
         system: judgeSystem(misses),
         prompt: judgePrompt(text, `cwd: ${cwd}`),
-        maxTokens: 8,
+        // A verdict and a reason of a dozen words.
+        maxTokens: 40,
         ...(budgetMs === null ? {} : { timeoutMs: budgetMs }),
       },
       { signal: stop.signal },
@@ -800,7 +802,7 @@ async function shadowJudge($: EngineInterface, id: string, text: string): Promis
   await patchEntry($, id, () => ({
     status: would ? 'shadow' : 'passed',
     verdict: judgment.verdict,
-    reason: `${would ? `${what}: ${judgment.task}` : judgment.reason}${ms > JUDGE_TIMEOUT_MS ? ' · over budget' : ''} (git ${stateMs}ms)`,
+    reason: `${would ? `${what}: ${judgment.reason}` : judgment.reason}${ms > JUDGE_TIMEOUT_MS ? ' · over budget' : ''} (git ${stateMs}ms)`,
     task: judgment.task,
     judgeMs: ms,
     judgeSpend: spend,
@@ -902,6 +904,7 @@ let awaitingReview: string | null = null
 const REVIEWED_KEY = 'review-ignored'
 const REVIEW_TIMEOUT_MS = 30_000
 const MAX_SUGGESTIONS = 5
+const MAX_REVIEW_NOTES = 5
 
 const normalized = (text: string) => text.trim().toLowerCase().replace(/\s+/g, ' ')
 
@@ -915,17 +918,29 @@ async function reviewTurn($: EngineInterface, prompt: string, answer: string): P
   if (known.some(t => t.verdict === 'needs-main' && normalized(t.text) === normalized(prompt))) return
   const uses = toolUsesSince(await $.session.messages(), prompt)
   if (uses === null || needsNoReview(uses) !== null) return
-  const reply = await $.model.complete({ model: live.judgeModel, system: REVIEW_SYSTEM, prompt: reviewPrompt(prompt, uses, answer, known), maxTokens: 500, timeoutMs: REVIEW_TIMEOUT_MS })
+  const noted = (outcome: ReviewNote['outcome'], detail: string) => noteReview($, { at: 0, prompt, outcome, detail })
+  const reply = await $.model.complete({ model: live.judgeModel, system: REVIEW_SYSTEM, prompt: reviewPrompt(prompt, uses, answer, known), maxTokens: 500, timeoutMs: REVIEW_TIMEOUT_MS }).catch(() => undefined)
+  if (reply === undefined) return noted('failed', 'the call failed')
   const spent = tallyOf(live.judgeModel, reply.usage)
   await addSpend($, spent)
   await record($, { at: 0, kind: 'draft', status: 'passed', ms: 0, judgeUsd: spent.usd, workerUsd: 0, savedUsd: 0, id: 'draft', count: 1 })
-  if (!reply.isAnswered) return
-  const suggestion = parseReview(reply.text, `s-${await $.clock.now()}`, prompt, known)
-  if (suggestion === null) return
+  if (!reply.isAnswered) return noted('failed', `no answer: ${reply.reason}`)
+  const result = reviewOutcome(reply.text, `s-${await $.clock.now()}`, prompt, known)
+  if (result.kind === 'failed') return noted('failed', result.why)
+  if (result.kind === 'no') return noted('no', result.reason)
+  if (result.kind === 'low') return noted('low', `${result.confidence}${result.reason === '' ? '' : ` · ${result.reason}`}`)
+  const suggestion = result.suggestion
+  await noted('asked', suggestion.reason)
   await change($, s => ({ ...s, suggestions: [...s.suggestions, suggestion] }))
   const said = `${suggestion.refines === null ? 'The sidekick could have done' : 'The sidekick could do better at'} "${clip(prompt, 50)}": see above the prompt`
   $.ui.log(`✎ ${said}`)
   if (live.notifications) $.ui.toast(said)
+}
+
+/** Keeps how a review came out, the last few, for the pane. */
+async function noteReview($: EngineInterface, note: ReviewNote): Promise<void> {
+  const at = await $.clock.now()
+  await change($, s => ({ ...s, reviews: [...s.reviews, { ...note, at }].slice(-MAX_REVIEW_NOTES) }))
 }
 
 const dropSuggestion = ($: EngineInterface, id: string) => change($, s => ({ ...s, suggestions: s.suggestions.filter(x => x.id !== id) }))
@@ -1201,7 +1216,16 @@ export const register: Register = (on, options) => {
       return { drop: `❯ ${clip(e.text.replace(/\s+/g, ' '), 160)} · held for Claude until the sidekick finishes (/sidekick → send now)` }
     }
     if (isMidTurn) return toMain($, e, next)
-    if (!pre.isJudged) return holdForAssists(pre.why)
+    if (!pre.isJudged) {
+      // Not judged, and still a decision: say why it stays with Claude, in chat and as an entry for the pane and the band.
+      if (e.text.trim() !== '') {
+        const id = newId(now)
+        await addEntry($, { ...blankEntry(id, e.text, now), status: 'passed', reason: pre.why, endedAt: now })
+        redrawAfterLinger($)
+        $.ui.log(`→ to Claude: ${pre.why}`)
+      }
+      return holdForAssists(pre.why)
+    }
 
     const id = newId(now)
     await addEntry($, blankEntry(id, e.text, now))
@@ -1232,7 +1256,7 @@ export const register: Register = (on, options) => {
     void enqueue($, id, routed, repo).catch(() => {})
     clearRestored($, e.text)
     const doing = routed.verdict === 'investigate' ? ' · investigating' : ''
-    return { drop: `❯ ${e.text} → sidekick (${live.workerModel})${doing} · judged in ${(ms / 1000).toFixed(1)}s` }
+    return { drop: `❯ ${e.text} → sidekick (${live.workerModel})${doing} · judged in ${(ms / 1000).toFixed(1)}s — ${routed.reason}` }
   }).catch(($, e, next) => next(e)) // fail open: any error lets the prompt through as typed
 
   on('turn.complete', async ($, e, next) => {
@@ -1408,6 +1432,7 @@ export const register: Register = (on, options) => {
           ) : (
             <Text dimColor wrap="wrap">{job.outcome?.summary ?? entryDetail(job, now)}</Text>
           )}
+          {job.reason !== '' && job.outcome !== null && <Text dimColor wrap="wrap">{`why: ${job.reason}`}</Text>}
           {buttonsFor(job)}
           {watched({ ...job, id: job.id }) ?? null}
           {state.watching !== job.id && (
@@ -1528,6 +1553,9 @@ export const register: Register = (on, options) => {
     const colW = Math.max(3, Math.min(9, Math.floor(width / 7)))
     const gapW = colW >= 5 ? 2 : 1
     const recent = state.entries.filter(x => !ACTIVE.includes(x.status)).slice(0, 6)
+    // How the last few reviews of the main session's turns came out, newest first: a no, a doubt and a failure each leave a line.
+    const reviewLabel: Record<ReviewNote['outcome'], string> = { asked: 'asked you', no: 'no', low: 'low confidence', failed: 'failed' }
+    const reviewLines = [...state.reviews].reverse().map(r => ({ key: `rv-${r.at}-${r.prompt}`, text: clip(`✎ ${reviewLabel[r.outcome]} · ${clip(r.prompt.replace(/\s+/g, ' '), 28)} · ${r.detail}`, width - 4) }))
     const markOf = (entry: Entry) => {
       const mark = entry.outcome?.status === 'partial' ? '◐' : STATUS_MARK[entry.status]
       const color = entry.status === 'done' ? (mark === '◐' ? COLORS.orange : COLORS.green) : entry.status === 'passed' || entry.status === 'shadow' ? COLORS.purple : COLORS.pink
@@ -1641,6 +1669,10 @@ export const register: Register = (on, options) => {
               </Box>
             )
           })}
+          {reviewLines.length > 0 && rule('h-reviews', 'RECENT REVIEWS', 'of finished Claude turns')}
+          {reviewLines.map(r => (
+            <Text key={r.key} dimColor wrap="truncate-end">{r.text}</Text>
+          ))}
           <Text dimColor wrap="wrap">{`Context: ${contextLine(state.instructions)}`}</Text>
         </Box>
       )
@@ -1785,21 +1817,30 @@ export const register: Register = (on, options) => {
         </Box>
 
         {recent.length > 0 && rule('h-recent', 'RECENT', 'open one for its details')}
-        <Box flexWrap="wrap">
+        <Box flexDirection="column">
           {recent.map(entry => {
             const { mark, color } = markOf(entry)
             const seconds = entry.endedAt > 0 ? `${Math.max(1, Math.round((entry.endedAt - (entry.startedAt || entry.createdAt)) / 1000))}s` : ''
+            // Why it went the way it went: the answer for a finished job, else the reason it was routed.
+            const why = entry.outcome?.summary.split('\n')[0] ?? entry.reason
             return (
-              <Box key={`rc-${entry.id}`} flexWrap="nowrap">
-                <Button key={`job-${entry.id}`} label={`${mark} ${clip(`${kindTag(entry)}${entry.prompt}`, Math.max(20, Math.floor(width / 2) - 8))}`} plain onPress={openJob(entry.id)}>
-                  <Text color={color}>{`${mark} `}</Text>
-                  <Text>{clip(`${kindTag(entry)}${entry.prompt}`, Math.max(20, Math.floor(width / 2) - 8))}</Text>
-                </Button>
-                <Text dimColor>{` ${seconds}   `}</Text>
+              <Box key={`rc-${entry.id}`} flexDirection="column">
+                <Box flexWrap="nowrap">
+                  <Button key={`job-${entry.id}`} label={`${mark} ${clip(`${kindTag(entry)}${entry.prompt}`, Math.max(20, Math.floor(width / 2) - 8))}`} plain onPress={openJob(entry.id)}>
+                    <Text color={color}>{`${mark} `}</Text>
+                    <Text>{clip(`${kindTag(entry)}${entry.prompt}`, Math.max(20, Math.floor(width / 2) - 8))}</Text>
+                  </Button>
+                  <Text dimColor>{` ${seconds}`}</Text>
+                </Box>
+                {why !== '' && <Text dimColor wrap="truncate-end">{`    ${clip(why, width - 8)}`}</Text>}
               </Box>
             )
           })}
         </Box>
+        {reviewLines.length > 0 && rule('h-reviews', 'RECENT REVIEWS', 'of finished Claude turns')}
+        {reviewLines.map(r => (
+          <Text key={r.key} dimColor wrap="truncate-end">{r.text}</Text>
+        ))}
         <Box marginTop={1}>
           <Text dimColor wrap="wrap">{`context  ${contextLine(state.instructions)}`}</Text>
         </Box>
@@ -1957,7 +1998,7 @@ export const register: Register = (on, options) => {
             <Text dimColor>{` ${ageOf(lead)}s`}</Text>
           </Box>
           <Box flexWrap="nowrap">
-            <Text dimColor>{'○ Report back to Claude'}</Text>
+            <Text dimColor>{lead.reason !== '' ? `○ ${clip(lead.reason, Math.max(10, cardWidth - 36))} · Report back to Claude` : '○ Report back to Claude'}</Text>
             <Box flexGrow={1} />
             <Text dimColor>{'Next'}</Text>
           </Box>
@@ -1988,7 +2029,7 @@ export const register: Register = (on, options) => {
             <Text bold>{clip(finished.prompt, cardWidth - 20)}</Text>
           </Box>
           <Text wrap="truncate-end">{clip(finished.outcome?.summary ?? entryDetail(finished, now), cardWidth - 6)}</Text>
-          <Text dimColor>{`○ ${finished.status} ${Math.max(0, Math.round((now - finished.endedAt) / 1000))}s ago`}</Text>
+          <Text dimColor>{`○ ${finished.status} ${Math.max(0, Math.round((now - finished.endedAt) / 1000))}s ago${finished.reason !== '' ? ` · ${clip(finished.reason, Math.max(10, cardWidth - 30))}` : ''}`}</Text>
         </Box>
       ) : suggestion !== undefined && !state.panelOpen ? (
         <Box key="sk-card" flexDirection="column" borderStyle="round" borderColor={COLORS.purple} paddingX={1}>

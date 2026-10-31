@@ -304,7 +304,7 @@ test('a prompt for main waits while an assist runs, then is sent in order', asyn
   expect((await state($)).waiting.map(w => w.text)).toEqual(['why does the stage-2 doc mention codex twice?'])
 
   open()
-  await until($, x => x.entries[0]?.status === 'done' && x.waiting.length === 0)
+  await until($, x => x.entries.find(e => e.prompt === 'commit and push')?.status === 'done' && x.waiting.length === 0)
   expect(seen.resubmitted).toEqual(['why does the stage-2 doc mention codex twice?'])
 })
 
@@ -435,24 +435,24 @@ test('a running investigation does not hold prompts for the main session', async
 })
 
 test('shadow says what it would investigate', async ($, on) => {
-  const seen = world(on, { judge: INVESTIGATE, worker: LOOKED })
+  const seen = world(on, { judge: 'investigate: acme-bot is a service whose logs are on this machine', worker: LOOKED })
   await $.session.start(START)
   await $.command.run({ command: 'sidekick', args: 'shadow', origin: { kind: 'composer' }, presentation: 'inline' } as never)
   await $.prompt.submit({ text: 'check the acme-bot logs', ...TYPED })
   const s = await until($, x => x.entries[0]?.status === 'shadow')
-  expect(s.entries[0]?.reason).toContain('would investigate: check the acme-bot logs')
+  expect(s.entries[0]?.reason).toContain('would investigate: acme-bot is a service whose logs are on this machine')
   expect(seen.spawned).toEqual([])
 })
 
 test('shadow judges and logs, but everything still goes to main', async ($, on) => {
-  const seen = world(on, { judge: MECHANICAL, worker: DONE })
+  const seen = world(on, { judge: 'mechanical: commits and pushes this branch', worker: DONE })
   await $.session.start(START)
   await $.command.run({ command: 'sidekick', args: 'shadow', origin: { kind: 'composer' }, presentation: 'inline' } as never)
   const result = await $.prompt.submit({ text: 'commit and push', ...TYPED })
   expect(result.drop).toBeUndefined()
   expect(seen.toMain.map(p => p.text)).toEqual(['commit and push'])
   const s = await until($, x => x.entries[0]?.status === 'shadow')
-  expect(s.entries[0]?.reason).toContain('would hand off: commit and push')
+  expect(s.entries[0]?.reason).toContain('would hand off: commits and pushes this branch')
   expect(seen.spawned).toEqual([])
 })
 
@@ -1874,7 +1874,7 @@ test('a prompt with an attachment is not held: the engine cannot carry it to a r
   expect((await state($)).waiting).toEqual([])
   expect(seen.logs.some(line => /attachment/i.test(line) && /not held/i.test(line))).toBe(true)
   open()
-  await until($, x => x.entries[0]?.status === 'done')
+  await until($, x => x.entries.find(e => e.prompt === 'commit and push')?.status === 'done')
 })
 
 test('the entry list keeps a running job however many finish after it', async ($, on) => {
@@ -2075,7 +2075,7 @@ test('send now pressed as the held prompts are released sends the prompt once', 
   for (let i = 0; i < 50 && parked.length < 2; i += 1) await clock.advance(10)
   isParking = false
   for (const release of parked) release()
-  await until($, x => x.entries[0]?.status === 'done' && x.waiting.length === 0)
+  await until($, x => x.entries.find(e => e.prompt === 'commit and push')?.status === 'done' && x.waiting.length === 0)
   await clock.advance(100)
   await ui.unmount()
   expect(seen.resubmitted).toEqual(['why does the stage-2 doc mention codex twice?'])
@@ -2111,7 +2111,7 @@ test('a reload with only a queued job, or only held prompts, still moves them', 
   })
   await $.session.start(START)
   // Nothing was running or judging; the queue and the held prompt still go.
-  await until($, x => x.entries[0]?.status === 'done' && x.waiting.length === 0)
+  await until($, x => x.entries.find(e => e.id === 'q1')?.status === 'done' && x.waiting.length === 0)
   expect(seen.spawned.length).toBe(1)
   expect(seen.resubmitted).toEqual(['why does the doc mention codex twice?'])
 })
@@ -2230,4 +2230,105 @@ test('a worker answer over 400 characters is whole in the job view and the recor
   // The main session's note says it was shortened, and points to the record.
   expect(seen.appended.at(-1)).toContain('[shortened')
   expect(seen.appended.at(-1)).toContain('full answer in the record')
+})
+
+// ── trk-547
+
+const paneProps = (columns = 100) =>
+  ({ plugin: 'sidekick', surface: 'terminal', component: 'Pane', requestId: 'sidekick', props: { title: 'Sidekick', isFocused: false, bodyColumns: columns, placement: 'dock', scroll: { offset: 0, bodyRows: 80 }, view: {} } }) as never
+
+test("a job handed to the sidekick shows the judge's reason in chat, in the job view and on the band's card", async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  world(on, { judge: 'mechanical: commits and pushes the checked-out branch', worker: DONE, workerGate: gate })
+  underBand(on)
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  const result = await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  expect(result.drop).toContain('commits and pushes the checked-out branch')
+  const s = await until($, x => x.entries[0]?.status === 'running')
+  expect(s.entries[0]?.reason).toBe('commits and pushes the checked-out branch')
+  const band = await $.ui.mount(BAND(100, 30))
+  expect(await band.find({ type: 'Text', text: /commits and pushes the checked-out branch/ })).toBeDefined()
+  await band.unmount()
+  open()
+  await until($, x => x.entries[0]?.status === 'done')
+  const ui = await $.ui.mount(paneProps())
+  await openJob(ui, s.entries[0]?.id)
+  expect(await ui.find({ type: 'Text', text: /commits and pushes the checked-out branch/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test("a message left with Claude shows the judge's reason in chat, the pane and the band; the bare word still routes", async ($, on) => {
+  const seen = world(on, { judge: 'needs-main: renames a function, which is a code change', worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  const band = await $.ui.mount(BAND(100, 30))
+  await clock.advance(1_000)
+  await $.prompt.submit({ text: 'rename the judge function', ...TYPED })
+  expect(seen.logs.some(line => line.startsWith('→ to Claude: renames a function, which is a code change'))).toBe(true)
+  expect(await band.find({ type: 'Text', text: /renames a function, which is a code change/ })).toBeDefined()
+  await band.unmount()
+  const ui = await $.ui.mount(paneProps())
+  expect(await ui.find({ type: 'Text', text: /renames a function, which is a code change/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a message the precheck keeps from the judge shows why: in chat, the pane and the band, with no judge call and no figures', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  await $.command.run(AUTO)
+  const band = await $.ui.mount(BAND(100, 30))
+  await clock.advance(1_000)
+  await $.prompt.submit({ text: 'why does the stage-2 doc mention codex twice?', ...TYPED })
+  expect(seen.judged).toBe(0)
+  expect(seen.logs).toContain('→ to Claude: asks for reasoning, which stays with Claude')
+  const s = await state($)
+  expect(s.entries[0]).toMatchObject({ status: 'passed', reason: 'asks for reasoning, which stays with Claude' })
+  // Nothing was judged, so nothing is counted as a judged pass.
+  expect(s.totals.passed).toBe(0)
+  expect(storedRows(seen).some(r => r.kind === 'to-claude')).toBe(false)
+  expect(await band.find({ type: 'Text', text: /asks for reasoning, which stays with Claude/ })).toBeDefined()
+  await band.unmount()
+  const ui = await $.ui.mount(paneProps())
+  expect(await ui.find({ type: 'Text', text: /asks for reasoning, which stays with Claude/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a review that says no, is unsure, or fails leaves a line in the pane, and no card', async ($, on) => {
+  reviewWorld(on, REVIEW({ could: false, reason: 'It needed the plan from earlier.' }))
+  await finishTurn($ as never)
+  expect(reviews).toHaveLength(1)
+  expect((await state($)).suggestions).toEqual([])
+  const s = await state($)
+  expect(s.reviews.map(r => r.outcome)).toEqual(['no'])
+  expect(s.reviews[0]).toMatchObject({ prompt: 'tag the release', detail: 'It needed the plan from earlier.' })
+  const ui = await $.ui.mount(paneProps())
+  expect(await ui.find({ type: 'Text', text: /no · tag the release · It needed the plan from earlier\./ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a review under 0.7 confidence shows its number, and a failed review says it failed', async ($, on) => {
+  reviewWorld(on, REVIEW({ confidence: 0.55, reason: 'Probably routine.' }))
+  await finishTurn($ as never)
+  const low = await state($)
+  expect(low.suggestions).toEqual([])
+  expect(low.reviews[0]).toMatchObject({ outcome: 'low', detail: '0.55 · Probably routine.' })
+  const ui = await $.ui.mount(paneProps())
+  expect(await ui.find({ type: 'Text', text: /low confidence · tag the release · 0\.55/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a review whose call failed is told apart from a no', async ($, on) => {
+  reviewWorld(on, 'this is not json')
+  await finishTurn($ as never)
+  const s = await state($)
+  expect(s.reviews[0]).toMatchObject({ outcome: 'failed', detail: 'the reply was not readable' })
+  const ui = await $.ui.mount(paneProps())
+  expect(await ui.find({ type: 'Text', text: /failed · tag the release · the reply was not readable/ })).toBeDefined()
+  await ui.unmount()
 })

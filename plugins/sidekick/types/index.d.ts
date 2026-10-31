@@ -71,6 +71,16 @@ export type Suggestion = {
   refines: string | null
 }
 
+/** How a review of a finished main-session turn came out: a card for the person (`asked`), or a reason it did not. */
+export type ReviewNote = {
+  at: number
+  /** The message the turn answered. */
+  prompt: string
+  outcome: 'asked' | 'no' | 'low' | 'failed'
+  /** `no`: the review's reason; `low`: its confidence, then its reason; `failed`: why it could not be read; `asked`: its reason. */
+  detail: string
+}
+
 export type EntryStatus =
   | 'judging'
   | 'queued'
@@ -151,6 +161,8 @@ export type SidekickState = {
   learned: Taught[]
   /** Reviews waiting on the person's answer, oldest first. */
   suggestions: Suggestion[]
+  /** How the last few reviews came out, oldest first, so a no, a doubt and a failure leave a trace. */
+  reviews: ReviewNote[]
   /**
    * The main session's instruction files, captured when it built its context; the worker gets the
    * same. Null until that happens in a conversation this mod saw (it is redone after a compaction or /clear).

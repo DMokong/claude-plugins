@@ -1,7 +1,7 @@
 import { test, expect } from 'claude-code/testing'
 
 import { JUDGE_SYSTEM, canStart, holdsMain, judgeSystem, lockKeys, parseJudgment, precheck, resourcesOf } from './lib/judge'
-import { guidanceFor, learnSuggestion, needsNoReview, parseReview, reviewPrompt, toolUsesSince } from './lib/review'
+import { guidanceFor, learnSuggestion, needsNoReview, parseReview, reviewOutcome, reviewPrompt, toolUsesSince } from './lib/review'
 import { capEntries, migrate, toTaught } from './lib/state'
 import { EMPTY } from './register'
 import { SUMMARY_LIMIT, workerInput, INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPrompt, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
@@ -845,4 +845,54 @@ test('the chat line and the handoff note say when they show less than the answer
   const short = parseOutcome('{"status":"done","summary":"Committed abc1234"}', false)
   expect(handoffNote('push', short, 'haiku')).not.toContain('shortened')
   expect(chatLine(short, 'haiku', 1)).toBe('✓ Committed abc1234 · haiku · 1s')
+})
+
+// ── trk-547: every routing decision has a specific reason
+
+test("the judge's reason follows its verdict, and a bare verdict word still works", async () => {
+  expect(parseJudgment('mechanical: commits and pushes the checked-out branch', 'commit and push')).toEqual({
+    verdict: 'mechanical',
+    task: 'commit and push',
+    resources: ['git'],
+    reason: 'commits and pushes the checked-out branch',
+  })
+  expect(parseJudgment('needs-main — renames a function, which is a code change\nsecond line', 'x').reason).toBe('renames a function, which is a code change second line')
+  expect(parseJudgment('Investigate: acme-bot is a service on this machine.', 'x').reason).toBe('acme-bot is a service on this machine.')
+  expect(parseJudgment('unclear: depends on an earlier message', 'x')).toMatchObject({ verdict: 'unclear', reason: 'judge unsure: depends on an earlier message' })
+  // A bare word keeps its canned reason; so do the strictness and the fail-open of before.
+  expect(parseJudgment('needs-main', 'x').reason).toBe('needs the main session')
+  expect(parseJudgment('sure: mechanical', 'x')).toMatchObject({ verdict: 'unclear', reason: 'judge unsure ("sure: mechanical")' })
+  expect(parseJudgment('', 'x')).toMatchObject({ verdict: 'unclear', reason: 'judge unsure' })
+  // A long reason is cut with a mark; control characters never reach a line.
+  const long = parseJudgment(`mechanical: ${'a'.repeat(300)}`, 'x').reason
+  expect(long.length).toBe(120)
+  expect(long.endsWith('…')).toBe(true)
+  expect(parseJudgment('mechanical: a\u0007b', 'x').reason).toBe('a b')
+  expect(JUDGE_SYSTEM).toContain('<verdict>: <reason>')
+})
+
+test('each precheck rejection says why in a line of its own', async () => {
+  const why = (text: string, attached = false) => {
+    const pre = precheck(text, attached)
+    return pre.isJudged ? '' : pre.why
+  }
+  expect(why('why does the stage-2 doc mention codex twice?')).toBe('asks for reasoning, which stays with Claude')
+  expect(why('commit this', true)).toContain('attachment')
+  expect(why('x'.repeat(201))).toBe('201 characters: longer than a quick chore (200)')
+  expect(why('line one\nline two')).toBe('several lines: not a quick chore')
+  expect(why('commit what we just discussed')).toContain('refers to the conversation')
+  expect(why('   ')).toBe('empty message')
+})
+
+test('a review says no, low confidence, failed or yes, each with its detail', async () => {
+  const yes = reviewOutcome(JSON.stringify({ could: true, confidence: 0.9, kind: 'chore', reason: 'routine', guidance: 'g' }), 'a', 'tag it', [])
+  expect(yes.kind).toBe('suggest')
+  expect(reviewOutcome(JSON.stringify({ could: false, confidence: 0.9, reason: 'needed the earlier plan' }), 'a', 'x', [])).toEqual({ kind: 'no', reason: 'needed the earlier plan' })
+  expect(reviewOutcome(JSON.stringify({ could: false }), 'a', 'x', [])).toEqual({ kind: 'no', reason: 'no reason given' })
+  expect(reviewOutcome(JSON.stringify({ could: true, confidence: 0.55, reason: 'maybe', guidance: 'g' }), 'a', 'x', [])).toEqual({ kind: 'low', confidence: 0.55, reason: 'maybe' })
+  expect(reviewOutcome('not json', 'a', 'x', [])).toEqual({ kind: 'failed', why: 'the reply was not readable' })
+  expect(reviewOutcome(JSON.stringify({ could: true, confidence: 0.9 }), 'a', 'x', [])).toEqual({ kind: 'failed', why: 'it gave no guidance' })
+  // The old reading is unchanged: a suggestion only for a yes.
+  expect(parseReview(JSON.stringify({ could: false, reason: 'r' }), 'a', 'x', [])).toBeNull()
+  expect(parseReview(JSON.stringify({ could: true, confidence: 0.5, guidance: 'g' }), 'a', 'x', [])).toBeNull()
 })

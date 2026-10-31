@@ -173,10 +173,15 @@ flowchart TD
    "why…" or "how does…" questions (unless they're about something running: *"why did the
    nightly job fail?"* goes to the judge), and anything you type while Claude is mid-reply go straight to
    Claude. They never wait on a model.
-2. **Judge (Haiku, one word).** For everything else, a small model answers `mechanical`,
-   `investigate`, `needs-main` or `unclear`. It starts judging your **draft** as soon as you pause typing, so the
+2. **Judge (Haiku, a verdict and a reason).** For everything else, a small model answers `mechanical`,
+   `investigate`, `needs-main` or `unclear`, with a reason of a few words (`needs-main: renames a symbol, a code change`). It starts judging your **draft** as soon as you pause typing, so the
    verdict is usually ready when you press Enter. A submit never waits more than 5 s. A slow or
-   failed judge sends the message to Claude.
+   failed judge sends the message to Claude. A bare verdict word still routes; anything unreadable is `unclear`.
+
+   **Every decision shows its reason**, in the chat line, in the pane (the job's details, and under
+   **RECENT**) and on the band's card, for the sidekick and for Claude alike. A message the precheck
+   keeps from the judge says which rule (`asks for reasoning, which stays with Claude`, `201 characters:
+   longer than a quick chore (200)`, ...). Asking for the reason adds about 20 output tokens to each call.
 3. **Worker (Haiku, separate session).** A headless `claude -p` session runs in your repo with a
    lean setup: no MCP servers, skills, hooks or plugins, and only Bash/Read/Glob/Grep, limited to
    `git`, `bd` and a few read-only helpers. It does get **the instruction files your main session
@@ -360,7 +365,7 @@ starting to type: it never stands between you and the prompt.
 
 When the judge leaves a message with Claude and Claude finishes it, the sidekick reviews the job: given only what the worker would have, could it have done this? Turns that used no tools, more than 25 tools, or tools the worker lacks are settled without spending a call. Long or multi-line messages are never reviewed, since they never reach the judge.
 
-If the answer is a confident yes, a card above the prompt recommends it:
+Every review leaves a line under **RECENT REVIEWS** in the dashboard, so a no is not silent: `no` with its reason, `low confidence` with its number (under 0.7 asks nothing), `failed` with why the call or its reply could not be used, or `asked you`. Only a confident yes gets a card above the prompt:
 
 - **Yes** adds it to the learned list, with guidance drawn from what Claude did. The judge sends messages like it to the sidekick, and the worker is told that guidance on jobs like it.
 - **No** teaches the judge that this kind stays with Claude.

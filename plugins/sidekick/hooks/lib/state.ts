@@ -21,6 +21,7 @@ export function migrate(raw: Partial<SidekickState> | undefined, empty: Sidekick
     isWarming: state.isWarming === true,
     learned: toTaught(state.learned),
     suggestions: Array.isArray(state.suggestions) ? state.suggestions : [],
+    reviews: Array.isArray(state.reviews) ? state.reviews : [],
     instructions: Array.isArray(state.instructions) ? state.instructions : null,
     settings: { ...empty.settings, ...(state.settings ?? {}), pet: toPetChoice(state.settings?.pet, empty.settings.pet) },
     panelOpen: state.panelOpen === true,
