@@ -1198,6 +1198,17 @@ class TrkMrn(unittest.TestCase):
         self.assertIn("Stop and report", bash("herdr agent prompt x hi", profile="investigate")[1])
         self.assertIn("Stop and report", bash("herdr agent get", profile="chore")[1])
 
+    def test_a_side_task_leaves_the_shared_checkout_alone(self):
+        for command in ["git add -A", "git add .", "git add --all", "git add -u", "git add", "git commit -am x", "git commit -a -m x", "git commit --amend", "git checkout main", "git switch x",
+                        "git pull", "git rebase main", "git merge x", "git stash", "git stash pop", "git reset HEAD~1", "git restore a", "git clean -n", "cat a; git pull", "cd sub && git add ."]:
+            code, said = bash(command, profile="side")
+            self.assertEqual(code, 2, command)
+        for command in ["git status", "git add a.txt b.txt", "git commit -m x", "git push", "git fetch", "git log -3 --oneline", "git diff", "git tag v1", "git stash list", "bd list", "git add a.txt && git commit -m x && git push"]:
+            self.assertEqual(bash(command, profile="side")[0], 0, command)
+        for command in ["git push --force", "rm x", "cat .env"]:
+            self.assertEqual(bash(command, profile="side")[0], 2, command)
+        self.assertEqual(bash("git pull", profile="chore")[0], 0)
+
     def test_a_chore_gets_no_herdr_at_all(self):
         for command in ["herdr --version", "herdr --help", "herdr pane list", "herdr agent get x", "herdr pane read a --lines 50", "herdr agent read a --lines 50"]:
             self.assert_refused(command, "chore")

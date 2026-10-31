@@ -108,6 +108,8 @@ export type Entry = {
   id: string
   /** A git/bd chore or an investigation; chores before 0.3.0 read as chores. */
   kind: Profile
+  /** Asked for with /sidekick task, to run beside whatever the main session is doing. */
+  isSide?: boolean
   /** The prompt as the person typed it. */
   prompt: string
   status: EntryStatus

@@ -4,17 +4,22 @@
 
 **A cheap, fast helper for Claude Code that takes the chores so your main session doesn't have to.**
 
-[![version](https://img.shields.io/badge/version-0.5.4-d97757)](#changelog)
+[![version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FDMokong%2Fclaude-plugins%2Fmain%2Fplugins%2Fsidekick%2F.claude-plugin%2Fplugin.json&query=%24.version&label=version&color=d97757)](#changelog)
 [![tests](https://github.com/DMokong/claude-plugins/actions/workflows/tests.yml/badge.svg)](https://github.com/DMokong/claude-plugins/actions/workflows/tests.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue)](../../LICENSE)
+[![stars](https://img.shields.io/github/stars/DMokong/claude-plugins?style=flat&color=e8c170)](https://github.com/DMokong/claude-plugins/stargazers)
+[![last commit](https://img.shields.io/github/last-commit/DMokong/claude-plugins?path=plugins%2Fsidekick&label=last%20commit&color=475569)](https://github.com/DMokong/claude-plugins/commits/main/plugins/sidekick)
+[![open issues](https://img.shields.io/github/issues/DMokong/claude-plugins?color=f0a070)](https://github.com/DMokong/claude-plugins/issues)
+<br>
 [![Claude Code](https://img.shields.io/badge/Claude_Code-%E2%89%A5_2.1.308-d97757?logo=claude&logoColor=white)](https://claude.com/claude-code)
 [![type: mod](https://img.shields.io/badge/type-Claude_Code_mod-8b5cf6)](#working-on-it)
 [![marketplace](https://img.shields.io/badge/marketplace-dmokong--plugins-2563eb)](#install)
 [![cost per chore](https://img.shields.io/badge/cost-~%240.002_per_chore-16a34a)](#cost-and-caching)
+[![side tasks](https://img.shields.io/badge/side_tasks-while_Claude_works-7fe0b8)](#side-tasks)
+[![peek](https://img.shields.io/badge/peek-read_only-a9b8ff)](#asking-what-claude-is-doing)
 [![surfaces](https://img.shields.io/badge/runs_in-terminal_%C2%B7_desktop_%C2%B7_VS_Code_%C2%B7_phone-475569)](#on-the-desktop-app-vs-code-and-the-phone)
-[![last commit](https://img.shields.io/github/last-commit/DMokong/claude-plugins?path=plugins%2Fsidekick&label=last%20commit&color=475569)](https://github.com/DMokong/claude-plugins/commits/main/plugins/sidekick)
 
-[**Install**](#install) · [**Quick start**](#quick-start-60-seconds) · [**How it works**](#how-it-works) · [**Safety**](#what-it-will-and-wont-do) · [**Dashboard**](#the-dashboard) · [**FAQ**](#faq) · [**Changelog**](#changelog)
+[**Install**](#install) · [**See it**](#see-it) · [**Side tasks**](#side-tasks) · [**Quick start**](#quick-start-60-seconds) · [**How it works**](#how-it-works) · [**Safety**](#what-it-will-and-wont-do) · [**Dashboard**](#the-dashboard) · [**FAQ**](#faq) · [**Changelog**](#changelog)
 
 </div>
 
@@ -35,6 +40,54 @@ record Claude can read if the answer isn't enough.
 <sub>A real session. The one line above the prompt says what the sidekick is doing, and **◆ Sidekick ▾**
 opens this control panel in place: mode, models, settings and shortcuts, all one click away.</sub>
 
+## See it
+
+<table>
+<tr>
+<td width="55%" valign="top">
+
+**Every job gets its own box**
+
+<img src="docs/box.png" alt="a finished chore in a box in the chat: the prompt, why the sidekick took it, the result, the model, time and cost" width="100%">
+
+Press `▸ more` for the whole report:
+
+<img src="docs/box-expanded.png" alt="the same box expanded: the full summary and every command it ran" width="100%">
+
+</td>
+<td width="45%" valign="top">
+
+**The pane keeps score**
+
+<img src="docs/pane.png" alt="the sidekick pane: a pixel-art capybara with its record, then done, saved and cost tiles" width="100%">
+
+</td>
+</tr>
+<tr>
+<td colspan="2">
+
+**Side tasks run beside Claude**
+
+<img src="docs/box-side-task.png" alt="a box labelled side task, asked for with /sidekick task" width="55%">
+
+</td>
+</tr>
+</table>
+
+<sub>Real captures from a real session. The border is blue while running, green when done, pink for partial and orange for failed or stopped.</sub>
+
+### What you get
+
+| | |
+|---|---|
+| 🧹 **Chores** | Commit, push, pull and `bd` updates go to a cheap worker, and Claude's context stays clean |
+| 🔍 **First-pass investigations** | Logs, job state, health checks, herdr panes and in-place restarts, with a full record |
+| ⚡ **Side tasks** | `/sidekick task` runs a job right now, even while Claude is mid-turn |
+| ⌕ **Peek** | Ask what Claude is doing mid-turn. It only reads, and can't change what Claude does |
+| 📦 **Tidy results** | A short headline on screen and the full report for Claude when you hand it over |
+| 🛡️ **A guard on every command** | Destructive commands and credential files are refused before the worker runs them |
+| 🐾 **A pet** | Tater or Mochi keeps you company and shows your record |
+
 ### Before and after
 
 | | Without sidekick | With sidekick |
@@ -48,6 +101,7 @@ opens this control panel in place: mode, models, settings and shortcuts, all one
 
 ## Contents
 
+- [See it](#see-it)
 - [At a glance](#at-a-glance)
 - [Install](#install)
 - [Quick start](#quick-start-60-seconds)
@@ -60,6 +114,7 @@ opens this control panel in place: mode, models, settings and shortcuts, all one
 - [The dashboard](#the-dashboard)
 - [Modes](#modes)
 - [Typing while it works](#typing-while-it-works)
+- [Side tasks](#side-tasks)
 - [Teaching the judge](#teaching-the-judge)
 - [Cost and caching](#cost-and-caching)
 - [Configuration](#configuration)
@@ -107,7 +162,7 @@ Then, in any Claude Code session that was already open:
 /reload-plugins
 ```
 
-Check that it loaded: run `/sidekick`. The pane opens with the version (`v0.5.4`) at the top right.
+Check that it loaded: run `/sidekick`. The pane opens with the installed version at the top right.
 
 > [!TIP]
 > **Updating later:** `claude plugin marketplace update dmokong-plugins && claude plugin update sidekick@dmokong-plugins`,
@@ -493,6 +548,30 @@ the control panel. The mode belongs to the session: turning it on in one session
 
 ---
 
+## Side tasks
+
+Anything you type while Claude is mid-turn normally goes to Claude, because it's usually meant to steer
+the running work. To send something else, say so:
+
+```text
+/sidekick task commit limit.ts and push
+/sidekick task did the nightly job run?
+```
+
+It runs at once, even mid-turn, and works in every mode. The judge reads it:
+
+- **Something the sidekick can do:** a worker does it now, in a box, and Claude keeps going.
+- **Anything else:** it goes to Claude, who reads it when the current turn ends.
+
+Claude may be halfway through editing the same checkout, so a side task has tighter rules, and the
+guard enforces them. It can commit and push files the task names. It can't run `git add -A`,
+`git add .`, `git commit -a` or `--amend`, or anything that moves the working tree, such as `checkout`,
+`pull`, `merge`, `rebase`, `stash` or `reset`. If the task needs one of those, it stops and hands back,
+so a bare *"commit everything"* is one for Claude. Files it commits could still include Claude's edits to
+those same files.
+
+---
+
 ## Typing while it works
 
 You don't have to wait for a chore to finish.
@@ -746,8 +825,8 @@ python3 -m unittest discover -s plugins/sidekick/tests   # the guard, run as the
 claude --plugin-dir plugins/sidekick      # a session with your working copy loaded
 ```
 
-The screenshots in `docs/` are real sessions, captured as ANSI with `herdr pane read --format ansi`
-and rendered to SVG.
+The screenshots in `docs/` are real sessions, captured as ANSI from the terminal and rendered to
+SVG or PNG. Capture them in this public repo's own checkout, so nothing private gets in.
 
 ---
 
@@ -759,6 +838,7 @@ and rendered to SVG.
 
 | Version | |
 |---|---|
+| **0.10.0** | `/sidekick task <text>` runs right away, even mid-turn: a worker acts on it in a side task, or the message goes to Claude when its turn ends. Side tasks get stricter guard rules: named files only, nothing that moves the tree. `/sidekick` subcommands run immediately. Headlines carry the result itself. README gains badges and real screenshots. |
 | **0.9.0** | Ask what Claude is doing mid-turn (`⌕ peek`): read only, never an action. Results in a box in the chat with dividers, colours, expand and give to main; a short headline on screen and the full report for main. Investigations can read other herdr panes' status and screens, with a line limit; chores get no herdr. Guard refuses `ps` environment dumps, readers fed by pipes and loops, and git reads of tracked credentials. Records keep large output. |
 | **0.8.0** | A specific reason for every routing decision, in chat and the pane, and recent review outcomes on the dashboard. The worker's whole answer is kept and clipped only for display. Facts beside the pet. Guard hardened against flag, path, expansion and option spellings, recursive reads and more credential files. Jobs can't start twice or stick after a reload; held prompts survive races; history is per session and counts warm-ups and drafts. |
 | **0.7.0** | Reviews: after Claude finishes a message the judge left with it, a cheap call asks whether the sidekick could have done it. Yes, No, Ignore or Adjust on the card teaches it, with guidance the worker follows on jobs like it, and refines what it already knows. `/sidekick teach <n> <guidance>`. |

@@ -363,7 +363,8 @@ async function pump($: EngineInterface): Promise<void> {
 
 /** Whether a running or queued assist holds prompts for the main session (chores do; investigations don't). */
 function holdingMain(state: SidekickState): boolean {
-  return state.entries.some(x => (x.status === 'running' || x.status === 'queued') && holdsMain(x.locks))
+  // A side task was asked for beside the main session's work, so it never makes that work wait.
+  return state.entries.some(x => (x.status === 'running' || x.status === 'queued') && holdsMain(x.locks) && x.isSide !== true)
 }
 
 /**
@@ -685,10 +686,10 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
   const ticker = $.clock.every(1_000, () => void change($, s => ({ ...s, tick: s.tick + 1 })).catch(() => {}))
   const { instructions } = await load($)
   const stream = $.process.spawn({
-    argv: workerArgv(entry.backend, guardPath, instructions ?? [], entry.kind),
+    argv: workerArgv(entry.backend, guardPath, instructions ?? [], entry.kind, entry.isSide === true),
     cwd,
     env: { DMOKONG_MODS: '0', SIDEKICK_WORKER: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1' },
-    input: workerInput(entry.task, entry.prompt, guidanceFor(misses, entry.prompt)),
+    input: workerInput(entry.task, entry.prompt, guidanceFor(misses, entry.prompt), entry.isSide === true),
   })
   const stop = () => {
     isStopped = true
@@ -780,6 +781,34 @@ async function enqueue($: EngineInterface, id: string, judgment: Judgment, repo:
     backend: live.workerModel,
   }))
   await pump($)
+}
+
+/** `/sidekick task`: the worker takes it now, beside whatever the main session is doing, or the main session hears it. */
+async function sideTask($: EngineInterface, text: string): Promise<string> {
+  const now = await $.clock.now()
+  const id = newId(now)
+  await addEntry($, blankEntry(id, text, now))
+  const toClaude = async (why: string, judgeMs = 0): Promise<string> => {
+    const endedAt = await $.clock.now()
+    await patchEntry($, id, () => ({ status: 'passed', reason: why, judgeMs, endedAt }))
+    redrawAfterLinger($)
+    await change($, s => ({ ...s, totals: { ...s.totals, passed: s.totals.passed + 1 } }))
+    // Not from inside this hook, which the submit would wait on. A busy session reads it when its turn ends.
+    $.clock.after(0, () => void $.prompt.submit({ text, asUser: true }).catch(() => {}))
+    return `→ to Claude: ${why}`
+  }
+  const pre = precheck(text, false)
+  if (!pre.isJudged) return toClaude(pre.why)
+  await refreshSettings($)
+  const { judgment, ms, repo, spend } = await judge($, text)
+  await patchEntry($, id, () => ({ verdict: judgment.verdict, reason: judgment.reason, judgeMs: ms, judgeSpend: spend }))
+  if (judgment.verdict !== 'mechanical' && judgment.verdict !== 'investigate') return toClaude(judgment.reason, ms)
+  if (judgment.verdict === 'investigate' && !live.investigations) return toClaude('investigations are off (the sidekick panel turns them on)', ms)
+  if (judgment.verdict === 'investigate' && (await load($)).instructions === null) return toClaude('no instruction files yet: the sidekick would not know where things live', ms)
+  await patchEntry($, id, () => ({ isSide: true }))
+  void enqueue($, id, judgment, repo).catch(() => {})
+  await placeBox($, id)
+  return `→ sidekick (${live.workerModel}) · side task`
 }
 
 /** Lets a prompt through to the main session, carrying any handoff notes it hasn't read yet. */
@@ -1141,7 +1170,9 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'sidekick',
       description: 'Sidekick for this session: hand mechanical chores (git, bd) to a cheap worker',
-      argumentHint: '[auto|shadow|off|learned|forget <n|all>|teach <n> <text>|pet [off|mochi|tater]]',
+      // Runs at once mid-turn: that is the point of /sidekick task, and the rest only touch the mod's own state.
+      immediate: true,
+      argumentHint: '[task <text>|auto|shadow|off|learned|forget <n|all>|teach <n> <text>|pet [off|mochi|tater]]',
     })
     return next(e)
   })
@@ -1176,6 +1207,10 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'sidekick' }, async ($, e) => {
     if (isOff) return { text: 'Sidekick is disabled here (DMOKONG_MODS=0, a worker session, or the Enabled option).' }
     const arg = e.args.trim().toLowerCase()
+    if (arg === 'task' || arg.startsWith('task ')) {
+      const text = e.args.trim().slice('task'.length).trim()
+      return { text: text === '' ? 'Usage: /sidekick task <what to do>. It runs beside whatever Claude is doing, or goes to Claude if the sidekick can\'t take it.' : await sideTask($, text) }
+    }
     if (arg === 'learned') return { text: learnedText(await storedMisses($)) }
     if (arg.startsWith('forget')) {
       const what = arg.slice('forget'.length).trim()
@@ -1206,7 +1241,7 @@ export const register: Register = (on, options) => {
       return { text: what === 'off' ? 'Pet hidden.' : `${what === 'mochi' ? 'Mochi the quokka' : 'Tater the capybara'} is with you, above the prompt.` }
     }
     const asked: Mode | null = arg === 'auto' ? 'auto' : arg === 'off' ? 'off' : arg === 'on' || arg === 'shadow' ? 'shadow' : null
-    if (arg !== '' && asked === null) return { text: 'Usage: /sidekick [auto|shadow|off|learned|forget <n|all>|teach <n> <text>|pet [off|mochi|tater]]' }
+    if (arg !== '' && asked === null) return { text: 'Usage: /sidekick [task <text>|auto|shadow|off|learned|forget <n|all>|teach <n> <text>|pet [off|mochi|tater]]' }
     if (asked !== null) await setMode($, asked)
     const { mode } = await load($)
     if (mode !== 'off') await $.ui.open({ id: PANE, title: 'Sidekick', rows: PANE_ROWS })
@@ -1364,7 +1399,7 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column" paddingX={1} {...border}>
         <Box flexWrap="nowrap">
-          <Text bold color={color}>{`◆ sidekick · ${entry.kind === 'investigate' ? 'investigation' : 'chore'}`}</Text>
+          <Text bold color={color}>{`◆ sidekick · ${entry.isSide === true ? 'side task' : entry.kind === 'investigate' ? 'investigation' : 'chore'}`}</Text>
           <Box flexGrow={1} />
           {outcome === null ? null : <Button key="box-toggle" label={isOpen ? '▾ less' : '▸ more'} plain onPress={toggle} />}
         </Box>
