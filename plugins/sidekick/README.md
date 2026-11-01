@@ -115,6 +115,7 @@ Press `▸ more` for the whole report:
 - [Modes](#modes)
 - [Typing while it works](#typing-while-it-works)
 - [Side tasks](#side-tasks)
+- [Sidekick or something else?](#sidekick-or-something-else)
 - [Teaching the judge](#teaching-the-judge)
 - [Cost and caching](#cost-and-caching)
 - [Configuration](#configuration)
@@ -567,8 +568,31 @@ Claude may be halfway through editing the same checkout, so a side task has tigh
 guard enforces them. It can commit and push files the task names. It can't run `git add -A`,
 `git add .`, `git commit -a` or `--amend`, or anything that moves the working tree, such as `checkout`,
 `pull`, `merge`, `rebase`, `stash` or `reset`. If the task needs one of those, it stops and hands back,
-so a bare *"commit everything"* is one for Claude. Files it commits could still include Claude's edits to
-those same files.
+so a bare *"commit everything"* is one for Claude.
+
+Files it commits can still include Claude's edits to those same files. When that looks likely, the box
+shows a `⚠` naming the file, and Claude is told too. It warns after the commit, and it can miss a script
+that wrote a file once without naming it, and a read-only command that names the file can set it off.
+
+---
+
+## Sidekick or something else?
+
+The main question is whether the work needs your conversation. Sidekick's worker never sees it, which
+is why it's cheap, and why it only suits work that can be described in one message.
+
+| Use | When | Knows the conversation | Can act |
+|---|---|---|---|
+| **`/sidekick task`** | A chore or quick lookup you can state in a line: *"commit a.txt"*, *"why did the bot stop?"* | No | Yes, within the guard |
+| **`⌕ peek`** | You want to know what Claude is doing right now | Only its recent steps | No |
+| [**`/btw`**](https://code.claude.com/docs/en/interactive-mode.md#side-questions-with-%2Fbtw) | A question Claude can answer from what's already in the session | Yes | No tools |
+| [**`/subtask`**](https://code.claude.com/docs/en/commands.md) | Background work that needs the conversation, with the result returned here | Yes, a copy | Yes |
+| [**`/fork`**](https://code.claude.com/docs/en/commands.md) | A separate job that starts from this conversation and runs on its own | Yes, a copy | Yes |
+| [**`/branch`**](https://code.claude.com/docs/en/commands.md) | Trying a different direction yourself, with the original kept to return to | Yes, a copy | Yes |
+| [**Herdr handoff**](../herdr-jutsu) | Context is running low, or a job will outlive this session | Only the handoff file | Yes |
+
+`context: fork` isn't on this list because you don't run it. It's a setting in a skill's frontmatter
+that makes that skill run in a forked subagent.
 
 ---
 
@@ -838,6 +862,7 @@ SVG or PNG. Capture them in this public repo's own checkout, so nothing private 
 
 | Version | |
 |---|---|
+| **0.10.1** | A side task's box warns when its commit includes a file Claude was changing during the task, and Claude is told too. README gains a section on when to use sidekick, `/btw`, `/subtask`, `/fork`, `/branch` or a herdr handoff. |
 | **0.10.0** | `/sidekick task <text>` runs right away, even mid-turn: a worker acts on it in a side task, or the message goes to Claude when its turn ends. Side tasks get stricter guard rules: named files only, nothing that moves the tree. `/sidekick` subcommands run immediately. Headlines carry the result itself. README gains badges and real screenshots. |
 | **0.9.0** | Ask what Claude is doing mid-turn (`⌕ peek`): read only, never an action. Results in a box in the chat with dividers, colours, expand and give to main; a short headline on screen and the full report for main. Investigations can read other herdr panes' status and screens, with a line limit; chores get no herdr. Guard refuses `ps` environment dumps, readers fed by pipes and loops, and git reads of tracked credentials. Records keep large output. |
 | **0.8.0** | A specific reason for every routing decision, in chat and the pane, and recent review outcomes on the dashboard. The worker's whole answer is kept and clipped only for display. Facts beside the pet. Guard hardened against flag, path, expansion and option spellings, recursive reads and more credential files. Jobs can't start twice or stick after a reload; held prompts survive races; history is per session and counts warm-ups and drafts. |

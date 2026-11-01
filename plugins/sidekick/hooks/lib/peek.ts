@@ -56,6 +56,21 @@ export function isGoing(peek: Peek): boolean {
   return peek.turnStartedAt > peek.turnEndedAt || peek.steps.some(s => s.status === 'running') || (peek.steps.at(-1)?.at ?? 0) > peek.turnEndedAt
 }
 
+/** The tools that name the file they write. A Bash command can write anything, so it is only read for names. */
+export const WRITING_TOOLS = ['Edit', 'Write', 'NotebookEdit']
+
+/**
+ * Which committed files the main session was changing: it wrote the path, a command of its named the
+ * file, or the file already differs from the commit. Paths are relative to the repository, as git says them.
+ */
+export function mainOverlap(committed: readonly string[], paths: readonly string[], commands: readonly string[], dirty: readonly string[]): string[] {
+  const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return committed.filter(file => {
+    const name = new RegExp(`(^|[^\\w.-])${escaped(file.split('/').at(-1) ?? file)}($|[^\\w.-])`)
+    return dirty.includes(file) || paths.some(path => path === file || path.endsWith(`/${file}`)) || commands.some(command => name.test(command))
+  })
+}
+
 /** One step as the person and the summary read it. */
 export function stepLine(step: PeekStep, now: number): string {
   const mark = step.status === 'running' ? '●' : step.status === 'failed' ? '✗' : '✓'
