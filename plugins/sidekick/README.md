@@ -16,6 +16,7 @@
 [![marketplace](https://img.shields.io/badge/marketplace-dmokong--plugins-2563eb)](#install)
 [![cost per chore](https://img.shields.io/badge/cost-~%240.002_per_chore-16a34a)](#cost-and-caching)
 [![side tasks](https://img.shields.io/badge/side_tasks-while_Claude_works-7fe0b8)](#side-tasks)
+[![judge eval](https://img.shields.io/badge/judge_eval-71%2F72-7fe0b8)](../../docs/evals/sidekick/judge-routing.md)
 [![peek](https://img.shields.io/badge/peek-read_only-a9b8ff)](#asking-what-claude-is-doing)
 [![surfaces](https://img.shields.io/badge/runs_in-terminal_%C2%B7_desktop_%C2%B7_VS_Code_%C2%B7_phone-475569)](#on-the-desktop-app-vs-code-and-the-phone)
 
@@ -116,6 +117,7 @@ Press `▸ more` for the whole report:
 - [Typing while it works](#typing-while-it-works)
 - [Side tasks](#side-tasks)
 - [Sidekick or something else?](#sidekick-or-something-else)
+- [Tests and evals](#tests-and-evals)
 - [Teaching the judge](#teaching-the-judge)
 - [Cost and caching](#cost-and-caching)
 - [Configuration](#configuration)
@@ -840,6 +842,28 @@ finished entry it hands the report over **for context** instead, so Claude doesn
 
 ---
 
+## Tests and evals
+
+| What | Where |
+|---|---|
+| **Tests**, run on every PR | [GitHub Actions](https://github.com/DMokong/claude-plugins/actions/workflows/tests.yml) |
+| **Judge routing results** | [`docs/evals/sidekick/judge-routing.md`](../../docs/evals/sidekick/judge-routing.md) |
+| **The eval and its messages** | [`evals/judge-routing`](evals/judge-routing) |
+
+The eval sends 24 messages through the judge's real prefilter, prompt and parser. The latest run routed
+71 of 72 correctly and sent nothing to the worker that should have stayed with Claude. The one miss
+was *"push it"*, which went to Claude once in three runs.
+
+It's a snapshot rather than a CI check, and it costs model calls to rerun. The messages are hand-written,
+not real traffic, and it doesn't run the worker or the guard. `claude plugin eval` can't be used here,
+because `/sidekick` isn't available in its headless sessions.
+
+```bash
+bun plugins/sidekick/evals/judge-routing/run.ts --runs 3 --out docs/evals/sidekick
+```
+
+---
+
 ## Working on it
 
 ```bash
@@ -862,6 +886,7 @@ SVG or PNG. Capture them in this public repo's own checkout, so nothing private 
 
 | Version | |
 |---|---|
+| **0.10.2** | Adds an eval of the judge's routing, with published results. No change to how the mod behaves. |
 | **0.10.1** | A side task's box warns when its commit includes a file Claude was changing during the task, and Claude is told too. README gains a section on when to use sidekick, `/btw`, `/subtask`, `/fork`, `/branch` or a herdr handoff. |
 | **0.10.0** | `/sidekick task <text>` runs right away, even mid-turn: a worker acts on it in a side task, or the message goes to Claude when its turn ends. Side tasks get stricter guard rules: named files only, nothing that moves the tree. `/sidekick` subcommands run immediately. Headlines carry the result itself. README gains badges and real screenshots. |
 | **0.9.0** | Ask what Claude is doing mid-turn (`⌕ peek`): read only, never an action. Results in a box in the chat with dividers, colours, expand and give to main; a short headline on screen and the full report for main. Investigations can read other herdr panes' status and screens, with a line limit; chores get no herdr. Guard refuses `ps` environment dumps, readers fed by pipes and loops, and git reads of tracked credentials. Records keep large output. |
