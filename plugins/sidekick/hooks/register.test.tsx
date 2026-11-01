@@ -38,6 +38,8 @@ type World = {
   beforeGet?: (key: string) => void
   /** How many writes of a history key the store loses: the next ones answer and keep nothing. */
   losesWrites?: { count: number }
+  /** What `git diff --name-only` answers: files that differ from HEAD. */
+  dirty?: string
   /** The main session's steps, as the peek log holds them from the start. */
   peekSteps?: unknown[]
 }
@@ -151,7 +153,7 @@ function world(on: On, w: World) {
   })
   on('process.run', async (_$, e) => {
     seen.ran.push([...e.argv])
-    const out = e.argv.includes('rev-parse') ? '/repo\n' : '## main...origin/main\n M a.txt\n'
+    const out = e.argv.includes('show') ? 'a.txt\n' : e.argv.includes('diff') ? (w.dirty ?? '') : e.argv.includes('rev-parse') ? '/repo\n' : '## main...origin/main\n M a.txt\n'
     return { value: { exitCode: 0, stdout: out, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('model.complete', async ($, e) => {
@@ -2451,4 +2453,24 @@ test('/sidekick task with nothing to do says how to use it', async ($, on) => {
   await $.session.start(START)
   const said = await $.command.run({ command: 'sidekick', args: 'task', origin: { kind: 'composer' }, presentation: 'inline' } as never)
   expect(String(said.text)).toContain('Usage: /sidekick task')
+})
+
+test('a side task warns when the file it committed is still changing during a main turn', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE, dirty: 'a.txt\n' })
+  on('turn.start', () => ({ turnId: 't1' }) as never)
+  await $.session.start(START)
+  await clock.advance(1_000)
+  await $.turn.start({ text: 'keep writing', turnId: 't1' })
+  await $.command.run({ command: 'sidekick', args: 'task commit a.txt', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const s = await until($, x => x.entries[0]?.status === 'done')
+  expect(s.entries[0]?.outcome?.overlap).toEqual(['a.txt'])
+  expect(s.entries[0]?.outcome?.uncertain.join(' ')).toContain('Claude was changing a.txt')
+})
+
+test('a side task stays quiet when the main session is idle, even with the file changed', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE, dirty: 'a.txt\n' })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'task commit a.txt', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const s = await until($, x => x.entries[0]?.status === 'done')
+  expect(s.entries[0]?.outcome?.overlap).toBeUndefined()
 })

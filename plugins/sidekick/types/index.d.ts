@@ -100,6 +100,8 @@ export type Outcome = {
   shas: string[]
   changed: string[]
   uncertain: string[]
+  /** Committed files the main session was changing during a side task. */
+  overlap?: string[]
   /** Why the main session should take over; empty when it need not. */
   needsMain: string
 }

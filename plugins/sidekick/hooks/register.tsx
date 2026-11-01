@@ -6,7 +6,7 @@ import type { Judgment } from './lib/judge'
 import { NO_SPEND, addTally, modelName, tallyLine, tallyOf, tokens, usd } from './lib/cost'
 import { guidanceFor, learnSuggestion, needsNoReview, reviewOutcome, REVIEW_SYSTEM, reviewPrompt, toolUsesSince } from './lib/review'
 import { capEntries, migrate, toTaught } from './lib/state'
-import { NO_PEEK, PEEK_SYSTEM, addStep, detailOf, endStep, isGoing, isSessionCall, lastSaid, peekPrompt, stepLine, stepStatus } from './lib/peek'
+import { NO_PEEK, PEEK_SYSTEM, WRITING_TOOLS, addStep, detailOf, endStep, isGoing, isSessionCall, lastSaid, mainOverlap, peekPrompt, stepLine, stepStatus } from './lib/peek'
 import { HISTORY_KEY, NO_TOTALS, agoText, appendRow, bestDay, historyKey, isExpired, isHistoryKey, markGiven, mergeHistory, perDay, savedFor, startOfDay, streak, toRows, totals, trackRecord, weekStart } from './lib/history'
 import type { HistoryRow } from './lib/history'
 import { PET_CHIPS, PET_COLUMNS, PET_ROWS, PET_STROLL, isPetChoice, moodOf, newWalker, pastimeOf, petPose } from './lib/pets'
@@ -585,11 +585,37 @@ async function placeBox($: EngineInterface, id: string): Promise<boolean> {
   return placed.isPlaced
 }
 
-async function finish($: EngineInterface, id: string, outcome: Outcome, calls: readonly Call[] = []): Promise<void> {
+/**
+ * A side task's commit can take the main session's unfinished edits, and the command looks fine to the
+ * guard, so check what it committed against what the session has been changing. A script's writes show
+ * only if the file has already moved on from the commit. Says nothing when it can't tell.
+ */
+async function withOverlap($: EngineInterface, entry: Entry, outcome: Outcome): Promise<Outcome> {
+  if (entry.isSide !== true || outcome.shas.length === 0) return outcome
+  const peek = await read($, peekAtom)
+  if (!isGoing(peek) && peek.turnEndedAt <= entry.createdAt) return outcome
+  try {
+    const git = async (...args: string[]) => {
+      const ran = await $.process.run(['git', ...args], { cwd, timeoutMs: STATE_TIMEOUT_MS })
+      return ran.exitCode === 0 ? ran.stdout.split('\n').filter(line => line !== '') : []
+    }
+    const committed = [...new Set((await Promise.all(outcome.shas.map(sha => git('show', '--name-only', '--format=', sha)))).flat())]
+    if (committed.length === 0) return outcome
+    const dirty = await git('diff', '--name-only', 'HEAD', '--', ...committed)
+    const overlap = mainOverlap(committed, mainTouched.paths, mainTouched.commands, dirty)
+    if (overlap.length === 0) return outcome
+    return { ...outcome, overlap, uncertain: [...outcome.uncertain, `Claude was changing ${overlap.join(', ')} while this ran, so the commit may hold unfinished work.`] }
+  } catch {
+    return outcome
+  }
+}
+
+async function finish($: EngineInterface, id: string, reported: Outcome, calls: readonly Call[] = []): Promise<void> {
   workers.delete(id)
   const now = await $.clock.now()
   const found = (await load($)).entries.find(x => x.id === id)
   if (found === undefined) return
+  const outcome = await withOverlap($, found, reported)
   const dump = found.kind === 'investigate' ? await writeDump($, found, calls, outcome, now) : ''
   if (dump !== '') await patchEntry($, id, () => ({ dump }))
   const entry = { ...found, dump }
@@ -621,7 +647,7 @@ async function finish($: EngineInterface, id: string, outcome: Outcome, calls: r
   // A job with a box in the chat shows its result there; without one, each line is a row of its own.
   if (!boxed.has(id)) for (const row of chatLine(outcome, entry.backend, seconds, (after?.judgeSpend.usd ?? 0) + (after?.workerSpend.usd ?? 0), entry.dump).split('\n')) $.ui.log(row)
   await deliverNote($, handoffNote(entry.prompt, outcome, entry.backend, entry.dump))
-  await tell($, status === 'done' ? `✓ ${shortAnswer(outcome.summary, 200, entry.dump)}` : `⚠ ${shortAnswer(outcome.summary, 200, entry.dump)} — open /sidekick to hand it to main`)
+  await tell($, status === 'done' && outcome.overlap === undefined ? `✓ ${shortAnswer(outcome.summary, 200, entry.dump)}` : `⚠ ${shortAnswer(outcome.summary, 200, entry.dump)} — open /sidekick to hand it to main`)
   await pump($)
 }
 
@@ -951,6 +977,8 @@ async function markMissed($: EngineInterface, id: string): Promise<void> {
 
 /** The last message the judge left with the main session, until its turn is reviewed. */
 let awaitingReview: string | null = null
+/** What the main session has been changing this turn, to check a side task's commit against. */
+let mainTouched: { paths: string[]; commands: string[] } = { paths: [], commands: [] }
 const REVIEWED_KEY = 'review-ignored'
 const REVIEW_TIMEOUT_MS = 30_000
 const MAX_SUGGESTIONS = 5
@@ -1347,6 +1375,10 @@ export const register: Register = (on, options) => {
     if (!isSessionCall(next.origin)) return next(e)
     const at = await $.clock.now()
     const id = e.tool_use_id ?? `${e.tool}-${at}`
+    const call = e as Record<string, unknown>
+    const path = call.file_path ?? call.notebook_path
+    if (WRITING_TOOLS.includes(e.tool) && typeof path === 'string') mainTouched.paths.push(path)
+    if (e.tool === 'Bash' && typeof call.command === 'string') mainTouched.commands.push(call.command)
     const step = { id, tool: e.tool, detail: detailOf(e as Record<string, unknown>), status: 'running' as const, isAgent: e.agentId !== undefined, at, endedAt: 0 }
     await update($, peekAtom, p => ({ ...p, steps: addStep(p.steps, step) })).catch(() => {})
     const ended = async (status: 'done' | 'failed') => {
@@ -1365,6 +1397,7 @@ export const register: Register = (on, options) => {
 
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
+      mainTouched = { paths: [], commands: [] }
       const startedAt = await $.clock.now()
       await update($, peekAtom, p => ({ ...p, turnStartedAt: startedAt })).catch(() => {})
     }
@@ -1410,6 +1443,7 @@ export const register: Register = (on, options) => {
         {outcome === null || parts === null
           ? <Text wrap="wrap">{`◷ ${entry.steps.at(-1) ?? 'starting…'}`}</Text>
           : <Text bold color={color} wrap="wrap">{`${MARK[outcome.status]} ${parts.first}`}</Text>}
+        {outcome?.overlap === undefined ? null : <Text bold color={COLORS.orange} wrap="wrap">{`⚠ Claude was changing ${outcome.overlap.join(', ')} while this ran. The commit may hold unfinished work, so check it.`}</Text>}
         {parts?.next === undefined ? null : <Text color={COLORS.orange} wrap="wrap">{`→ Next: ${parts.next}`}</Text>}
         {isOpen && outcome !== null ? [
           rule('rule-full'),
