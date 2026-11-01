@@ -218,6 +218,8 @@ declare module 'claude-code' {
       sidekick: SidekickState
       /** Counts the pet's frames; kept apart so its redraws touch nothing else. */
       petBeat: number
+      /** Counts the slower ticks a desktop's pet changes mood on; its picture moves by itself. */
+      petMoment: number
       /** The session's steps and the answer to asking about them; kept apart so a tool call redraws nothing else. */
       peek: Peek
       /** Which jobs' boxes in the chat are expanded. */
