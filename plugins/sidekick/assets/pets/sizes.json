@@ -1,0 +1,102 @@
+{
+"mochi-idle": {
+"w": 146,
+"h": 200
+},
+"mochi-wave": {
+"w": 146,
+"h": 200
+},
+"mochi-walk": {
+"w": 195,
+"h": 200
+},
+"mochi-look": {
+"w": 200,
+"h": 175
+},
+"mochi-eat": {
+"w": 174,
+"h": 200
+},
+"mochi-hop": {
+"w": 179,
+"h": 200
+},
+"mochi-smug": {
+"w": 157,
+"h": 200
+},
+"mochi-sleep": {
+"w": 200,
+"h": 120
+},
+"mochi-haul": {
+"w": 195,
+"h": 200
+},
+"tater-idle": {
+"w": 193,
+"h": 200
+},
+"tater-wave": {
+"w": 200,
+"h": 184
+},
+"tater-walk": {
+"w": 200,
+"h": 169
+},
+"tater-work": {
+"w": 200,
+"h": 147
+},
+"tater-look": {
+"w": 200,
+"h": 186
+},
+"tater-eat": {
+"w": 186,
+"h": 200
+},
+"tater-drink": {
+"w": 200,
+"h": 190
+},
+"tater-hop": {
+"w": 200,
+"h": 171
+},
+"tater-sweep": {
+"w": 200,
+"h": 194
+},
+"tater-fix": {
+"w": 200,
+"h": 200
+},
+"tater-success": {
+"w": 200,
+"h": 179
+},
+"tater-smug": {
+"w": 184,
+"h": 200
+},
+"tater-bath": {
+"w": 200,
+"h": 176
+},
+"tater-sleep": {
+"w": 200,
+"h": 101
+},
+"tater-alert": {
+"w": 200,
+"h": 197
+},
+"tater-haul": {
+"w": 194,
+"h": 200
+}
+}

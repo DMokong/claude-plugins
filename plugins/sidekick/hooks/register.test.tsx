@@ -20,6 +20,7 @@ type World = {
   /** What a review of a finished main-session turn answers. */
   review?: string
   judgeDelayMs?: number
+  entrypoint?: string
   /** What the worker's final result line carries. */
   worker: string
   /** When set, the worker waits for this promise before it reports. */
@@ -102,6 +103,7 @@ function world(on: On, w: World) {
     notified: [] as string[],
     appended: [] as string[],
     resubmitted: [] as string[],
+    spawnedIn: [] as unknown[],
     spawned: [] as string[][],
     written: [] as { path: string; text: string }[],
     ran: [] as string[][],
@@ -119,7 +121,7 @@ function world(on: On, w: World) {
   // The engine's own answer to a context build: the blocks it was given.
   on('prompt.context', async (_$, e) => ({ blocks: e.blocks }))
   on('command.register', async (_$, e) => ({ value: { command: e.name } }))
-  on('env.get', async (_$, e) => ({ value: e.name === 'HOME' ? '/home/u' : undefined }))
+  on('env.get', async (_$, e) => ({ value: e.name === 'HOME' ? '/home/u' : e.name === 'CLAUDE_CODE_ENTRYPOINT' ? w.entrypoint : undefined }))
   on('fs.write', async (_$, e) => {
     seen.written.push({ path: e.path, text: e.text })
     return { value: undefined }
@@ -128,6 +130,8 @@ function world(on: On, w: World) {
   on('ui.open', async () => ({ value: { isPlaced: true } }))
   on('fs.read', async (_$, e) => {
     if (e.path.endsWith('/.claude-plugin/plugin.json')) return { value: JSON.stringify({ name: 'sidekick', version: '9.9.9' }) }
+    if (e.path.endsWith('/assets/pets/sizes.json')) return { value: JSON.stringify(Object.fromEntries(['mochi', 'tater'].flatMap(pet => ['idle', 'wave', 'walk', 'look', 'eat', 'hop', 'smug', 'sleep', 'haul', 'work'].map(pose => [`${pet}-${pose}`, { w: 100, h: 100 }]))) ) }
+    if (e.path.includes('/assets/pets/')) return { value: { base64: 'UklGRg==' } as never }
     throw new Error(`unexpected read: ${e.path}`)
   })
   on('ui.log', async (_$, e) => {
@@ -177,6 +181,7 @@ function world(on: On, w: World) {
   })
   on('process.spawn', async function* (_$, e) {
     seen.spawned.push([...e.argv])
+    seen.spawnedIn.push(e.cwd)
     yield { stream: 'stdout' as const, text: `${JSON.stringify({ type: 'system', subtype: 'init', session_id: WORKER_SESSION })}\n` }
     yield { stream: 'stdout' as const, text: `${JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', input: { command: 'git commit -m x' } }] } })}\n` }
     if (w.workerGate !== undefined) await w.workerGate
@@ -1300,12 +1305,12 @@ test('on the desktop, nothing in the band, panel or dashboard can run past its s
   await until($, x => x.entries[0]?.status === 'done')
   // Tiles, the running job's sweep, where it went and the week: real drawings, not cells.
   expect(seen).toEqual({ svg: 6, card: true, panel: true })
-  // The open panel fits the space above the prompt: two rows of small type, never a scroll.
+  // The open panel is a fixed layout of small type: title, the labelled columns, settings, actions.
   const band = await $.ui.mount({ ...(BAND(100, 40) as object), surface: 'desktop' } as never)
   await band.press({ key: 'band-toggle' })
   const tree = (await (band as unknown as { drawn: () => Promise<unknown> }).drawn()) as Node
   const find = (n: Node): Node | undefined => (n.props?.key === 'sk-panel' ? n : (n.children ?? []).filter((c): c is Node => typeof c !== 'string').map(find).find(x => x !== undefined))
-  expect(find(tree)?.children?.length).toBe(2)
+  expect((find(tree)?.children as Node[]).map(row => row.props?.key)).toEqual(['row-title', 'row-models', 'row-settings', 'row-actions'])
   await band.unmount()
   expect(over).toEqual([])
 })
@@ -1598,6 +1603,153 @@ test('the pet section of the pane has its own peek button', async ($, on) => {
   await pane.press({ key: 'pane-pet-peek' })
   await clock.advance(10)
   expect(await pane.find({ type: 'Text', text: /Nothing has happened/ })).toBeDefined()
+  await pane.unmount()
+})
+
+const DESKTOP_BAND = (columns = 100, maxRows = 30) => ({ ...(BAND(columns, maxRows) as object), surface: 'desktop' }) as never
+
+test('on the desktop, peek is on the band: the chip, the card, the steps and close', async ($, on) => {
+  peeks = []
+  peekReply = 'It is running the tests.'
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, peekSteps: [PEEK_STEP] })
+  underBand(on)
+  await $.session.start(START)
+  const band = await $.ui.mount(DESKTOP_BAND())
+  expect(await band.find({ key: 'sk-peek' })).toBeUndefined()
+  await clock.advance(2_000)
+  await band.press({ key: 'band-peek' })
+  await clock.advance(10)
+  expect(await band.find({ type: 'Text', text: /It is running the tests/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /is working/ })).toBeDefined()
+  await band.press({ key: 'peek-steps' })
+  expect(await band.find({ type: 'Text', text: /● Bash bun test --all/ })).toBeDefined()
+  expect(seen.toMain).toEqual([])
+  expect(seen.spawned).toEqual([])
+  await band.press({ key: 'peek-close' })
+  expect(await band.find({ key: 'sk-peek' })).toBeUndefined()
+  await band.unmount()
+})
+
+test('on the desktop, the band says the judge is thinking, then why it left a message with Claude', async ($, on) => {
+  const seen = world(on, { judge: NEEDS_MAIN, worker: DONE, judgeDelayMs: 1 })
+  underBand(on)
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await clock.advance(1_000)
+  const ui = await $.ui.mount(DESKTOP_BAND())
+  const sent = $.prompt.submit({ text: 'design the new cache', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'judging')
+  expect(await ui.find({ type: 'Text', text: /thinking it over/ })).toBeDefined()
+  seen.release()
+  await sent
+  expect(await ui.find({ key: 'sk-card' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /left with Claude/ })).toBeDefined()
+  await clock.advance(16_000)
+  expect(await ui.find({ key: 'sk-card' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test("on the desktop, a finished job's outcome stays up on the band", async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const ui = await $.ui.mount(DESKTOP_BAND())
+  await clock.advance(1_000)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'done')
+  expect(await ui.find({ key: 'sk-card' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Committed 3f2a91c/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /done .*ago/ })).toBeDefined()
+  // An open panel takes its place, as on the terminal.
+  await ui.press({ key: 'band-toggle' })
+  expect(await ui.find({ key: 'sk-card' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a session the desktop app hosts starts whole: /sidekick task runs a guarded worker in its folder', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, entrypoint: 'claude-desktop' })
+  underBand(on)
+  await $.session.start({ ...START, surface: null, isInteractive: false })
+  await clock.advance(1_000)
+  await $.command.run({ command: 'sidekick', args: 'task commit and push', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await until($, x => x.entries[0]?.status === 'done')
+  expect(seen.spawnedIn).toEqual(['/repo'])
+  expect(JSON.stringify(seen.spawned[0])).toContain('/bin/sidekick-guard')
+})
+
+test('where the host keeps a dropped prompt, auto leaves every message with Claude and says so, so no chore runs twice', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, entrypoint: 'claude-desktop' })
+  underBand(on)
+  await $.session.start({ ...START, surface: null, isInteractive: false })
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await clock.advance(1_000)
+  const ui = await $.ui.mount(DESKTOP_BAND())
+  expect(await ui.find({ type: 'Text', text: /Shadow here/ })).toBeDefined()
+  const result = await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  expect(result).not.toHaveProperty('drop')
+  await until($, x => x.entries[0]?.status === 'shadow')
+  expect(seen.spawned).toEqual([])
+  await ui.unmount()
+})
+
+test('a headless run stays off whole: it judges nothing and starts no worker', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, entrypoint: 'sdk-cli' })
+  underBand(on)
+  await $.session.start({ ...START, surface: null, isInteractive: false })
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  expect(seen.judged).toBe(0)
+  expect(seen.spawned).toEqual([])
+})
+
+test('on the desktop, the toolbox closes from its own top row, for when the folded line is clipped', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  const ui = await $.ui.mount(DESKTOP_BAND())
+  await ui.press({ key: 'band-toggle' })
+  expect(await ui.find({ key: 'sk-panel' })).toBeDefined()
+  await ui.press({ key: 'panel-close' })
+  expect(await ui.find({ key: 'sk-panel' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('on the desktop, the band and its cards fit every width without a fixed size', async ($, on) => {
+  peeks = []
+  peekReply = 'It is running the tests.'
+  world(on, { judge: MECHANICAL, worker: DONE, peekSteps: [PEEK_STEP] })
+  underBand(on)
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await clock.advance(1_000)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'done')
+  for (const columns of [24, 40, 80, 160]) {
+    const ui = await $.ui.mount(DESKTOP_BAND(columns))
+    await ui.press({ key: 'band-peek' })
+    await clock.advance(10)
+    expect(await ui.find({ key: 'sk-peek' })).toBeDefined()
+    expect(await ui.find({ key: 'sk-card' })).toBeDefined()
+    const drawn = JSON.stringify(await (ui as unknown as { drawn: () => Promise<unknown> }).drawn())
+    expect(drawn).not.toMatch(/"width":\d/)
+    await ui.press({ key: 'peek-close' })
+    await ui.unmount()
+  }
+})
+
+test('on the desktop, the dashboard shows the facts the terminal keeps beside the pet', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const pane = await $.ui.mount({ ...(PET_PANE as object), surface: 'desktop' } as never)
+  expect(await pane.find({ type: 'Text', text: /no jobs yet/ })).toBeDefined()
+  await clock.advance(1_000)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'done')
+  await clock.advance(125_000)
+  expect(await pane.find({ type: 'Text', text: /1 of 1 finished/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /1 day · best 1/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -2474,3 +2626,50 @@ test('a side task stays quiet when the main session is idle, even with the file 
   const s = await until($, x => x.entries[0]?.status === 'done')
   expect(s.entries[0]?.outcome?.overlap).toBeUndefined()
 })
+
+test('on the desktop the toolbox is one row each of title, columns, settings and actions, with a pet to choose', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE })
+  underBand(on)
+  await $.session.start(START)
+  const ui = await $.ui.mount(DESKTOP_BAND(100))
+  await ui.press({ key: 'band-toggle' })
+  for (const key of ['row-title', 'row-models', 'row-settings', 'row-actions', 'col-mode', 'col-judge', 'col-worker', 'col-pet', 'col-many']) expect(await ui.find({ key })).toBeDefined()
+  await (ui as unknown as { select: (q: { key: string; value: string }) => Promise<unknown> }).select({ key: 'pet-select', value: 'mochi' })
+  expect((await state($)).settings.pet).toBe('mochi')
+  expect(JSON.stringify(await (ui as unknown as { drawn: () => Promise<unknown> }).drawn())).toContain('data:image/webp;base64')
+  await ui.unmount()
+})
+
+test('where the host keeps a dropped prompt, the toolbox says Auto works as shadow, and the mode stays auto', async ($, on) => {
+  world(on, { judge: MECHANICAL, worker: DONE, entrypoint: 'claude-desktop' })
+  underBand(on)
+  await $.session.start({ ...(START as object), isInteractive: false } as never)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  const ui = await $.ui.mount(DESKTOP_BAND(100))
+  await ui.press({ key: 'band-toggle' })
+  expect(JSON.stringify(await (ui as unknown as { drawn: () => Promise<unknown> }).drawn())).toContain('Auto (shadow)')
+  expect((await state($)).mode).toBe('auto')
+  await ui.unmount()
+})
+
+test('on the desktop the pet shows beside a job and in the dashboard, and an unreadable picture draws none', async ($, on) => {
+  let open = () => {}
+  const gate = new Promise<void>(resolve => {
+    open = resolve
+  })
+  world(on, { judge: MECHANICAL, worker: DONE, workerGate: gate, stored: { settings: { pet: 'tater' } } })
+  underBand(on)
+  await $.session.start(START)
+  const band = await $.ui.mount(DESKTOP_BAND(100))
+  expect(await band.find({ key: 'sk-pet' })).toBeUndefined()
+  await $.command.run({ command: 'sidekick', args: 'task run git status', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await until($, x => x.entries[0]?.status === 'running')
+  expect(await band.find({ key: 'sk-pet' })).toBeDefined()
+  const pane = await $.ui.mount({ plugin: 'sidekick', surface: 'desktop', component: 'Pane', requestId: 'sidekick', props: { title: 'Sidekick', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 80 }, view: {} } } as never)
+  expect(await pane.find({ key: 'sk-pane-pet' })).toBeDefined()
+  open()
+  await until($, x => x.entries[0]?.status === 'done')
+  await pane.unmount()
+  await band.unmount()
+})
+

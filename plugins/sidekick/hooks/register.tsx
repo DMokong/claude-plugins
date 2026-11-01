@@ -9,7 +9,8 @@ import { capEntries, migrate, toTaught } from './lib/state'
 import { NO_PEEK, PEEK_SYSTEM, WRITING_TOOLS, addStep, detailOf, endStep, isGoing, isSessionCall, lastSaid, mainOverlap, peekPrompt, stepLine, stepStatus } from './lib/peek'
 import { HISTORY_KEY, NO_TOTALS, agoText, appendRow, bestDay, historyKey, isExpired, isHistoryKey, markGiven, mergeHistory, perDay, savedFor, startOfDay, streak, toRows, totals, trackRecord, weekStart } from './lib/history'
 import type { HistoryRow } from './lib/history'
-import { PET_CHIPS, PET_COLUMNS, PET_ROWS, PET_STROLL, isPetChoice, moodOf, newWalker, pastimeOf, petPose } from './lib/pets'
+import { petSvg, poseOf, type Pose } from './lib/petart'
+import { PET_CHIPS, PET_COLUMNS, PET_ROWS, PET_STROLL, isPetChoice, moodOf, newWalker, pastimeOf, petPose, type PetName } from './lib/pets'
 import { JUDGE_CHIPS, SETTINGS_KEY, WORKER_CHIPS, chipsFor, defaultsFrom, effective, withChange } from './lib/settings'
 import { COLORS, barCells, bigText, dayLevels, spaced, tileMoney } from './lib/draw'
 import { daysSvg, progressSvg, stackSvg, tileSvg } from './lib/svg'
@@ -56,6 +57,7 @@ export const EMPTY: SidekickState = {
 
 const sidekick = atom({ plugin: 'sidekick', key: 'sidekick' } as const, EMPTY)
 const petBeat = atom({ plugin: 'sidekick', key: 'petBeat' } as const, 0)
+const petMoment = atom({ plugin: 'sidekick', key: 'petMoment' } as const, 0)
 const peekAtom = atom({ plugin: 'sidekick', key: 'peek' } as const, NO_PEEK)
 const openBoxes = atom({ plugin: 'sidekick', key: 'openBoxes' } as const, [] as string[])
 /** Jobs whose result is drawn in a box in the chat. */
@@ -115,11 +117,18 @@ const STATE_TIMEOUT_MS = 400
 const WORKER_TIMEOUT_MS = 10 * 60_000
 const MAX_ENTRIES = 60
 const MAX_STEPS = 40
+const MAX_WORKER_ERROR = 300
+const PERSON_HOSTS: readonly string[] = ['claude-desktop', 'claude-vscode']
 const ACTIVE: readonly EntryStatus[] = ['judging', 'queued', 'running']
 
 // The engine follows `$` only into functions declared at the top of this file, so what the
 // hooks share lives here. `register` sets the options; `session.start` the rest.
 let isOff = false
+/**
+ * The session keeps a prompt whatever prompt.submit answers: under the desktop app (2.1.309) a dropped
+ * prompt still reaches the main session, and aborting its turn doesn't stop it, so a worker would run it too.
+ */
+let isPromptKept = false
 /** The plugin's options, as settings: what the panel's Reset to defaults goes back to. */
 let defaults: Settings = defaultsFrom({})
 /** The settings in force; re-read from the store before each judgment and worker run, so another session's change reaches this one. */
@@ -467,6 +476,29 @@ const onBand = newWalker()
 /** The band's pet button, which goes round the choices. The emoji is two cells, and two in a string too. */
 const petFlag = (pet: Settings['pet']) => ` 🐾 ${pet}`
 const NEXT_PET = { off: 'mochi', mochi: 'tater', tater: 'off' } as const
+/** A desktop's pet moves by itself, and a redraw sends its picture again: it looks at its mood every few seconds. */
+const PET_MOMENT_TICKS = 25
+const petPictures = new Map<string, Pose>()
+let petSizes: Promise<Record<string, { w: number; h: number }>> | undefined
+
+/** A pose's picture from assets/pets/, or null where it can't be read: the desktop then draws no pet. */
+async function petPicture($: EngineInterface, pet: PetName, pose: string): Promise<Pose | null> {
+  const name = `${pet}-${pose}`
+  const known = petPictures.get(name)
+  if (known !== undefined) return known
+  let picture: Pose | null = null
+  try {
+    const dir = `${$.plugin.root}/assets/pets`
+    petSizes ??= $.fs.read(`${dir}/sizes.json`).then(text => JSON.parse(String(text)) as Record<string, { w: number; h: number }>)
+    const size = (await petSizes)[name]
+    const bytes = (await $.fs.read(`${dir}/${name}.webp`, { as: 'bytes' })) as unknown as { base64: string }
+    if (size !== undefined) picture = { uri: `data:image/webp;base64,${bytes.base64}`, w: size.w, h: size.h }
+  } catch {
+    petSizes = undefined
+  }
+  if (picture !== null) petPictures.set(name, picture)
+  return picture
+}
 
 async function choosePet($: EngineInterface, pet: Settings['pet']): Promise<void> {
   petChosenAt = await $.clock.now()
@@ -580,9 +612,14 @@ async function cleanupSession($: EngineInterface, sessionId: string): Promise<vo
 
 /** Puts the job's box in the chat, where a surface can draw one. */
 async function placeBox($: EngineInterface, id: string): Promise<boolean> {
-  const placed = await $.ui.place({ id: `job-${id}` }).catch(() => ({ isPlaced: false as const }))
-  if (placed.isPlaced) boxed.add(id)
-  return placed.isPlaced
+  try {
+    const placed = await $.ui.place({ id: `job-${id}` })
+    if (placed.isPlaced) boxed.add(id)
+    return placed.isPlaced
+  } catch {
+    // The desktop app's 2.1.309 has no $.ui.place, and it throws as it's called: a plain line stands in.
+    return false
+  }
 }
 
 /**
@@ -647,7 +684,7 @@ async function finish($: EngineInterface, id: string, reported: Outcome, calls: 
   // A job with a box in the chat shows its result there; without one, each line is a row of its own.
   if (!boxed.has(id)) for (const row of chatLine(outcome, entry.backend, seconds, (after?.judgeSpend.usd ?? 0) + (after?.workerSpend.usd ?? 0), entry.dump).split('\n')) $.ui.log(row)
   await deliverNote($, handoffNote(entry.prompt, outcome, entry.backend, entry.dump))
-  await tell($, status === 'done' && outcome.overlap === undefined ? `✓ ${shortAnswer(outcome.summary, 200, entry.dump)}` : `⚠ ${shortAnswer(outcome.summary, 200, entry.dump)} — open /sidekick to hand it to main`)
+  await tell($, status === 'done' && outcome.overlap === undefined ? `✓ ${shortAnswer(outcome.summary, 200, entry.dump)}` : `⚠ ${shortAnswer(outcome.summary, 200, entry.dump)} — open the dashboard to hand it to main`)
   await pump($)
 }
 
@@ -726,11 +763,16 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
   // Every tool call and what came back, in order, for an investigation's record.
   const calls = new Map<string, Call>()
   let sessionId = ''
+  // The tail of what a worker said on stderr: all there is to say when it dies before reporting.
+  let errors = ''
   try {
     let buffer = ''
     for await (const chunk of stream) {
       if (isStopped) break
-      if (chunk.stream !== 'stdout') continue
+      if (chunk.stream !== 'stdout') {
+        errors = `${errors}${chunk.text}`.slice(-MAX_WORKER_ERROR)
+        continue
+      }
       const split = splitLines(buffer, chunk.text)
       buffer = split.rest
       for (const line of split.lines) {
@@ -761,8 +803,9 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
         }
       }
     }
-  } catch {
+  } catch (error) {
     // An unstartable or killed child ends here; the outcome below says which.
+    errors = `${errors}${String(error)}`.slice(-MAX_WORKER_ERROR)
   }
   timer.cancel()
   ticker.cancel()
@@ -789,7 +832,7 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
       shas: [],
       changed: [],
       uncertain: ['Check git status and git log.'],
-      needsMain: 'The worker session did not finish.',
+      needsMain: errors.trim() === '' ? 'The worker session did not finish.' : `The worker session did not finish: ${errors.trim()}`,
     }, [...calls.values()])
     return
   }
@@ -1148,7 +1191,15 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     if ((await $.env.get('DMOKONG_MODS')) === '0' || (await $.env.get('SIDEKICK_WORKER')) === '1') isOff = true
-    if (isOff || !e.isInteractive) return next(e)
+    if (isOff) return next(e)
+    // The desktop app and the editor host the session through the SDK, so it reads as not interactive with
+    // a person right there. Anywhere else nobody is at the prompt; off whole, never half started, as what
+    // follows sets the worker's folder and its guard.
+    if (!e.isInteractive && !PERSON_HOSTS.includes((await $.env.get('CLAUDE_CODE_ENTRYPOINT')) ?? '')) {
+      isOff = true
+      return next(e)
+    }
+    isPromptKept = !e.isInteractive
     cwd = e.cwd
     guardPath = `${$.plugin.root}/bin/sidekick-guard`
     try {
@@ -1194,6 +1245,7 @@ export const register: Register = (on, options) => {
       if (live.pet === 'off') return
       petTicks += 1
       if (isPetLively || petTicks % 3 === 0) void update($, petBeat, n => n + 1).catch(() => {})
+      if (petTicks % PET_MOMENT_TICKS === 0) void update($, petMoment, n => n + 1).catch(() => {})
     })
     await $.command.register({
       name: 'sidekick',
@@ -1291,7 +1343,7 @@ export const register: Register = (on, options) => {
     const pre = precheck(e.text, (e.attachments?.length ?? 0) > 0)
     const isMidTurn = e.turnId !== undefined
 
-    if (state.mode === 'shadow') {
+    if (state.mode === 'shadow' || isPromptKept) {
       if (pre.isJudged && !isMidTurn) {
         const id = newId(now)
         await addEntry($, blankEntry(id, e.text, now))
@@ -1321,7 +1373,7 @@ export const register: Register = (on, options) => {
       })
       if (!isHeld) return toMain($, e, next)
       clearRestored($, e.text)
-      return { drop: `❯ ${clip(e.text.replace(/\s+/g, ' '), 160)} · held for Claude until the sidekick finishes (/sidekick → send now)` }
+      return { drop: `❯ ${clip(e.text.replace(/\s+/g, ' '), 160)} · held for Claude until the sidekick finishes (dashboard → send now)` }
     }
     if (isMidTurn) return toMain($, e, next)
     if (!pre.isJudged) {
@@ -1573,7 +1625,7 @@ export const register: Register = (on, options) => {
         return (
           <Box key="hdr" flexWrap="wrap" alignItems="center" columnGap="sm" rowGap="xs">
             <Text bold color={COLORS.claude}>{'◆ Sidekick'}</Text>
-            {richBadge(Text, state.mode)}
+            {richBadge(Text, state.mode === 'auto' && isPromptKept ? 'shadow' : state.mode)}
             <Text dimColor>{`judge ${state.settings.judgeModel} · worker ${state.settings.workerModel}`}</Text>
             {version !== '' && <Text dimColor>{`v${version}`}</Text>}
             <Box flexGrow={1} />
@@ -1774,11 +1826,27 @@ export const register: Register = (on, options) => {
       return { mark, color }
     }
     const openJob = (id: string) => () => void change($, s => ({ ...s, view: 'job', jobId: id }))
+    // What the tiles don't show, one line each, on the tab's span: beside the pet on the terminal, under the tiles elsewhere.
+    const record = state.tab === 'session' ? trackRecord(ownRows, 0) : trackRecord(rows, state.tab === 'today' ? startOfDay(now) : weekStart(now))
+    const last = recent[0]
+    const facts = [
+      { key: 'record', label: 'record', text: record.tried === 0 ? 'no jobs yet' : `${record.finished} of ${record.tried} finished` },
+      { key: 'speed', label: 'speed', text: record.avgMs > 0 ? `${Math.max(1, Math.round(record.avgMs / 1000))}s a job` : '–' },
+      { key: 'streak', label: 'streak', text: `${days_} day${days_ === 1 ? '' : 's'}${best === undefined ? '' : ` · best ${best.jobs}`}` },
+      { key: 'learned', label: 'learned', text: `${state.learned.length}${state.suggestions.length > 0 ? ` · ${state.suggestions.length} to review` : ''}` },
+      { key: 'last', label: 'last', text: last === undefined ? 'nothing yet' : `${markOf(last).mark} ${last.prompt.replace(/\s+/g, ' ')}`, note: last === undefined || last.endedAt === 0 ? '' : ` · ${agoText(now - last.endedAt)}` },
+    ]
     if (rich !== null) {
       const { Svg } = rich
       // Room for a line's words, in cells: proportional type is narrower, so this never runs over.
       const room = Math.max(16, width - 16)
       const series = (pick: (d: (typeof days)[number]) => number) => days.map(pick)
+      // The pet keeps the dashboard company whenever it's on, as it does the terminal's pane.
+      const petChoice = state.settings.pet
+      await read($, petMoment)
+      const paneMood = petChoice === 'off' || width < 40 ? null : moodOf(petChoice, { mode: state.mode, entries: state.entries, now, chosenAt: petChosenAt, startedAt: petStartedAt })
+      const panePicture = paneMood === null || petChoice === 'off' ? null : await petPicture($, petChoice, poseOf(petChoice, paneMood.animation))
+      const paneDrawing = panePicture === null ? null : petSvg(panePicture, paneMood!.animation, 84, 120)
       return (
         <Box flexDirection="column" rowGap="sm">
           {header(
@@ -1807,6 +1875,24 @@ export const register: Register = (on, options) => {
             ))}
             <Text dimColor>{`caching saved ${usd(Math.max(0, state.spend.savedUsd))}`}</Text>
           </Box>
+          <Box key="pet-facts" flexWrap="nowrap" alignItems="center" columnGap="md" minWidth={0}>
+            {paneDrawing !== null && (
+              <Box key="sk-pane-pet" flexShrink={0}>
+                <Svg alt={paneMood!.caption} source={paneDrawing.source} width={paneDrawing.width} height={paneDrawing.height} />
+              </Box>
+            )}
+            <Box key="pet-words" flexDirection="column" rowGap="xs" flexGrow={1} flexShrink={1} minWidth={0}>
+              {paneMood !== null && <Text key="sk-pane-caption" bold color={COLORS.yellow} wrap="truncate-end">{paneMood.caption}</Text>}
+          <Box key="facts" flexWrap="wrap" columnGap="md">
+            {facts.map(fact => (
+              <Box key={`fact-${fact.key}`} flexWrap="nowrap" columnGap="xs" minWidth={0} flexShrink={1}>
+                <Text dimColor>{fact.label}</Text>
+                <Text wrap="truncate-end">{clip(`${fact.text}${fact.note ?? ''}`, room)}</Text>
+              </Box>
+            ))}
+          </Box>
+            </Box>
+          </Box>
 
           {peekSection}
           {rule('h-now', 'NOW')}
@@ -1822,7 +1908,7 @@ export const register: Register = (on, options) => {
               </Box>
               <Text dimColor wrap="truncate-end">{clip(entry.steps.at(-1) ?? 'starting the worker…', room)}</Text>
               <Box key={`pg-${entry.id}`}>
-                <Svg alt="working" source={progressSvg(COLORS.orange)} isInteractive />
+                <Svg alt="working" source={progressSvg(COLORS.orange)} height={6} isInteractive />
               </Box>
             </Box>
           ))}
@@ -1899,16 +1985,6 @@ export const register: Register = (on, options) => {
       // Leave the words beside it their room: the longest caption is 27 cells.
       const lane = Math.max(PET_COLUMNS - 1, Math.min(width - 28, PET_COLUMNS - 1 + PET_STROLL))
       const art = petPose(inPane, state.settings.pet, mood.animation, await read($, petBeat), lane, 'left')
-      // The rest of the pet's height holds what the tiles below don't: one line each, on the tab's span.
-      const record = state.tab === 'session' ? trackRecord(ownRows, 0) : trackRecord(rows, state.tab === 'today' ? startOfDay(now) : weekStart(now))
-      const last = recent[0]
-      const facts = [
-        { key: 'record', label: 'record', text: record.tried === 0 ? 'no jobs yet' : `${record.finished} of ${record.tried} finished` },
-        { key: 'speed', label: 'speed', text: record.avgMs > 0 ? `${Math.max(1, Math.round(record.avgMs / 1000))}s a job` : '–' },
-        { key: 'streak', label: 'streak', text: `${days_} day${days_ === 1 ? '' : 's'}${best === undefined ? '' : ` · best ${best.jobs}`}` },
-        { key: 'learned', label: 'learned', text: `${state.learned.length}${state.suggestions.length > 0 ? ` · ${state.suggestions.length} to review` : ''}` },
-        { key: 'last', label: 'last', text: last === undefined ? 'nothing yet' : `${markOf(last).mark} ${last.prompt.replace(/\s+/g, ' ')}`, note: last === undefined || last.endedAt === 0 ? '' : ` · ${agoText(now - last.endedAt)}` },
-      ]
       const [name = '', note = ''] = mood.caption.split(' · ')
       const factRoom = width - lane - 1 - 8
       panePet = (
@@ -2493,7 +2569,7 @@ export const register: Register = (on, options) => {
       const modes = [
         { value: 'off', label: 'Off' },
         { value: 'shadow', label: 'Shadow' },
-        { value: 'auto', label: 'Auto' },
+        { value: 'auto', label: isPromptKept ? 'Auto (shadow)' : 'Auto' },
       ]
       const modelOptions = (chips: typeof JUDGE_CHIPS, field: 'judgeModel' | 'workerModel') => chipsFor(chips, state.settings[field]).map(([label, alias]) => ({ value: alias, label }))
       const setting = (key: OnOffSetting, name: string) =>
@@ -2502,36 +2578,124 @@ export const register: Register = (on, options) => {
           { text: name, dimColor: !state.settings[key] },
         ])
       const many = state.settings.maxConcurrent
+      const isWide = width >= 60
+      // The pet follows the work beside a job's card, and plays beside the open toolbox when there's none.
+      await read($, petMoment)
+      const bandMood =
+        pet === null || !isWide
+          ? null
+          : state.panelOpen
+            ? isIdle ? pastimeOf(pet, now) : null
+            : isPetAtWork ? moodOf(pet, { mode: state.mode, entries: state.entries, now, chosenAt: petChosenAt, startedAt: petStartedAt }) : null
+      const bandPicture = bandMood === null || pet === null ? null : await petPicture($, pet, poseOf(pet, bandMood.animation))
+      const bandDrawing = bandPicture === null ? null : petSvg(bandPicture, bandMood!.animation, state.panelOpen ? 96 : 64, state.panelOpen ? 130 : 110)
+      const bandPet = bandDrawing === null ? null : (
+        <Box key={state.panelOpen ? 'sk-panel-pet' : 'sk-pet'} flexShrink={0} alignSelf="flex-end">
+          <Svg alt={bandMood!.caption} source={bandDrawing.source} width={bandDrawing.width} height={bandDrawing.height} />
+        </Box>
+      )
+      // One labelled column of the toolbox's grid: a share of the row, so the columns line up however many fit.
+      const columnShare = (wide: string, narrow: string) => (width >= 72 ? wide : width >= 40 ? narrow : '46%')
+      const column = (key: string, share: string, children: unknown) => (
+        <Box key={key} flexDirection="column" rowGap="xs" width={share}>
+          {children as never}
+        </Box>
+      )
+      const stepper = (
+        <Box key="stepper" flexWrap="nowrap" alignItems="center" columnGap="sm">
+          {tool('set-maxConcurrent-down', () => void setSetting($, 'maxConcurrent', Math.max(1, many - 1)), [{ text: '−' }])}
+          {small('many', String(many), { bold: true })}
+          {tool('set-maxConcurrent-up', () => void setSetting($, 'maxConcurrent', Math.min(4, many + 1)), [{ text: '+' }])}
+        </Box>
+      )
       const richPanel = !state.panelOpen ? null : (
-        <Box key="sk-panel" flexDirection="column" borderStyle="round" borderColor={COLORS.claude} paddingX={1} rowGap="xs" minWidth={0} flexShrink={1}>
-          <Box key="row-models" flexWrap="wrap" alignItems="center" columnGap="sm" rowGap="xs">
+        <Box key="sk-panel" flexDirection="column" borderStyle="round" borderColor={COLORS.claude} paddingX={1} rowGap="sm" minWidth={0} flexGrow={1} flexShrink={1}>
+          <Box key="row-title" flexWrap="nowrap" alignItems="center" columnGap="sm">
             {small('title', '◆ Sidekick', { color: COLORS.claude, bold: true })}
-            {dropdown('mode-select', 'Mode', modes, state.mode, value => void setMode($, value as Mode))}
-            {dropdown('judge-model', 'Judge', modelOptions(JUDGE_CHIPS, 'judgeModel'), state.settings.judgeModel, value => void setSetting($, 'judgeModel', value))}
-            {dropdown('worker-model', 'Worker', modelOptions(WORKER_CHIPS, 'workerModel'), state.settings.workerModel, value => void setSetting($, 'workerModel', value))}
-            {small('label-many', 'Side by side', { dimColor: true })}
-            {tool('set-maxConcurrent-down', () => void setSetting($, 'maxConcurrent', Math.max(1, many - 1)), [{ text: '−' }])}
-            {small('many', String(many), { bold: true })}
-            {tool('set-maxConcurrent-up', () => void setSetting($, 'maxConcurrent', Math.min(4, many + 1)), [{ text: '+' }])}
+            {version !== '' && small('version', `v${version}`, { dimColor: true })}
+            <Box flexGrow={1} />
+            {/* The host doesn't scroll a band it caps: a narrow toolbox keeps to fewer rows. */}
+            {width < 72 && small('label-many', 'At once', { dimColor: true })}
+            {width < 72 && stepper}
+            {/* The host caps the band's height and clips the bottom: under another mod's tall band, the folded line's toggle is out of reach. */}
+            {tool('panel-close', () => void change($, s => ({ ...s, panelOpen: false })), [{ text: '✕' }])}
+          </Box>
+          <Box key="row-models" flexWrap="wrap" alignItems="flex-start" columnGap={width >= 72 ? 'sm' : 'xs'} rowGap="sm">
+            {column('col-mode', columnShare('23%', isPromptKept ? '31%' : '22%'), dropdown('mode-select', 'Mode', modes, state.mode, value => void setMode($, value as Mode)))}
+            {column('col-judge', columnShare('18%', '22%'), dropdown('judge-model', 'Judge', modelOptions(JUDGE_CHIPS, 'judgeModel'), state.settings.judgeModel, value => void setSetting($, 'judgeModel', value)))}
+            {column('col-worker', columnShare('18%', '22%'), dropdown('worker-model', 'Worker', modelOptions(WORKER_CHIPS, 'workerModel'), state.settings.workerModel, value => void setSetting($, 'workerModel', value)))}
+            {column('col-pet', columnShare('13%', isPromptKept ? '17%' : '22%'), dropdown('pet-select', 'Pet', PET_CHIPS.map(([label, choice]) => ({ value: choice, label })), state.settings.pet, value => { if (isPetChoice(value)) void choosePet($, value) }))}
+            {width >= 72 && column('col-many', '14%', [small('label-many', 'At once', { dimColor: true }), stepper])}
           </Box>
           <Box key="row-settings" flexWrap="wrap" alignItems="center" columnGap="md" rowGap="xs">
-            {setting('investigations', 'Investigations')}
-            {setting('draftJudging', 'Draft judging')}
+            {setting('investigations', width >= 72 ? 'Investigations' : 'Investigate')}
+            {setting('draftJudging', width >= 72 ? 'Draft judging' : 'Drafts')}
             {setting('reviews', 'Reviews')}
-            {setting('notifications', 'Notifications')}
-            <Box flexGrow={1} />
+            {setting('notifications', width >= 72 ? 'Notifications' : 'Notify')}
+          </Box>
+          <Box key="row-actions" flexWrap="wrap" alignItems="center" columnGap={width >= 72 ? 'md' : 'xs'} rowGap="xs">
             {launch.map(item =>
               tool(item.key, item.act, [
                 { text: `${item.glyph} `, color: item.color },
                 { text: item.key === 'launch-reset' ? 'Reset' : (shortLabel[item.key] ?? item.label) },
               ]),
             )}
-            {version !== '' && small('version', `v${version}`, { dimColor: true })}
           </Box>
         </Box>
       )
+      // The same cards as the terminal's, in the same order; a border of one colour, the status in the words.
+      const richOutcome = (key: string, heading: unknown, body: string, foot: string) => (
+        <Box key={key} flexDirection="column" borderStyle="round" borderColor={COLORS.line} paddingX={1} rowGap="xs">
+          <Box flexWrap="nowrap" alignItems="center" columnGap="sm">
+            {heading as never}
+          </Box>
+          {body !== '' && <Text wrap="truncate-end">{clip(body, room)}</Text>}
+          <Text dimColor wrap="truncate-end">{clip(foot, room)}</Text>
+        </Box>
+      )
+      const headline = (mark: string, color: string, prompt: string, kind = '') => [
+        <Text key="h-mark" bold color={color}>{mark}</Text>,
+        ...(kind === '' ? [] : [<Text key="h-kind" bold color={COLORS.orange}>{kind}</Text>]),
+        <Box key="h-prompt" flexGrow={1} flexShrink={1} minWidth={0}>
+          <Text bold wrap="truncate-end">{clip(prompt, room)}</Text>
+        </Box>,
+      ]
+      const agoOf = (entry: Entry) => `${Math.max(0, Math.round((now - entry.endedAt) / 1000))}s ago`
+      const richSettled =
+        state.panelOpen || lead !== undefined
+          ? null
+          : judged !== undefined
+            ? richOutcome('sk-card', headline('✦', COLORS.purple, judged.prompt), 'thinking it over…', 'a chore for the sidekick, or one for Claude')
+            : finished?.status === 'passed' || finished?.status === 'shadow'
+              ? richOutcome('sk-card', headline('→', COLORS.purple, finished.prompt), finished.reason !== '' ? finished.reason : 'Not one for the sidekick.', `${finished.status === 'shadow' ? 'shadow: left with Claude' : 'left with Claude'} ${agoOf(finished)}`)
+              : finished !== undefined
+                ? richOutcome(
+                    'sk-card',
+                    headline(finished.status === 'done' ? '✓' : '✗', finished.status === 'done' ? COLORS.green : COLORS.yellow, finished.prompt, finished.kind === 'investigate' ? 'investigate' : 'chore'),
+                    finished.outcome?.summary ?? entryDetail(finished, now),
+                    `${finished.status} ${agoOf(finished)}${finished.reason !== '' ? ` · ${finished.reason}` : ''}`,
+                  )
+                : null
+      const richPeek = !peek.isOpen ? null : (
+        <Box key="sk-peek" flexDirection="column" borderStyle="round" borderColor={COLORS.line} paddingX={1} rowGap="xs">
+          <Box flexWrap="wrap" alignItems="center" columnGap="sm">
+            <Text bold color={COLORS.blue}>{`⌕ Claude ${isGoing(peek) ? 'is working' : 'is idle'}`}</Text>
+            <Box flexGrow={1} />
+            {tool('peek-again', () => void askPeek($), [{ text: peek.isAsking ? 'asking…' : 'again' }])}
+            {tool('peek-steps', () => void update($, peekAtom, p => ({ ...p, isSteps: !p.isSteps })), [{ text: peek.isSteps ? 'summary' : 'steps' }])}
+            {tool('peek-close', () => void update($, peekAtom, p => ({ ...p, isOpen: false })), [{ text: '✕' }])}
+          </Box>
+          {peek.isSteps ? (
+            peek.steps.length === 0 ? <Text dimColor>{'No tool calls yet'}</Text> : peek.steps.slice(-8).map(step => (
+              <Text key={`peek-step-${step.id}`} wrap="truncate-end" color={step.status === 'running' ? COLORS.pink : step.status === 'failed' ? COLORS.orange : undefined} dimColor={step.status === 'done'}>{clip(stepLine(step, now), room)}</Text>
+            ))
+          ) : (
+            <Text wrap="wrap">{peek.summary === '' ? 'asking…' : peek.summary}</Text>
+          )}
+        </Box>
+      )
       const richCard =
-        lead === undefined || state.panelOpen ? null : (
+        lead === undefined || state.panelOpen ? richSettled : (
           <Box key="sk-card" flexDirection="column" borderStyle="round" borderColor={COLORS.line} paddingX={1} rowGap="xs">
             <Box flexWrap="nowrap" alignItems="center" columnGap="sm">
               <Text bold color={COLORS.orange}>{lead.kind === 'investigate' ? 'Investigating' : 'Chore'}</Text>
@@ -2543,26 +2707,31 @@ export const register: Register = (on, options) => {
             </Box>
             <Text dimColor wrap="truncate-end">{clip(lead.steps.at(-1) ?? 'starting the worker…', room)}</Text>
             <Box key="sk-progress">
-              <Svg alt="working" source={progressSvg(COLORS.orange)} isInteractive />
+              <Svg alt="working" source={progressSvg(COLORS.orange)} height={6} isInteractive />
             </Box>
             <Text dimColor>{'Next: report back to Claude'}</Text>
           </Box>
         )
       const richFolded = (
-        <Box key="sk-folded" flexWrap="wrap" alignItems="center" columnGap="sm" rowGap="xs">
+        <Box key="sk-folded" flexWrap="nowrap" alignItems="flex-start" columnGap="sm">
+          {/* The figures wrap among themselves; the two buttons keep the top right corner. */}
+          <Box key="f-figures" flexWrap="wrap" alignItems="center" columnGap="sm" rowGap="xs" flexGrow={1} flexShrink={1} minWidth={0}>
           {small('f-title', '◆ Sidekick', { color: isOn ? COLORS.claude : undefined, dimColor: !isOn, bold: isOn })}
-          {state.mode === 'off' ? small('f-mode', '○ Off', { dimColor: true }) : small('f-mode', state.mode === 'auto' ? '● Auto' : '◌ Shadow', { color: state.mode === 'auto' ? COLORS.green : COLORS.purple, bold: true })}
+          {state.mode === 'off' ? small('f-mode', '○ Off', { dimColor: true }) : small('f-mode', state.mode === 'auto' && !isPromptKept ? '● Auto' : state.mode === 'auto' ? '◌ Shadow here' : '◌ Shadow', { color: state.mode === 'auto' && !isPromptKept ? COLORS.green : COLORS.purple, bold: true })}
           {state.isWarming && small('f-warm', 'warming up…', { color: COLORS.purple })}
-          {isOn && counts.map((c, i) => small(`c-${c.glyph}`, `${c.glyph} ${c.n} ${labels[i]}`, { color: c.n > 0 ? c.color : undefined, dimColor: c.n === 0 }))}
+          {isOn && counts.map((c, i) => small(`c-${c.glyph}`, width >= 90 ? `${c.glyph} ${c.n} ${labels[i]}` : `${c.glyph} ${c.n}`, { color: c.n > 0 ? c.color : undefined, dimColor: c.n === 0 }))}
           {isOn && small('f-saved', `saved ${savedText}`, { color: COLORS.green })}
           {isOn && small('f-cost', `cost ${costText}`, { color: COLORS.blue })}
-          <Box flexGrow={1} />
+          </Box>
+          <Box key="f-buttons" flexWrap="nowrap" alignItems="center" columnGap="sm" flexShrink={0}>
+          {tool('band-peek', () => void askPeek($), [{ text: '⌕ peek', color: COLORS.blue }])}
           {tool('band-toggle', () => void change($, s => ({ ...s, panelOpen: !s.panelOpen })), [{ text: state.panelOpen ? 'Sidekick ▴' : 'Sidekick ▾', color: COLORS.claude }])}
+          </Box>
         </Box>
       )
-      return (
-        <Box flexDirection="column" rowGap="xs">
-          {richCard ??
+      const richCards = [
+        richPeek,
+        richCard ??
             (suggestion !== undefined && !state.panelOpen && (
               <Box key="sk-card" flexDirection="column" borderStyle="round" borderColor={COLORS.line} paddingX={1} rowGap="xs">
                 <Text bold wrap="truncate-end">{`${suggestion.refines === null ? 'Teach the sidekick' : 'Improve the sidekick at'}: ${suggestion.prompt}`}</Text>
@@ -2571,11 +2740,24 @@ export const register: Register = (on, options) => {
                   {answerChips(suggestion)}
                 </Box>
               </Box>
-            ))}
+            )),
+      ]
+      return (
+        <Box flexDirection="column" rowGap="xs">
+          {bandPet === null || state.panelOpen ? (
+            richCards
+          ) : (
+            <Box key="sk-pet-row" flexWrap="nowrap" alignItems="flex-end" columnGap="sm">
+              <Box key="sk-pet-cards" flexDirection="column" rowGap="xs" flexGrow={1} flexShrink={1} minWidth={0}>
+                {richCards}
+              </Box>
+              {bandPet}
+            </Box>
+          )}
           {richPanel !== null && (
-            <Box key="sk-panel-row" flexWrap="nowrap">
-              <Box flexGrow={1} />
+            <Box key="sk-panel-row" flexWrap="nowrap" alignItems="flex-end" columnGap="sm">
               {richPanel}
+              {bandPet}
             </Box>
           )}
           {richFolded}

@@ -425,7 +425,7 @@ starting to type: it never stands between you and the prompt.
 |---|---|
 | **MODE** | Off / Shadow / Auto for this session (see [Modes](#modes)) |
 | **JUDGE**, **WORKER** | Which model judges and which does the work: Haiku or Sonnet. No Opus worker: work worth Opus belongs in the main session |
-| **PET** | Off, Mochi the quokka or Tater the capybara, in the terminal (see [Pets](#pets)) |
+| **PET** | Off, Mochi the quokka or Tater the capybara (see [Pets](#pets)) |
 | **Investigations** | Whether "look into it" messages go to the sidekick (see [Looking into things](#looking-into-things)) |
 | **Reviews** | After Claude finishes a message the judge left with it, a cheap call asks whether the sidekick could have done it. See [Learning from Claude's work](#learning-from-claudes-work). About $0.002 a review. |
 | **Draft judging** | Judge while you type, so Enter is instant. Each pause costs about $0.0001, which is the small cost that ticks up while you type. Off: messages are judged when sent, within 5 s |
@@ -481,25 +481,46 @@ most half the rows), it drops its section rules and packs LAUNCH into one row of
 notes; narrower still, the model chips read `Haiku` and `Sonnet` and the pills `On` / `Off` /
 `1×`. Every control stays.
 
+In the desktop app, VS Code and on the phone the pet is an illustration rather than pixel art: one picture per mood from `assets/pets/`, following the same moods, beside a job's card, beside the open toolbox and on the dashboard. Pick it from the **Pet** dropdown in the toolbox. A narrow window leaves it out to save room. VS Code and the phone are untested.
+
 ---
 
 ## On the desktop app, VS Code and the phone
 
 These draw real graphics, so the sidekick draws for them instead of imitating a terminal:
 
-- **The line above the prompt** is a mode badge, the counts in words, saved and cost, and a native
-  **Sidekick ▾** button.
-- **The live job card** shows the job, its latest command and an animated progress sweep.
-- **The control panel** is a compact toolbox in small type, two rows that never need a scroll:
-  dropdowns for the mode, judge and worker (buttons on the phone, which has no dropdowns) with a
-  − / + stepper for side by side; then the settings (● on, ○ off) and the shortcuts as small
-  plain buttons.
+- **The line above the prompt** is a mode badge, the counts in words, saved and cost, **⌕ peek**
+  and a native **Sidekick ▾** button.
+- **The cards above the prompt** match the terminal's: peek, the live job with an animated progress
+  sweep, the judge thinking, why a message was left with Claude, and a finished job's outcome.
+- **The control panel** is a toolbox in small type, on fixed rows: the title with a ✕; labelled
+  dropdowns for the mode, judge, worker and pet (buttons on the phone, which has no dropdowns) with a
+  − / + stepper for how many run at once; the settings (● on, ○ off); and the shortcuts. In a narrow
+  window the stepper moves up beside the title and the settings' names shorten, because the host
+  clips a tall band without scrolling it. The ✕ closes the panel when another mod's band leaves the
+  line below out of reach.
+- **The pet** is an illustration: one picture per mood, moving by itself. See [Pets](#pets).
 - **The dashboard** has DONE / SAVED / COST tiles with a 7-day trend line, one bar for where the
   cost went, and a 7-day chart; hover a bar or a day for its numbers. Each recent job is a card, and
-  a job's report shows as formatted text.
+  a job's report shows as formatted text. The record, speed, streak, learned and last job sit beside the pet.
 
 Every row wraps or truncates rather than running past the pane, and each drawing scales down to fit
 its slot. Figures deepen on a light theme so they stay readable.
+
+<img src="docs/desktop-toolbox.png" alt="the desktop toolbox: title, labelled dropdowns for mode, judge, worker and pet, a stepper, settings and shortcuts, with Tater beside it" width="100%">
+
+<img src="docs/desktop-job.png" alt="a running job's card above the prompt on the desktop, with Tater typing at a laptop beside it" width="100%">
+
+<img src="docs/desktop-dashboard.png" alt="the top of the desktop dashboard: done, saved and cost tiles, then Tater beside the record, speed and streak" width="70%">
+
+**Auto works as shadow in the desktop app.** It hands a typed message to Claude even after the sidekick
+drops it (seen on the app's 2.1.309 engine), and aborting that turn doesn't stop it either, so a worker
+would run the chore a second time. There, the judge says what it would have handed off, every message
+stays with Claude, the band reads **Shadow here**, and the toolbox's mode reads **Auto (shadow)**. The
+saved mode stays auto. `/sidekick task <text>` still runs a worker,
+because no message reaches Claude. The chat result is a plain line, as that engine can't place the box.
+VS Code is treated the same way, untested. Sessions with nobody at the prompt, such as `claude -p`,
+leave the sidekick off.
 
 ---
 
@@ -886,6 +907,7 @@ SVG or PNG. Capture them in this public repo's own checkout, so nothing private 
 
 | Version | |
 |---|---|
+| **0.11.0** | The desktop app catches up with the terminal: the band gains peek and the judge, reason and outcome cards, and the toolbox is laid out in tidy rows with a pet picker. Mochi and Tater appear as illustrated, animated pets on the band, panel and dashboard. Mode reads `Auto (shadow)` where the app keeps every message. Tater loses a tail no capybara should have had. |
 | **0.10.2** | Adds an eval of the judge's routing, with published results. No change to how the mod behaves. |
 | **0.10.1** | A side task's box warns when its commit includes a file Claude was changing during the task, and Claude is told too. README gains a section on when to use sidekick, `/btw`, `/subtask`, `/fork`, `/branch` or a herdr handoff. |
 | **0.10.0** | `/sidekick task <text>` runs right away, even mid-turn: a worker acts on it in a side task, or the message goes to Claude when its turn ends. Side tasks get stricter guard rules: named files only, nothing that moves the tree. `/sidekick` subcommands run immediately. Headlines carry the result itself. README gains badges and real screenshots. |
