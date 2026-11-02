@@ -16,7 +16,7 @@
 [![marketplace](https://img.shields.io/badge/marketplace-dmokong--plugins-2563eb)](#install)
 [![cost per chore](https://img.shields.io/badge/cost-~%240.002_per_chore-16a34a)](#cost-and-caching)
 [![side tasks](https://img.shields.io/badge/side_tasks-while_Claude_works-7fe0b8)](#side-tasks)
-[![judge eval](https://img.shields.io/badge/judge_eval-71%2F72-7fe0b8)](../../docs/evals/sidekick/judge-routing.md)
+[![judge eval](https://img.shields.io/badge/judge_eval-90%2F90-7fe0b8)](../../docs/evals/sidekick/judge-routing.md)
 [![peek](https://img.shields.io/badge/peek-read_only-a9b8ff)](#asking-what-claude-is-doing)
 [![surfaces](https://img.shields.io/badge/runs_in-terminal_%C2%B7_desktop_%C2%B7_VS_Code_%C2%B7_phone-475569)](#on-the-desktop-app-vs-code-and-the-phone)
 
@@ -601,12 +601,13 @@ that wrote a file once without naming it, and a read-only command that names the
 
 ## Sidekick or something else?
 
-The main question is whether the work needs your conversation. Sidekick's worker never sees it, which
-is why it's cheap, and why it only suits work that can be described in one message.
+The main question is how much of your conversation the work needs. Sidekick's worker gets a short
+excerpt of it, enough to know which worktree, branch or issue you mean, but none of the reasoning,
+which is why it's cheap, and why it only suits work that can be described in one message.
 
 | Use | When | Knows the conversation | Can act |
 |---|---|---|---|
-| **`/sidekick task`** | A chore or quick lookup you can state in a line: *"commit a.txt"*, *"why did the bot stop?"* | No | Yes, within the guard |
+| **`/sidekick task`** | A chore or quick lookup you can state in a line: *"commit a.txt"*, *"why did the bot stop?"* | A recent excerpt, no tool output | Yes, within the guard |
 | **`⌕ peek`** | You want to know what Claude is doing right now | Only its recent steps | No |
 | [**`/btw`**](https://code.claude.com/docs/en/interactive-mode.md#side-questions-with-%2Fbtw) | A question Claude can answer from what's already in the session | Yes | No tools |
 | [**`/subtask`**](https://code.claude.com/docs/en/commands.md) | Background work that needs the conversation, with the result returned here | Yes, a copy | Yes |
@@ -755,7 +756,7 @@ These options are the **defaults**. A change in the [control panel](#the-band-an
 | Who | Sees |
 |---|---|
 | **Judge** | Your message and the current directory. Never the conversation. |
-| **Worker** | Your message, your repo through the commands it runs, and the instruction files your main session loaded (CLAUDE.md, rules). Never the conversation, your MCP servers, your other plugins or your credential files. |
+| **Worker** | Your message, the folder your main session is in now, a recent excerpt of the conversation (what was said, and each command or file as one line, never their output), your repo through the commands it runs, and the instruction files your main session loaded (CLAUDE.md, rules). Never your MCP servers, your other plugins or your credential files. |
 | **Claude (main)** | The handoff note: what ran, SHAs, changed files, open questions, and for an investigation the path of its full record (read only if Claude needs it). Never the worker's raw output in the conversation. |
 
 All calls go through your own Claude Code login. The sidekick sends nothing anywhere else.
@@ -780,7 +781,7 @@ is read but never written; they can still lose each other's rows.
   Claude, and the job's details say `judge timed out`. Nothing is lost; press `should've been sidekick` if
   it should have been a chore.
 - **Chores and first-pass investigations only.** git and bd chores, and looking into things on this
-  machine. Anything that needs the conversation, your judgment or a code change goes to Claude by
+  machine. Anything that needs a decision from the conversation, your judgment or a code change goes to Claude by
   design, and so does debugging code (*"why does this function return null"*).
 - **Investigations don't follow up.** One question, one answer, back to Claude. They don't
   watch, schedule or reach other machines.
@@ -843,13 +844,22 @@ exactly as they do for Claude. The dashboard's last line shows what it has (`con
 was installed mid-conversation, the worker runs without them until your next `/clear` or
 compaction.
 
-It doesn't get the conversation, and it shares no prompt cache with your main session: it's a
-separate `claude -p` process on its own model. Its cache is shared across sidekick chores only.
+It also starts in the folder your main session is in **now** (a worktree Claude moved into, say),
+and it gets a recent **excerpt of the conversation**, up to 16,000 characters, newest kept: what
+you and Claude said, and each tool call as one line (the command it ran, the file it touched). Tool
+output is left out, so file contents and anything a command printed never reach it. The excerpt is
+a plain copy in the worker's first message, not a shared prompt cache: the worker is a separate
+`claude -p` process on its own model, and a cache never crosses models. Its own cache (rules and
+instruction files) is shared across sidekick chores only. The judge gets none of the conversation.
+
+If the worker still can't do the job, it stops and says why, and the sidekick hands it to Claude
+by itself with the worker's report; a job you stopped yourself stays put. A job it only partly
+did stays too, with a notification recommending you give it to Claude.
 
 **Why not fork the main conversation instead?**
 A fork has no tools (it can't run git), and it would run on your main model, re-reading the whole
 conversation at main-model prices for each chore. The sidekick is deliberately the opposite: cheap,
-tool-capable and conversation-free, which is why it only takes chores that can be done from disk.
+tool-capable, and given only an excerpt of the conversation, which is why it only takes chores that can be done from disk.
 
 **Does it ever change my code?**
 No. The worker has no Edit or Write tool and can't redirect output into files. A chore changes your
@@ -907,6 +917,7 @@ SVG or PNG. Capture them in this public repo's own checkout, so nothing private 
 
 | Version | |
 |---|---|
+| **0.12.0** | The worker starts in the folder your main session is in now (a worktree, say) and gets a recent excerpt of the conversation: what was said, and each command or file as one line, never tool output. The judge still sees only your message, but now passes chores that lean on the conversation only to say which branch, worktree or issue (*"commit what we just did"*). When the worker can't finish, the job goes to Claude by itself with its report; a partly done job comes with a recommendation to give it to Claude. Judge eval: 90/90. |
 | **0.11.0** | The desktop app catches up with the terminal: the band gains peek and the judge, reason and outcome cards, and the toolbox is laid out in tidy rows with a pet picker. Mochi and Tater appear as illustrated, animated pets on the band, panel and dashboard. Mode reads `Auto (shadow)` where the app keeps every message. Tater loses a tail no capybara should have had. |
 | **0.10.2** | Adds an eval of the judge's routing, with published results. No change to how the mod behaves. |
 | **0.10.1** | A side task's box warns when its commit includes a file Claude was changing during the task, and Claude is told too. README gains a section on when to use sidekick, `/btw`, `/subtask`, `/fork`, `/branch` or a herdr handoff. |

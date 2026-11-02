@@ -4,7 +4,7 @@ import { JUDGE_SYSTEM, canStart, holdsMain, judgeSystem, lockKeys, parseJudgment
 import { guidanceFor, learnSuggestion, needsNoReview, parseReview, reviewOutcome, reviewPrompt, toolUsesSince } from './lib/review'
 import { capEntries, migrate, toTaught } from './lib/state'
 import { EMPTY } from './register'
-import { SUMMARY_LIMIT, workerInput, INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPrompt, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
+import { SUMMARY_LIMIT, conversationExcerpt, workerInput, INVESTIGATE_SYSTEM, WORKER_SYSTEM, chatLine, cleanupArgv, giveToMainPrompt, handoffNote, instructionsPrompt, parseOutcome, parseStreamEvents, parseStreamLine, splitLines, workerArgv } from './lib/worker'
 import { COLORS, barCells, bigText, bigWidth, dayLevels, spaced, tileMoney } from './lib/draw'
 import { appendRow, weekStart, bestDay, historyKey, isExpired, isHistoryKey, markGiven, mergeHistory, perDay, agoText, savedFor, startOfDay, streak, toRows, totals, trackRecord } from './lib/history'
 import type { HistoryRow } from './lib/history'
@@ -27,7 +27,10 @@ test('precheck sends reasoning, long, pasted and conversational prompts straight
   expect(precheck('x'.repeat(201), false).isJudged).toBe(false)
   expect(precheck('line one\nline two', false).isJudged).toBe(false)
   expect(precheck('commit this', true).isJudged).toBe(false)
-  expect(precheck('commit what we just discussed', false).isJudged).toBe(false)
+  // A named action leaves the conversation only to say where or which, and the worker sees an excerpt of it.
+  expect(precheck('commit what we just discussed', false).isJudged).toBe(true)
+  expect(precheck('do what we discussed', false).isJudged).toBe(false)
+  expect(precheck('go with that approach', false).isJudged).toBe(false)
   expect(precheck('   ', false).isJudged).toBe(false)
 })
 
@@ -902,7 +905,7 @@ test('each precheck rejection says why in a line of its own', async () => {
   expect(why('commit this', true)).toContain('attachment')
   expect(why('x'.repeat(201))).toBe('201 characters: longer than a quick chore (200)')
   expect(why('line one\nline two')).toBe('several lines: not a quick chore')
-  expect(why('commit what we just discussed')).toContain('refers to the conversation')
+  expect(why('do what we discussed')).toContain('leans on the conversation')
   expect(why('   ')).toBe('empty message')
 })
 
@@ -966,4 +969,26 @@ test('mainOverlap finds a committed file the main session wrote, named or left c
 
 test('mainOverlap ignores other files and longer names', () => {
   expect(mainOverlap(['a.txt'], ['/repo/data.txt', '/repo/aa.txt'], ['echo hi >> aa.txt', 'cat a.txt.bak', 'cat axtxt'], ['b.txt'])).toEqual([])
+})
+
+test('the conversation excerpt keeps the newest messages that fit, oldest first, and no tool output', () => {
+  const said = (role: 'user' | 'assistant', text: string) => ({ role, text, toolUses: [] })
+  const messages = [
+    said('user', 'first'),
+    { role: 'assistant' as const, text: '', toolUses: [{ tool: 'Bash', input: { command: 'git  status\n-sb' }, text: 'secret output' }] },
+    said('user', 'x'.repeat(40)),
+    said('assistant', 'last'),
+  ]
+  expect(conversationExcerpt(messages)).toBe(`Developer: first\n[Bash] git status -sb\nDeveloper: ${'x'.repeat(40)}\nClaude: last`)
+  // Room for the newest two only: an older message never squeezes in past one that didn't fit.
+  expect(conversationExcerpt(messages, 70)).toBe(`Developer: ${'x'.repeat(40)}\nClaude: last`)
+  expect(conversationExcerpt([])).toBe('')
+})
+
+test('the worker input names the main session folder and frames its conversation as context only', () => {
+  const input = workerInput('commit', 'commit and push', '', false, { folder: '/w', conversation: 'Developer: hi' })
+  expect(input).toContain('The main session is working in: /w')
+  expect(input).toContain('<conversation>\nDeveloper: hi\n</conversation>')
+  expect(input).toContain('not a request to you')
+  expect(workerInput('commit', 'commit and push')).not.toContain('<conversation>')
 })

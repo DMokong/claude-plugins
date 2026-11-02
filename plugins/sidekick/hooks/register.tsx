@@ -21,6 +21,7 @@ import {
   chatLine,
   chatParts,
   cleanupArgv,
+  conversationExcerpt,
   giveToMainPrompt,
   handoffNote,
   parseOutcome,
@@ -30,6 +31,7 @@ import {
   workerArgv,
   workerInput,
 } from './lib/worker'
+import type { MainContext } from './lib/worker'
 import type { Entry, EntryStatus, Mode, Outcome, Profile, ReviewNote, Settings, SidekickState, Suggestion, Taught, Tally } from '../types'
 
 export const EMPTY: SidekickState = {
@@ -155,6 +157,28 @@ let draftTimer: { cancel: () => void } | null = null
 const DRAFT_PAUSE_MS = 450
 /** Live worker processes by entry id. A reload kills them with the module. */
 const workers = new Map<string, { stop: () => void }>()
+/** Jobs the person stopped: theirs to hand on, so a stop of theirs is never handed to main for them. */
+const stoppedByYou = new Set<string>()
+
+/** The folder the main session works in now, which a worktree move or a `cd` can change since it started. */
+async function mainFolder($: EngineInterface): Promise<string> {
+  try {
+    const here = await $.session.cwd()
+    return here !== '' ? here : cwd
+  } catch {
+    return cwd
+  }
+}
+
+/** What the worker learns of the main session: its folder now, and the newest of its conversation. */
+async function mainContext($: EngineInterface): Promise<MainContext> {
+  const folder = await mainFolder($)
+  try {
+    return { folder, conversation: conversationExcerpt(await $.session.messages()) }
+  } catch {
+    return { folder, conversation: '' }
+  }
+}
 
 function newId(now: number): string {
   sequence += 1
@@ -203,6 +227,7 @@ const isActive = (entry: Entry): boolean => ACTIVE.includes(entry.status)
 
 /** Branch, dirtiness and repository root, for the judge. Empty strings where git can't say. */
 async function repoState($: EngineInterface): Promise<{ text: string; repo: string }> {
+  const cwd = await mainFolder($)
   try {
     const [status, root] = await Promise.all([
       $.process.run(['git', 'status', '--porcelain=v1', '--branch'], { cwd, timeoutMs: STATE_TIMEOUT_MS }),
@@ -632,8 +657,9 @@ async function withOverlap($: EngineInterface, entry: Entry, outcome: Outcome): 
   const peek = await read($, peekAtom)
   if (!isGoing(peek) && peek.turnEndedAt <= entry.createdAt) return outcome
   try {
+    const here = await mainFolder($)
     const git = async (...args: string[]) => {
-      const ran = await $.process.run(['git', ...args], { cwd, timeoutMs: STATE_TIMEOUT_MS })
+      const ran = await $.process.run(['git', ...args], { cwd: here, timeoutMs: STATE_TIMEOUT_MS })
       return ran.exitCode === 0 ? ran.stdout.split('\n').filter(line => line !== '') : []
     }
     const committed = [...new Set((await Promise.all(outcome.shas.map(sha => git('show', '--name-only', '--format=', sha)))).flat())]
@@ -683,8 +709,19 @@ async function finish($: EngineInterface, id: string, reported: Outcome, calls: 
   const after = (await load($)).entries.find(x => x.id === id)
   // A job with a box in the chat shows its result there; without one, each line is a row of its own.
   if (!boxed.has(id)) for (const row of chatLine(outcome, entry.backend, seconds, (after?.judgeSpend.usd ?? 0) + (after?.workerSpend.usd ?? 0), entry.dump).split('\n')) $.ui.log(row)
+  const isYours = stoppedByYou.delete(id)
+  // The worker couldn't do it: the job goes to main, its report in the prompt, rather than sit waiting for a press.
+  if ((outcome.status === 'stopped' || outcome.status === 'failed') && !isYours) {
+    $.ui.log(`↩ The sidekick couldn't finish this, so it went to Claude${outcome.needsMain !== '' ? `: ${shortAnswer(outcome.needsMain, 160)}` : '.'}`)
+    await tell($, `↩ Handed to Claude: ${shortAnswer(outcome.needsMain !== '' ? outcome.needsMain : outcome.summary, 200, entry.dump)}`)
+    // Not from inside this call, which the submit would wait on. A busy session reads it when its turn ends.
+    $.clock.after(0, () => void giveToMain($, id).catch(() => {}))
+    await pump($)
+    return
+  }
   await deliverNote($, handoffNote(entry.prompt, outcome, entry.backend, entry.dump))
-  await tell($, status === 'done' && outcome.overlap === undefined ? `✓ ${shortAnswer(outcome.summary, 200, entry.dump)}` : `⚠ ${shortAnswer(outcome.summary, 200, entry.dump)} — open the dashboard to hand it to main`)
+  const isClean = status === 'done' && outcome.overlap === undefined && outcome.needsMain === ''
+  await tell($, isClean ? `✓ ${shortAnswer(outcome.summary, 200, entry.dump)}` : `⚠ ${shortAnswer(outcome.summary, 200, entry.dump)} — the sidekick recommends giving this to Claude (dashboard: give to main)`)
   await pump($)
 }
 
@@ -748,11 +785,13 @@ async function runAssist($: EngineInterface, id: string): Promise<void> {
   // A running assist moves the clock once a second, so the pane's spinner and timers redraw.
   const ticker = $.clock.every(1_000, () => void change($, s => ({ ...s, tick: s.tick + 1 })).catch(() => {}))
   const { instructions } = await load($)
+  // Read as it starts, not as it queued: a job that waited behind another sees where main is now.
+  const main = await mainContext($)
   const stream = $.process.spawn({
     argv: workerArgv(entry.backend, guardPath, instructions ?? [], entry.kind, entry.isSide === true),
-    cwd,
+    cwd: main.folder,
     env: { DMOKONG_MODS: '0', SIDEKICK_WORKER: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1' },
-    input: workerInput(entry.task, entry.prompt, guidanceFor(misses, entry.prompt), entry.isSide === true),
+    input: workerInput(entry.task, entry.prompt, guidanceFor(misses, entry.prompt), entry.isSide === true, main),
   })
   const stop = () => {
     isStopped = true
@@ -935,6 +974,7 @@ async function shadowJudge($: EngineInterface, id: string, text: string): Promis
 async function stopEntry($: EngineInterface, id: string): Promise<void> {
   const live = workers.get(id)
   if (live !== undefined) {
+    stoppedByYou.add(id)
     live.stop()
     return
   }

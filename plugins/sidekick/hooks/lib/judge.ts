@@ -6,8 +6,10 @@ export const MAX_JUDGED_CHARS = 200
 /** Questions that ask for reasoning, not for an action. */
 const REASONING = /^(why|how (does|do|did|come|would|should|can)|what (if|do you think|would)|should (we|i)|explain|can you explain)\b/i
 
-/** Words that point back at the conversation, which a fresh worker cannot see. */
+/** Words that point back at the conversation, which the worker sees only an excerpt of. */
 const CONVERSATIONAL = /\b(we (just|discussed|talked)|you (just|said|mentioned)|as (discussed|above)|that (idea|plan|approach))\b/i
+/** A git or bd action named outright: the conversation then only says where or which, and the worker's excerpt has that. */
+const NAMED_ACTION = /\b(git|commit|push|pull|fetch|stash|tag|bd|close|reopen)\b/i
 
 /**
  * Words that point at something running on this machine: a "why did X fail" about a service is
@@ -33,15 +35,15 @@ export function precheck(text: string, hasAttachments: boolean): Precheck {
   if (trimmed.includes('\n')) return { isJudged: false, why: 'several lines: not a quick chore' }
   const isOperational = OPERATIONAL.test(trimmed) && !CODE.test(trimmed)
   if (REASONING.test(trimmed) && !isOperational) return { isJudged: false, why: 'asks for reasoning, which stays with Claude' }
-  if (CONVERSATIONAL.test(trimmed)) return { isJudged: false, why: "refers to the conversation, which the sidekick can't see" }
+  if (CONVERSATIONAL.test(trimmed) && !NAMED_ACTION.test(trimmed)) return { isJudged: false, why: 'leans on the conversation for what to do, which stays with Claude' }
   return { isJudged: true }
 }
 
-export const JUDGE_SYSTEM = `You route a developer's chat message. Decide whether a fresh assistant with only a shell on this machine and NO memory of the conversation could fully do it.
+export const JUDGE_SYSTEM = `You route a developer's chat message. Decide whether a fresh assistant with only a shell on this machine could fully do it. It gets a recent excerpt of the conversation: what was said, and which commands ran and files were touched, but not their output and not the older history. You never see that excerpt yourself, only the message: judge whether the assistant could do it with the excerpt, so a message that leans on the recent conversation only to say what or where is not unclear for that.
 
 Answer "mechanical" only when ALL hold:
 - it is an instruction to act (git status/log/diff, commit, push, pull, fetch, branch, stash, rebase of unpushed commits, tag, bd create/update/comment/close/list), not a request for reasoning, design, debugging or code changes;
-- everything needed is on disk (the diff, git log, bd), so it does not depend on what was discussed;
+- what it needs is on disk (the diff, git log, bd) or plainly named in the recent conversation (which branch, worktree, issue or files), so "commit what we just did", "push the worktree you're in" or "close the issue we talked about" are fine; but not when the conversation would have to supply a decision (what to change, which approach, how to word a design);
 - it needs no destructive step: force-push, reset --hard, clean, deleting unmerged branches, discarding uncommitted changes, rewriting pushed commits.
 A commit message can always be written from the diff and git log, so "commit", "commit and push", "push", "pull", "git status" and the like are mechanical.
 
