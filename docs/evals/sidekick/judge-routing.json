@@ -1,11 +1,11 @@
 {
-  "when": "2026-11-01T09:40:46.929Z",
+  "when": "2026-11-02T16:23:23.439Z",
   "model": "haiku",
   "runs": 3,
-  "spentUsd": 0.004221880000000001,
+  "spentUsd": 0.00503535,
   "isCut": false,
-  "passed": 71,
-  "total": 72,
+  "passed": 90,
+  "total": 90,
   "wrongly": 0,
   "rows": [
     {
@@ -15,20 +15,20 @@
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "git status is a read-only command that needs only the on-disk repo state",
-          "usd": 0.00009491
+          "reason": "plain git status, a read-only action needing only the disk",
+          "usd": 0.00009481000000000001
         },
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "plain git status, a read-only command that depends only on the on-disk repo state",
-          "usd": 0.00009641000000000001
+          "reason": "plain git status, needs only the working tree on disk",
+          "usd": 0.00009431000000000001
         },
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "plain git status, needs only the repo state on disk",
-          "usd": 0.00009241
+          "reason": "plain git status, a read-only action needing only the repo on disk",
+          "usd": 0.00009631
         }
       ],
       "passed": 3
@@ -40,20 +40,20 @@
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "commit and push\" is a plain act-on-the-repo instruction, answerable from the diff and git log",
-          "usd": 0.00010093
+          "reason": "commit and push are plain git actions, message derivable from diff and log",
+          "usd": 0.00009683
         },
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "commit and push\" is a plain act-on-disk instruction, fully derivable from the diff and git log.",
-          "usd": 0.000032460000000000004
+          "reason": "commit and push are plain git actions, message derivable from diff and log",
+          "usd": 0.000027669999999999998
         },
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "commit and push\" is a plain act-on-the-repo instruction, fully covered by the diff and git log.",
-          "usd": 0.00003296
+          "reason": "commit and push\" is a git instruction; the diff and log supply the commit message.",
+          "usd": 0.00003017
         }
       ],
       "passed": 3
@@ -65,23 +65,23 @@
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "push it\" is a plain push, depends only on repo state on disk",
-          "usd": 0.00009491
-        },
-        {
-          "route": "main",
-          "verdict": "unclear",
-          "reason": "judge unsure: push it\" has no referent in the message; depends on conversation context",
-          "usd": 0.00009391
+          "reason": "push it\" is a plain push; the referent comes from recent conversation",
+          "usd": 0.00009731
         },
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "push\" is a plain git push, decided by the message alone",
-          "usd": 0.000024440000000000003
+          "reason": "push it\" is a plain push, which the excerpt's recent commands and branch can supply.",
+          "usd": 0.00010081
+        },
+        {
+          "route": "chore",
+          "verdict": "mechanical",
+          "reason": "push it\" is a plain push; the target is named in the recent conversation.",
+          "usd": 0.00002865
         }
       ],
-      "passed": 2
+      "passed": 3
     },
     {
       "text": "show the last 3 commits",
@@ -90,20 +90,20 @@
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "git log of the last 3 commits, read-only and fully on disk",
-          "usd": 0.00009497
+          "reason": "read-only git log of last three commits, needs no conversation context",
+          "usd": 0.00009587000000000002
         },
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "read-only git log of last 3 commits, no conversation context needed",
-          "usd": 0.00009497
+          "reason": "git log of last 3 commits, read-only, needs no conversation context",
+          "usd": 0.00002821
         },
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "read-only git log of last 3 commits, no conversation context needed",
-          "usd": 0.00009497
+          "reason": "git log of the last 3 commits, read-only and on disk",
+          "usd": 0.00002671
         }
       ],
       "passed": 3
@@ -115,20 +115,20 @@
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "commit of a.txt with a message derivable from the diff and log",
-          "usd": 0.00009452000000000001
+          "reason": "commit a named file with a message given in full",
+          "usd": 0.00009242000000000001
         },
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "plain commit of a.txt with a message derivable from the diff",
-          "usd": 0.00009452000000000001
+          "reason": "commit a named file with a message written from the diff",
+          "usd": 0.00009342000000000001
         },
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "commit a specific file with a message derivable from the diff and log.",
-          "usd": 0.00009452000000000001
+          "reason": "plain git commit of a named file, message given",
+          "usd": 0.00009292000000000001
         }
       ],
       "passed": 3
@@ -140,20 +140,20 @@
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "creating a branch is a plain git action with no destructive step, fully determined by the message.",
-          "usd": 0.00009799
+          "reason": "plain git branch creation, named target, no destructive step needed.",
+          "usd": 0.00009639
         },
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "creating a branch is a git action fully determined by the name given.",
-          "usd": 0.00002502
+          "reason": "creating a branch is a plain git action with a fixed name",
+          "usd": 0.000026229999999999998
         },
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "creating a branch is a plain git action fully determined by the name given",
-          "usd": 0.00002552
+          "reason": "plain git branch creation, named target, no decision or destructive step needed",
+          "usd": 0.00002823
         }
       ],
       "passed": 3
@@ -165,20 +165,20 @@
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "tagging the current commit is a git action fully determined by the command.",
-          "usd": 0.00009449999999999999
+          "reason": "tagging the current commit is a plain git action, needs no decision.",
+          "usd": 0.0000969
         },
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "tagging the current commit is a git action fully determined by the command and repo state",
-          "usd": 0.000096
+          "reason": "git tag of the current commit is a plain, non-destructive action",
+          "usd": 0.00009640000000000001
         },
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "tagging the current commit is a plain git tag action with no destructive step",
-          "usd": 0.00002653
+          "reason": "tagging HEAD is a plain git action; the commit is identified from the repo state.",
+          "usd": 0.00003074000000000001
         }
       ],
       "passed": 3
@@ -190,20 +190,20 @@
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "bd create is a listed mechanical bd action, needing only the message text.",
-          "usd": 0.00009602
+          "reason": "bd create is a listed tracker command, and the title comes from the message.",
+          "usd": 0.00009742
         },
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "bd create is a plain issue-tracker command, needs only the message text",
-          "usd": 0.00009552000000000001
+          "reason": "bd create is an issue-tracker action; title is derivable from the message.",
+          "usd": 0.00002876
         },
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "bd create is a listed tracker command, and the bug title comes from the message itself",
-          "usd": 0.00009702
+          "reason": "bd create is a listed issue-tracker action, and the bug text is in the message.",
+          "usd": 0.000030259999999999998
         }
       ],
       "passed": 3
@@ -215,20 +215,95 @@
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "bd close of a named issue needs only the bd tracker on disk",
-          "usd": 0.00009498
+          "reason": "bd close of a named issue, no code or destructive step",
+          "usd": 0.00009488000000000001
         },
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "bd issue close is a listed bd action, needs no destructive step",
-          "usd": 0.00009498
+          "reason": "bd close of a named issue, plain tracker command, no decision needed",
+          "usd": 0.00009738
         },
         {
           "route": "chore",
           "verdict": "mechanical",
-          "reason": "closing a bd issue is a listed bd operation, needs only bd state",
-          "usd": 0.00002701
+          "reason": "bd close of a named issue, needs no decision or destructive step",
+          "usd": 0.00002722
+        }
+      ],
+      "passed": 3
+    },
+    {
+      "text": "commit what we just did",
+      "expect": "chore",
+      "runs": [
+        {
+          "route": "chore",
+          "verdict": "mechanical",
+          "reason": "commit of recent work, message derivable from diff and log",
+          "usd": 0.00009485
+        },
+        {
+          "route": "chore",
+          "verdict": "mechanical",
+          "reason": "commit of recent work, message derivable from diff and log",
+          "usd": 0.00002569
+        },
+        {
+          "route": "chore",
+          "verdict": "mechanical",
+          "reason": "git commit of recent work, message derivable from diff and log",
+          "usd": 0.00002619
+        }
+      ],
+      "passed": 3
+    },
+    {
+      "text": "push the worktree you're working in",
+      "expect": "chore",
+      "runs": [
+        {
+          "route": "chore",
+          "verdict": "mechanical",
+          "reason": "push of the current worktree, a git command needing only the recent conversation for the branch.",
+          "usd": 0.00009938000000000001
+        },
+        {
+          "route": "chore",
+          "verdict": "mechanical",
+          "reason": "push of current worktree is a plain git push, needs no conversation details",
+          "usd": 0.00009688000000000001
+        },
+        {
+          "route": "chore",
+          "verdict": "mechanical",
+          "reason": "push of the current worktree, a git command needing only the conversation's named branch",
+          "usd": 0.000028720000000000003
+        }
+      ],
+      "passed": 3
+    },
+    {
+      "text": "close the bd issue we just talked about",
+      "expect": "chore",
+      "runs": [
+        {
+          "route": "chore",
+          "verdict": "mechanical",
+          "reason": "bd issue close is a listed bd action, issue named by recent conversation",
+          "usd": 0.00009790000000000001
+        },
+        {
+          "route": "chore",
+          "verdict": "mechanical",
+          "reason": "bd issue close is a listed bd action, issue named in conversation",
+          "usd": 0.0000969
+        },
+        {
+          "route": "chore",
+          "verdict": "mechanical",
+          "reason": "bd close of the issue named in recent conversation",
+          "usd": 0.0000939
         }
       ],
       "passed": 3
@@ -240,20 +315,20 @@
         {
           "route": "look",
           "verdict": "investigate",
-          "reason": "checking logs of a service running on this machine",
-          "usd": 0.00009049000000000001
+          "reason": "checking logs of acme-bot, a service on this machine",
+          "usd": 0.00009489000000000001
         },
         {
           "route": "look",
           "verdict": "investigate",
           "reason": "checking logs of acme-bot, a service running on this machine",
-          "usd": 0.000024520000000000002
+          "usd": 0.000026229999999999998
         },
         {
           "route": "look",
           "verdict": "investigate",
           "reason": "checking logs of acme-bot, a service on this machine",
-          "usd": 0.00002402
+          "usd": 0.00002573
         }
       ],
       "passed": 3
@@ -265,20 +340,20 @@
         {
           "route": "look",
           "verdict": "investigate",
-          "reason": "checking why a bot on this machine stopped replying",
-          "usd": 0.00009202
+          "reason": "asks why a bot on this machine stopped replying",
+          "usd": 0.00009392000000000001
         },
         {
           "route": "look",
           "verdict": "investigate",
-          "reason": "checking logs and health of a running bot on this machine",
-          "usd": 0.00009202
+          "reason": "checks why a bot on this machine stopped replying",
+          "usd": 0.00002476
         },
         {
           "route": "look",
           "verdict": "investigate",
-          "reason": "checking why a bot on this machine stopped replying",
-          "usd": 0.000023049999999999998
+          "reason": "asks why a bot on this machine stopped replying",
+          "usd": 0.00002476
         }
       ],
       "passed": 3
@@ -290,20 +365,20 @@
         {
           "route": "look",
           "verdict": "investigate",
-          "reason": "asks whether a scheduled job on this machine is running",
-          "usd": 0.00009247
+          "reason": "asks whether a nightly job running on this machine",
+          "usd": 0.00009337000000000001
         },
         {
           "route": "look",
           "verdict": "investigate",
-          "reason": "checks whether a scheduled job runs on this machine",
-          "usd": 0.000023500000000000002
+          "reason": "asks whether a scheduled job is running on this machine",
+          "usd": 0.00009437
         },
         {
           "route": "look",
           "verdict": "investigate",
-          "reason": "checks whether a scheduled job runs on this machine",
-          "usd": 0.000023500000000000002
+          "reason": "asks whether a scheduled job is running on this machine",
+          "usd": 0.000025209999999999997
         }
       ],
       "passed": 3
@@ -316,19 +391,19 @@
           "route": "look",
           "verdict": "investigate",
           "reason": "restarting a service running on this machine",
-          "usd": 0.00008948
+          "usd": 0.00009138000000000001
         },
         {
           "route": "look",
           "verdict": "investigate",
           "reason": "restarting a service running on this machine",
-          "usd": 0.00008948
+          "usd": 0.00002222
         },
         {
           "route": "look",
           "verdict": "investigate",
-          "reason": "restarting a service running on this machine",
-          "usd": 0.00002051
+          "reason": "restarts a service running on this machine",
+          "usd": 0.00002222
         }
       ],
       "passed": 3
@@ -341,19 +416,19 @@
           "route": "main",
           "verdict": "needs-main",
           "reason": "force-push is destructive, excluded from mechanical routing",
-          "usd": 0.00009396
+          "usd": 0.00009586000000000001
         },
         {
           "route": "main",
           "verdict": "needs-main",
-          "reason": "force-push is destructive, rewriting pushed history",
-          "usd": 0.00002399
+          "reason": "force-push is destructive, so it falls outside mechanical.",
+          "usd": 0.000027199999999999997
         },
         {
           "route": "main",
           "verdict": "needs-main",
-          "reason": "force-push is destructive, rewriting pushed history on main",
-          "usd": 0.000024990000000000003
+          "reason": "force-push is destructive, excluded from mechanical routing",
+          "usd": 0.0000267
         }
       ],
       "passed": 3
@@ -365,20 +440,20 @@
         {
           "route": "main",
           "verdict": "needs-main",
-          "reason": "destructive reset --hard discarding commits, not a mechanical action",
-          "usd": 0.00009551000000000001
+          "reason": "destructive reset --hard, not a mechanical action",
+          "usd": 0.00009491000000000001
         },
         {
           "route": "main",
           "verdict": "needs-main",
-          "reason": "destructive hard reset discarding commits, not a mechanical git action",
-          "usd": 0.00009551000000000001
+          "reason": "hard reset discards uncommitted changes, a destructive step",
+          "usd": 0.000027249999999999998
         },
         {
           "route": "main",
           "verdict": "needs-main",
-          "reason": "destructive git reset --hard, discarding commits and changes",
-          "usd": 0.00002504
+          "reason": "destructive reset --hard discards work, not a mechanical git action",
+          "usd": 0.00002775
         }
       ],
       "passed": 3
@@ -390,20 +465,20 @@
         {
           "route": "main",
           "verdict": "needs-main",
-          "reason": "discarding uncommitted changes is destructive, not a mechanical git step",
-          "usd": 0.0000965
+          "reason": "discarding uncommitted changes is destructive, excluded from mechanical",
+          "usd": 0.0000984
         },
         {
           "route": "main",
           "verdict": "needs-main",
-          "reason": "discarding uncommitted changes is destructive, not a mechanical git action",
-          "usd": 0.00002753
+          "reason": "discarding uncommitted changes is destructive, excluded from mechanical",
+          "usd": 0.0000984
         },
         {
           "route": "main",
           "verdict": "needs-main",
-          "reason": "discarding uncommitted changes is destructive, not a mechanical step",
-          "usd": 0.000027029999999999997
+          "reason": "discards uncommitted changes, a destructive step, so not mechanical",
+          "usd": 0.00002874
         }
       ],
       "passed": 3
@@ -415,20 +490,20 @@
         {
           "route": "main",
           "verdict": "needs-main",
+          "reason": "deleting an unmerged branch is a destructive step",
+          "usd": 0.00009493000000000001
+        },
+        {
+          "route": "main",
+          "verdict": "needs-main",
           "reason": "deleting an unmerged branch is destructive, not a mechanical step",
-          "usd": 0.00009603
+          "usd": 0.00002877
         },
         {
           "route": "main",
           "verdict": "needs-main",
-          "reason": "deleting unmerged branch is destructive, not a mechanical step",
-          "usd": 0.00009553
-        },
-        {
-          "route": "main",
-          "verdict": "needs-main",
-          "reason": "deleting unmerged branch is destructive, needs conversation context",
-          "usd": 0.000026059999999999998
+          "reason": "deleting an unmerged branch is destructive, not mechanical",
+          "usd": 0.00002777
         }
       ],
       "passed": 3
@@ -440,20 +515,20 @@
         {
           "route": "main",
           "verdict": "needs-main",
-          "reason": "renames a code function, which is an edit needing the conversation",
-          "usd": 0.00009347000000000001
+          "reason": "renames a code function, which is a code change",
+          "usd": 0.00009237000000000001
         },
         {
           "route": "main",
           "verdict": "needs-main",
-          "reason": "renames a code function, which is an edit needing the conversation",
-          "usd": 0.0000245
+          "reason": "renaming a code function is a code change, not a shell action",
+          "usd": 0.00009487
         },
         {
           "route": "main",
           "verdict": "needs-main",
-          "reason": "renames a code function, an edit that needs the conversation",
-          "usd": 0.000024
+          "reason": "renames a code function, which is a code change",
+          "usd": 0.00002321
         }
       ],
       "passed": 3
@@ -465,20 +540,20 @@
         {
           "route": "main",
           "verdict": "needs-main",
-          "reason": "fixing a failing test edits code, needs conversation context",
-          "usd": 0.00009346
+          "reason": "fixing a failing test means debugging and code changes",
+          "usd": 0.00009436000000000001
         },
         {
           "route": "main",
           "verdict": "needs-main",
-          "reason": "fixing a failing test requires code debugging and edits",
-          "usd": 0.00009296
+          "reason": "fixing a failing test means debugging and changing code",
+          "usd": 0.0000252
         },
         {
           "route": "main",
           "verdict": "needs-main",
-          "reason": "debugging a failing test requires code changes and reasoning",
-          "usd": 0.00002449
+          "reason": "fixing a failing test means debugging and code changes",
+          "usd": 0.0000252
         }
       ],
       "passed": 3
@@ -540,19 +615,19 @@
         {
           "route": "main",
           "verdict": "precheck",
-          "reason": "refers to the conversation, which the sidekick can't see",
+          "reason": "leans on the conversation for what to do, which stays with Claude",
           "usd": 0
         },
         {
           "route": "main",
           "verdict": "precheck",
-          "reason": "refers to the conversation, which the sidekick can't see",
+          "reason": "leans on the conversation for what to do, which stays with Claude",
           "usd": 0
         },
         {
           "route": "main",
           "verdict": "precheck",
-          "reason": "refers to the conversation, which the sidekick can't see",
+          "reason": "leans on the conversation for what to do, which stays with Claude",
           "usd": 0
         }
       ],
@@ -565,20 +640,20 @@
         {
           "route": "main",
           "verdict": "needs-main",
-          "reason": "try the other approach\" refers to earlier conversation context",
-          "usd": 0.0000935
+          "reason": "try the other approach\" needs the conversation to know what to change",
+          "usd": 0.0000959
         },
         {
           "route": "main",
-          "verdict": "unclear",
-          "reason": "judge unsure: try the other approach\" refers to an earlier discussion not in this message",
-          "usd": 0.00002603
+          "verdict": "needs-main",
+          "reason": "try the other approach\" needs the conversation to know what approach to take",
+          "usd": 0.0000969
         },
         {
           "route": "main",
-          "verdict": "unclear",
-          "reason": "judge unsure: message only says \"try the other approach\" with no referent",
-          "usd": 0.00002253
+          "verdict": "needs-main",
+          "reason": "try the other approach\" needs the prior conversation to pick a fix",
+          "usd": 0.00002824
         }
       ],
       "passed": 3
@@ -590,20 +665,95 @@
         {
           "route": "main",
           "verdict": "needs-main",
-          "reason": "refactoring the parser edits code, which needs the conversation",
-          "usd": 0.00009409
-        },
-        {
-          "route": "main",
-          "verdict": "needs-main",
-          "reason": "refactoring parser code requires design and code changes",
-          "usd": 0.00009209
+          "reason": "refactoring parser code is a code change, not a mechanical git action",
+          "usd": 0.00009699
         },
         {
           "route": "main",
           "verdict": "needs-main",
           "reason": "refactoring the parser edits code, which needs the conversation",
-          "usd": 0.000025120000000000003
+          "usd": 0.00009599000000000001
+        },
+        {
+          "route": "main",
+          "verdict": "needs-main",
+          "reason": "refactoring the parser edits code, which needs the conversation",
+          "usd": 0.00009599000000000001
+        }
+      ],
+      "passed": 3
+    },
+    {
+      "text": "go with that approach",
+      "expect": "main",
+      "runs": [
+        {
+          "route": "main",
+          "verdict": "precheck",
+          "reason": "leans on the conversation for what to do, which stays with Claude",
+          "usd": 0
+        },
+        {
+          "route": "main",
+          "verdict": "precheck",
+          "reason": "leans on the conversation for what to do, which stays with Claude",
+          "usd": 0
+        },
+        {
+          "route": "main",
+          "verdict": "precheck",
+          "reason": "leans on the conversation for what to do, which stays with Claude",
+          "usd": 0
+        }
+      ],
+      "passed": 3
+    },
+    {
+      "text": "commit it once you've fixed the bug we discussed",
+      "expect": "main",
+      "runs": [
+        {
+          "route": "main",
+          "verdict": "needs-main",
+          "reason": "fixing the bug requires code changes, which need the conversation",
+          "usd": 0.00009595
+        },
+        {
+          "route": "main",
+          "verdict": "needs-main",
+          "reason": "fixing the bug is a code change, which needs the conversation",
+          "usd": 0.00002679
+        },
+        {
+          "route": "main",
+          "verdict": "needs-main",
+          "reason": "fixing the bug requires code changes, which needs the discussion",
+          "usd": 0.000027289999999999998
+        }
+      ],
+      "passed": 3
+    },
+    {
+      "text": "release it as 0.12.0",
+      "expect": "main",
+      "runs": [
+        {
+          "route": "main",
+          "verdict": "needs-main",
+          "reason": "release needs version bump and changelog, which conversation must supply",
+          "usd": 0.00013578
+        },
+        {
+          "route": "main",
+          "verdict": "needs-main",
+          "reason": "releasing as 0.12.0 requires bumping version files and tagging, decisions the conversation must supply",
+          "usd": 0.00003422000000000001
+        },
+        {
+          "route": "main",
+          "verdict": "needs-main",
+          "reason": "release steps depend on repo conventions and version files, unclear",
+          "usd": 0.00002672
         }
       ],
       "passed": 3

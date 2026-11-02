@@ -43,6 +43,10 @@ type World = {
   dirty?: string
   /** The main session's steps, as the peek log holds them from the start. */
   peekSteps?: unknown[]
+  /** Where the main session works now, as `$.session.cwd()` answers. */
+  mainCwd?: string
+  /** The main session's conversation, as `$.session.messages()` answers. */
+  mainMessages?: unknown[]
 }
 
 let peeks: Record<string, unknown>[] = []
@@ -105,6 +109,7 @@ function world(on: On, w: World) {
     resubmitted: [] as string[],
     spawnedIn: [] as unknown[],
     spawned: [] as string[][],
+    inputs: [] as string[],
     written: [] as { path: string; text: string }[],
     ran: [] as string[][],
     judged: 0,
@@ -117,6 +122,9 @@ function world(on: On, w: World) {
     release: () => release(),
   }
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  // Only where a test sets them: the review tests read the engine's own transcript.
+  if (w.mainCwd !== undefined) on('session.cwd', async () => ({ value: w.mainCwd! }))
+  if (w.mainMessages !== undefined) on('session.messages', async () => ({ value: w.mainMessages as never }))
   on('turn.complete', async () => ({ text: '' }))
   // The engine's own answer to a context build: the blocks it was given.
   on('prompt.context', async (_$, e) => ({ blocks: e.blocks }))
@@ -182,6 +190,7 @@ function world(on: On, w: World) {
   on('process.spawn', async function* (_$, e) {
     seen.spawned.push([...e.argv])
     seen.spawnedIn.push(e.cwd)
+    seen.inputs.push(String(e.input ?? ''))
     yield { stream: 'stdout' as const, text: `${JSON.stringify({ type: 'system', subtype: 'init', session_id: WORKER_SESSION })}\n` }
     yield { stream: 'stdout' as const, text: `${JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', input: { command: 'git commit -m x' } }] } })}\n` }
     if (w.workerGate !== undefined) await w.workerGate
@@ -2673,3 +2682,70 @@ test('on the desktop the pet shows beside a job and in the dashboard, and an unr
   await band.unmount()
 })
 
+
+const WORKTREE = '/repo/.worktrees/feat'
+/** A main session that moved into a worktree and read a file holding a secret. */
+const MOVED = [
+  { role: 'user', text: 'work on the feat branch in its worktree', toolUses: [] },
+  {
+    role: 'assistant',
+    text: 'Switching to the worktree.',
+    toolUses: [
+      { tool_use_id: 't1', tool: 'Bash', input: { command: `cd ${WORKTREE} && git status` }, text: 'On branch feat' },
+      { tool_use_id: 't2', tool: 'Read', input: { file_path: `${WORKTREE}/config.txt` }, text: 'TOKEN=hunter2' },
+    ],
+  },
+]
+
+test('the worker runs where the main session is now and reads its conversation; the judge does not', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: DONE, mainCwd: WORKTREE, mainMessages: MOVED })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'done')
+
+  expect(seen.spawnedIn[0]).toBe(WORKTREE)
+  const input = seen.inputs[0] ?? ''
+  expect(input).toContain(`The main session is working in: ${WORKTREE}`)
+  expect(input).toContain('Developer: work on the feat branch in its worktree')
+  expect(input).toContain(`[Bash] cd ${WORKTREE} && git status`)
+  expect(input).toContain(`[Read] ${WORKTREE}/config.txt`)
+  // What a tool printed never reaches the worker.
+  expect(input).not.toContain('hunter2')
+  expect(input).not.toContain('On branch feat')
+  // The judge decides from the message alone.
+  expect(seen.judgments.join('\n')).not.toContain('feat branch')
+})
+
+const STOPPED = '{"status":"stopped","summary":"Two worktrees have unpushed work; not sure which one is meant","commands":["git worktree list"],"shas":[],"changed":[],"uncertain":[],"needsMain":"Which worktree should be pushed?"}'
+
+test('a worker that cannot finish hands the job to main by itself, its report in the prompt', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: STOPPED })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'stopped')
+  for (let i = 0; i < 20 && seen.resubmitted.length === 0; i += 1) await clock.advance(10)
+
+  expect(seen.resubmitted).toHaveLength(1)
+  expect(seen.resubmitted[0]).toContain('tried my request "commit and push" and handed it back. Please take over.')
+  expect(seen.resubmitted[0]).toContain('Which worktree should be pushed?')
+  expect(seen.logs.some(line => line.startsWith("↩ The sidekick couldn't finish this, so it went to Claude: Which worktree"))).toBe(true)
+  // The prompt carries the report, so no separate note is left for main.
+  expect(seen.appended).toEqual([])
+})
+
+const PARTIAL = '{"status":"partial","summary":"Committed 3f2a91c; the push was rejected","commands":["git commit","git push"],"shas":["3f2a91c"],"changed":["a.txt"],"uncertain":[],"needsMain":"Pull and push again."}'
+
+test('a partly done job stays put and the sidekick recommends giving it to main', async ($, on) => {
+  const seen = world(on, { judge: MECHANICAL, worker: PARTIAL })
+  await $.session.start(START)
+  await $.command.run({ command: 'sidekick', args: 'auto', origin: { kind: 'composer' }, presentation: 'inline' } as never)
+  await $.prompt.submit({ text: 'commit and push', ...TYPED })
+  await until($, x => x.entries[0]?.status === 'done')
+  await clock.advance(50)
+
+  expect(seen.resubmitted).toEqual([])
+  expect(seen.notified.some(text => text.includes('recommends giving this to Claude'))).toBe(true)
+  expect(seen.appended[0]).toContain('Needs you: Pull and push again.')
+})
